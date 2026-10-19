@@ -23,7 +23,8 @@ struct ExternalMsaaPublicationStatistics final {
 };
 // One session's fixed observation leaf only. Exact owned-file deletion and
 // non-replacing publication tolerate a reader-held delete-pending gap using
-// next-frame retries, never sleeps, foreign-leaf replacement or unbounded I/O.
+// next-frame retries, never sleeps or foreign-leaf replacement. Retry counts
+// are bounded; individual OS writes/flushes remain synchronous without a deadline.
 class ExternalMsaaObservationPublisher final {
 public:
     static constexpr unsigned maximum_consecutive_attempts=8;
@@ -51,6 +52,13 @@ struct ExternalSettingsLoad final {
 };
 [[nodiscard]] ExternalSettingsLoad load_external_settings(const std::filesystem::path&, const core::ExternalLaunchConfiguration& defaults);
 [[nodiscard]] bool save_external_settings(const std::filesystem::path&, const core::ExternalLaunchConfiguration&);
+// Returns only this user's project-owned settings location, without creating
+// directories, opening resources or changing any stock configuration.
+[[nodiscard]] std::optional<std::filesystem::path> default_external_settings_path();
+// Read/merge/atomic-replace serialized against other project clients. Only
+// fields explicitly edited since baseline overwrite the latest stored values.
+[[nodiscard]] bool merge_external_settings(const std::filesystem::path&,
+    const core::ExternalLaunchConfiguration& baseline,const core::ExternalLaunchConfiguration& edited);
 struct ExternalChildStatus final {
     bool running{};
     std::optional<std::uint32_t> exit_code;
@@ -83,6 +91,17 @@ struct ExternalFailureMarkers {
     std::string primary_reason;
     std::string cleanup_reason;
 };
+// Current application phase is independent of immutable failures from previous
+// attempts. A validated new marker wins; historical failures are a fallback
+// only when no current marker exists. Cancellation retains native ownership.
+[[nodiscard]] std::string external_progress_stage(std::string_view previous_stage,
+    const std::optional<ExternalStatusMarker>& current_marker,
+    const ExternalFailureMarkers& history,bool gameplay_receipt_ready,bool cancelled);
+// Application shutdown is not gameplay acceptance, and cannot hide a nonzero
+// native exit or forced termination even after a successful reconnect.
+[[nodiscard]] bool external_application_close_succeeded(
+    const std::optional<ExternalStatusMarker>& final_marker,
+    std::optional<std::uint32_t> exit_code,bool forced) noexcept;
 // Scan the bounded retained capture, not just the last status in a polling
 // interval. A later cleanup failure must never replace the original error.
 [[nodiscard]] ExternalFailureMarkers external_failure_markers(std::string_view);

@@ -326,6 +326,7 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
     constexpr auto weapon_actions = permitted_actions | attack | reload;
     constexpr auto use = gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::use);
     constexpr auto secondary = gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::attack_secondary);
+    constexpr auto scoreboard = gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::scoreboard);
     const bool secondary_policy = context.reference_button_policy ==
         GoldSrcReferenceButtonPolicy::jump_duck_primary_secondary_reload_use;
     const bool use_policy = secondary_policy || context.reference_button_policy ==
@@ -335,7 +336,7 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
     const auto observed_actions = intent.held_buttons() |
         intent.pressed_buttons() | intent.released_buttons() |
         context.one_shot_buttons | context.edge_triggered_buttons;
-    if ((use_policy && (observed_actions & ~(weapon_actions | use | (secondary_policy ? secondary : 0U))) != 0U) ||
+    if ((use_policy && (observed_actions & ~(weapon_actions | use | (secondary_policy ? secondary | scoreboard : 0U))) != 0U) ||
         (!use_policy && !weapons &&
          context.reference_button_policy != GoldSrcReferenceButtonPolicy::none &&
          context.reference_button_policy != GoldSrcReferenceButtonPolicy::jump_duck) ||
@@ -423,6 +424,10 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
                  ? kReferenceGoldSrcButtonAttack : 0U) |
             (secondary_policy && (actions & secondary) != 0U
                  ? kReferenceGoldSrcButtonAttack2 : 0U) |
+            // HLDS publishes svc_pings while IN_SCORE is held. This is an
+            // ordinary immutable command bit, not an extra client request.
+            (secondary_policy && (actions & scoreboard) != 0U
+                 ? kReferenceGoldSrcButtonScore : 0U) |
             (weapons && (actions & reload) != 0U
                  ? kReferenceGoldSrcButtonReload : 0U) |
             (use_policy && (actions & use) != 0U ? kReferenceGoldSrcButtonUse : 0U));

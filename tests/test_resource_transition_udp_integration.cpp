@@ -1100,7 +1100,7 @@ manifest_resource_entries(const PrecacheManifestIntegrationScenario scenario)
     } else if (scenario == ResourceListIntegrationScenario::nonzero_padding) {
         resource_fixture::set_bit(
             message.bytes,
-            message.padding_start_bit,
+            message.padding_start_bit + 1U,
             true);
     } else if (scenario == ResourceListIntegrationScenario::trailing_data) {
         message.bytes.push_back(std::byte{5U});
@@ -2015,7 +2015,11 @@ void run_resource_list(
     TraceCounts traces;
     auto prepared = prepared_request_with_session(releases);
     auto list_config = resource_list_config();
-    if (scenario == ResourceListIntegrationScenario::resource_size_limit) {
+    if (scenario == ResourceListIntegrationScenario::excessive_count) {
+        // This fixture advertises 1025 entries. The wire-compatible default
+        // now accepts that count; exercise an explicitly constrained caller.
+        list_config.resource_list.maximum_resource_count = 1024U;
+    } else if (scenario == ResourceListIntegrationScenario::resource_size_limit) {
         list_config.resource_list.maximum_resource_declared_size = 999U;
     } else if (scenario ==
                ResourceListIntegrationScenario::resource_total_size_limit) {
@@ -5821,12 +5825,17 @@ void run_precache_manifest_integration(
         CHECK(manifest.model_slots().slot_count() == 4'096U);
         CHECK(manifest.generic_slots().slot_count() == 4'096U);
         CHECK(manifest.event_script_slots().slot_count() == 4'096U);
-        CHECK(manifest.decal_slots().slot_count() == 4'096U);
+        CHECK(manifest.decal_slots().slot_count() == 0U);
         CHECK_FALSE(manifest.sound_slots().entry_offset(4'094U));
         CHECK(manifest.sound_slots().entry_offset(4'095U) == 1U);
         CHECK(manifest.generic_slots().entry_offset(4'095U) == 0U);
         CHECK(manifest.event_script_slots().entry_offset(4'095U) == 3U);
-        CHECK(manifest.decal_slots().entry_offset(4'095U) == 4U);
+        CHECK_FALSE(manifest.decal_slots().entry_offset(4'095U));
+        CHECK_FALSE(manifest.find(goldsrc::ResourceType::decal, 4'095U));
+        REQUIRE(manifest.entries().size() > 4U);
+        CHECK(manifest.entries()[4U].resource_type() == goldsrc::ResourceType::decal);
+        CHECK(manifest.entries()[4U].resource_index() == 4'095U);
+        CHECK(manifest.entries()[4U].wire_ordinal() == 4U);
         break;
     case PrecacheManifestIntegrationScenario::malicious_name:
         CHECK(handshake.state() ==

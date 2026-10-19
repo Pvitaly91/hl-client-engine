@@ -90,6 +90,9 @@ class SceneTarget final {
         }
     };
 public:
+    void reset_session_resources() noexcept {
+        release();statistics_={};allocated_extent_={};initialized_=false;
+    }
     void begin(unsigned requested,RenderExtent extent,const SceneTargetFrame& frame) {
         statistics_.scene_extent=extent;
         statistics_.resolve_extent=extent;

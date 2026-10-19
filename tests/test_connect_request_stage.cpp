@@ -1001,6 +1001,12 @@ TEST_CASE("Connect trace is metadata-only and cannot duplicate sends through thr
     CHECK(events.back().authentication_size ==
           kSyntheticProtectedAuthentication.size() +
               hlclient::goldsrc::kObservedConnectAuthenticationSuffixSize);
+    CHECK(events.back().authentication_suffix_size ==
+          hlclient::goldsrc::kObservedConnectAuthenticationSuffixSize);
+    REQUIRE(events.back().authentication_line_delimiter.has_value());
+    const auto& sent_bytes=transport.sent.back().payload;
+    const auto boundary=sent_bytes.size()-*events.back().authentication_suffix_size;
+    CHECK(*events.back().authentication_line_delimiter==(sent_bytes[boundary-1U]==std::byte{0x0a}));
     CHECK(events.back().protocol_info_size ==
           hlclient::goldsrc::kObservedConnectProtocolInfoSize);
 }

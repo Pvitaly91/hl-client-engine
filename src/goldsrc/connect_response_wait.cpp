@@ -53,7 +53,8 @@ namespace {
 
 [[nodiscard]] bool is_connect_response_type(const std::byte type) noexcept
 {
-    return type == kConnectAcceptedResponseClass || type == kConnectRejectedResponseClass;
+    return type == kConnectAcceptedResponseClass || type == kConnectRejectedResponseClass ||
+           type == kConnectPasswordRejectedResponseClass;
 }
 
 } // namespace

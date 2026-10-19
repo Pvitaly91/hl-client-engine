@@ -77,7 +77,7 @@ TEST_CASE("SDL keyboard translation uses physical scancodes only", "[platform][s
 
     SDL_Event unknown{};
     unknown.type = SDL_EVENT_KEY_DOWN;
-    unknown.key.scancode = SDL_SCANCODE_Z;
+    unknown.key.scancode = SDL_SCANCODE_F24;
     unknown.key.key = SDLK_W;
     CHECK_FALSE(translator.translate(unknown));
 }

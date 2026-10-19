@@ -1,6 +1,10 @@
 # This executable never links or includes the concrete game. The same host
 # and engine objects are used by the ordinary client.
 add_executable(hlclient_core_api_tests
+    ../test_multiplayer_timeline.cpp
+    ../test_movement_tangent_rounding.cpp
+    ../test_console_server_text_e33.cpp
+    ../test_console_e33.cpp
     ../test_post_movement_effect.cpp
     ../test_reference_brush_boundary_recovery.cpp
     ../test_remote_snapshot_buffer_e32.cpp
@@ -9,6 +13,7 @@ add_executable(hlclient_core_api_tests
     ../test_external_diagnostics_e31.cpp
     ../test_external_session_e31.cpp
     ../test_movement_diagnostics_e32.cpp
+    ../test_priority_movement_capture_b080.cpp
     ../test_movement_session_diagnostics.cpp
     ../test_remote_movement_diagnostics.cpp
     ../test_reference_lift_top_e32_1.cpp
@@ -48,6 +53,7 @@ add_executable(hlclient_core_api_tests
     ../test_render_camera_math.cpp
     ../test_render_line_geometry.cpp)
 target_link_libraries(hlclient_core_api_tests PRIVATE
+    hlclient::console
     hlclient::goldsrc_hud_assets
     hlclient::goldsrc_sky_assets
     hlclient::session_receipts
@@ -68,7 +74,7 @@ target_link_libraries(hlclient_core_api_tests PRIVATE
     hlclient_goldsrc_bsp hlclient_goldsrc_world_texture_import
     hlclient_goldsrc_lightmaps hlclient_world_render_package)
 if(WIN32)
-    target_link_libraries(hlclient_core_api_tests PRIVATE hlclient::windows_secure_output)
+    target_link_libraries(hlclient_core_api_tests PRIVATE hlclient::windows_secure_output hlclient::external_launcher)
 endif()
 target_compile_features(hlclient_core_api_tests PRIVATE cxx_std_20)
 target_compile_definitions(hlclient_core_api_tests PRIVATE HLCLIENT_HAS_GAME_HALFLIFE=0)

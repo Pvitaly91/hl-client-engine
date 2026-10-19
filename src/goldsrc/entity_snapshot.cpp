@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 namespace hlclient::goldsrc {
@@ -1246,9 +1247,6 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
     }
 
     try {
-        std::vector<EntitySnapshotState> next;
-        next.reserve(
-            must_evict ? snapshots_.size() : snapshots_.size() + 1U);
         const auto first = must_evict ? 1U : 0U;
         std::size_t next_accounted = 0U;
         for (std::size_t index = first; index < snapshots_.size(); ++index) {
@@ -1262,7 +1260,6 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
             }
             next_accounted +=
                 snapshots_[index].statistics().accounted_value_bytes;
-            next.emplace_back(snapshots_[index]);
         }
         if (add_overflows(
                 next_accounted,
@@ -1280,8 +1277,6 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
                 "Entity snapshot history exceeds the configured aggregate value-byte bound",
                 reference_value);
         }
-        next.emplace_back(snapshot);
-
         std::optional<EntitySnapshotReference> next_evicted;
         if (evicted_through_) {
             next_evicted.emplace(*evicted_through_);
@@ -1291,6 +1286,24 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
             next_evicted.emplace(snapshots_.front().reference());
         }
 
+        // Finish every rejection/allocation before moving any owned history.
+        // Stage the incoming snapshot as well: a caller may borrow its input
+        // from an existing history, so no post-move read may depend on it.
+        const auto next_generation = snapshot.source_geometry().source_generation;
+        std::vector<EntitySnapshotState> next;
+        next.reserve(
+            must_evict ? snapshots_.size() : snapshots_.size() + 1U);
+        EntitySnapshotState incoming{snapshot};
+        static_assert(std::is_nothrow_move_constructible_v<EntitySnapshotState>);
+        static_assert(std::is_nothrow_copy_constructible_v<EntitySnapshotReference>);
+        static_assert(std::is_nothrow_swappable_v<decltype(next)>);
+        // Capacity is already sufficient and each element move is noexcept.
+        // The builder owns these transactional values; earlier immutable
+        // publications retain their own vectors and shared immutable objects.
+        for (std::size_t index = first; index < snapshots_.size(); ++index) {
+            next.emplace_back(std::move(snapshots_[index]));
+        }
+        next.emplace_back(std::move(incoming));
         snapshots_.swap(next);
         accounted_value_bytes_ = next_accounted;
         evicted_through_.reset();
@@ -1299,7 +1312,7 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
         }
         if (!source_generation_.has_value() &&
             is_public_packet_entities(profile_)) {
-            source_generation_ = snapshot.source_geometry().source_generation;
+            source_generation_ = next_generation;
         }
         return EntitySnapshotHistoryMutationResult{true, std::nullopt};
     } catch (const std::bad_alloc&) {
@@ -1393,7 +1406,7 @@ EntitySnapshotHistoryBuilder::release_required_base(
 }
 
 EntitySnapshotHistoryPublishResult EntitySnapshotHistoryBuilder::publish()
-    const
+    const &
 {
     if (!valid_configuration()) {
         return history_publish_failure(
@@ -1421,6 +1434,39 @@ EntitySnapshotHistoryPublishResult EntitySnapshotHistoryBuilder::publish()
             EntitySnapshotHistoryErrorCode::unable_to_retain_history,
             "Unable to publish immutable entity snapshot history");
     }
+}
+
+EntitySnapshotHistoryPublishResult EntitySnapshotHistoryBuilder::publish() &&
+{
+    if (!valid_configuration()) {
+        return history_publish_failure(
+            EntitySnapshotHistoryErrorCode::invalid_configuration,
+            "Invalid entity snapshot history safety limits");
+    }
+    if (!is_synthetic(profile_) && !is_public_packet_entities(profile_)) {
+        return history_publish_failure(
+            EntitySnapshotHistoryErrorCode::wrap_policy_evidence_pending,
+            "Stock snapshot history policy remains evidence pending");
+    }
+    // All profile, insertion, exact-base and bounded-byte checks are identical
+    // to non-consuming publication. Only this disposable owner's vectors move;
+    // the immutable history from which it was staged remains independent.
+    auto published = EntitySnapshotHistoryPublishResult{
+        EntitySnapshotHistoryState{
+            std::move(snapshots_),
+            std::move(required_base_references_),
+            evicted_through_,
+            accounted_value_bytes_,
+            profile_,
+            source_generation_},
+        std::nullopt,
+    };
+    snapshots_.clear();
+    required_base_references_.clear();
+    evicted_through_.reset();
+    accounted_value_bytes_ = 0U;
+    source_generation_.reset();
+    return published;
 }
 
 std::size_t EntitySnapshotHistoryBuilder::candidate_snapshot_count()

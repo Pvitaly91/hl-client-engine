@@ -26,7 +26,7 @@ class LocalResourceInventoryCorruptionTestAccess;
 }
 
 inline constexpr std::size_t kDefaultMaximumLocalResourceInventoryEntries =
-    1'024U;
+    kDefaultMaximumResourceCount;
 inline constexpr std::size_t kMaximumLocalResourceInventoryEntries = 4'095U;
 inline constexpr std::size_t kLocalResourceInventoryStatusCount = 7U;
 inline constexpr std::size_t kLocalResourceInventoryDiagnosticTextLimit = 256U;

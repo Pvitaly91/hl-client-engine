@@ -1,4 +1,5 @@
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
+#include <hlclient/renderer/screen_ui_font.hpp>
 #include <hlclient/world_visibility/world_view_frustum.hpp>
 #include <hlclient/world_spatial/world_spatial_query.hpp>
 
@@ -1085,6 +1086,23 @@ struct FrameDrawCounters {
     std::uint64_t triangles{0U};
     std::uint64_t base_texture_binds{0U};
     std::uint64_t lightmap_binds{0U};
+    std::uint64_t program_binds{},vertex_array_binds{},sky_texture_binds{};
+    std::uint64_t transform_uploads{},camera_uploads{},light_uploads{};
+};
+
+// Only the contiguous world/brush draw section owns this state. Its frame
+// inputs cannot vary between material ranges; resource transitions invalidate
+// the program-local uniforms. Never retain it across render() calls or other
+// rendering passes that may alter GL bindings.
+struct FrameDrawState {
+    const std::optional<RenderPointLight>& light;
+    const std::span<const RenderPointLight> effect_lights;
+    const GLuint sky_texture;
+    const assets::AssetVector3 sky_eye;
+    const GpuWorldResources* bound_resources{};
+    RenderMatrix4 model_view_projection;
+    RenderMatrix4 model_transform;
+    bool transforms_valid{};
 };
 
 void draw_package_range(
@@ -1095,13 +1113,10 @@ void draw_package_range(
     const std::size_t material_index,
     const RenderMatrix4& model_view_projection,
     const RenderMatrix4& model_transform,
-    const std::optional<RenderPointLight>& light,
-    std::span<const RenderPointLight> effect_lights,
     const bool brush,
     FrameDrawCounters& counters,
-    const GLuint alternate_texture = 0U,
-    const GLuint sky_texture = 0U,
-    const assets::AssetVector3 sky_eye = {})
+    FrameDrawState& state,
+    const GLuint alternate_texture = 0U)
 {
     const auto materials = package.materials();
     const auto indices = package.indices();
@@ -1116,32 +1131,48 @@ void draw_package_range(
     }
     const auto& material = materials[material_index];
 
-    glUseProgram(resources.program.program.name());
-    glUniform1i(resources.program.sky_surface,sky_texture && material.sky_surface ? 1 : 0);
-    glUniform3f(resources.program.camera_position,sky_eye.x,sky_eye.y,sky_eye.z);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_CUBE_MAP,sky_texture);
-    glBindVertexArray(resources.geometry.vertex_array.name());
-    glUniformMatrix4fv(
-        resources.program.model_view_projection,
-        1,
-        GL_FALSE,
-        model_view_projection.values.data());
-    glUniformMatrix4fv(resources.program.model_transform,1,GL_FALSE,
-        model_transform.values.data());
-    if (light && valid_render_point_light(*light) && light->intensity>0.0F) {
-        glUniform3f(resources.program.point_light_center,
-            light->center.x,light->center.y,light->center.z);
-        glUniform3f(resources.program.point_light_color,
-            light->color[0],light->color[1],light->color[2]);
-        glUniform1f(resources.program.point_light_radius,light->radius_units);
-        glUniform1f(resources.program.point_light_intensity,light->intensity);
-    } else {
-        glUniform1f(resources.program.point_light_radius,0.0F);
-        glUniform1f(resources.program.point_light_intensity,0.0F);
+    if(state.bound_resources!=&resources) {
+        glUseProgram(resources.program.program.name());
+        ++counters.program_binds;
+        glBindVertexArray(resources.geometry.vertex_array.name());
+        ++counters.vertex_array_binds;
+        glUniform3f(resources.program.camera_position,state.sky_eye.x,state.sky_eye.y,state.sky_eye.z);
+        ++counters.camera_uploads;
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_CUBE_MAP,state.sky_texture);
+        ++counters.sky_texture_binds;
+        const auto& light=state.light;
+        if(light && valid_render_point_light(*light) && light->intensity>0.0F) {
+            glUniform3f(resources.program.point_light_center,
+                light->center.x,light->center.y,light->center.z);
+            glUniform3f(resources.program.point_light_color,
+                light->color[0],light->color[1],light->color[2]);
+            glUniform1f(resources.program.point_light_radius,light->radius_units);
+            glUniform1f(resources.program.point_light_intensity,light->intensity);
+        } else {
+            glUniform1f(resources.program.point_light_radius,0.0F);
+            glUniform1f(resources.program.point_light_intensity,0.0F);
+        }
+        resources.program.effect_lights.upload(state.effect_lights);
+        ++counters.light_uploads;
+        glUniform1i(resources.program.lightmap_layer,0);
+        state.bound_resources=&resources;
+        state.transforms_valid=false;
     }
-    resources.program.effect_lights.upload(effect_lights);
-    glUniform1i(resources.program.lightmap_layer, 0);
+    glUniform1i(resources.program.sky_surface,state.sky_texture && material.sky_surface ? 1 : 0);
+    if(!state.transforms_valid || state.model_view_projection!=model_view_projection) {
+        glUniformMatrix4fv(resources.program.model_view_projection,1,GL_FALSE,
+            model_view_projection.values.data());
+        state.model_view_projection=model_view_projection;
+        ++counters.transform_uploads;
+    }
+    if(!state.transforms_valid || state.model_transform!=model_transform) {
+        glUniformMatrix4fv(resources.program.model_transform,1,GL_FALSE,
+            model_transform.values.data());
+        state.model_transform=model_transform;
+        ++counters.transform_uploads;
+    }
+    state.transforms_valid=true;
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(
@@ -1328,50 +1359,216 @@ void main() {
     }
     ~Implementation() noexcept {
         if(gpu_timing_.allocated_queries) glDeleteQueries(8,gpu_queries_.data());
+        if(gpu_timing_.allocated_pass_queries)
+            glDeleteQueries(static_cast<GLsizei>(gpu_pass_queries_.size()),gpu_pass_queries_.data());
+    }
+    void reset_session_resources() noexcept {
+        // Called outside render(), never while a query owned by another
+        // component is active. Pending old-generation timings are discarded.
+        end_gpu_timing();
+        if(gpu_timing_.allocated_queries)glDeleteQueries(8,gpu_queries_.data());
+        if(gpu_timing_.allocated_pass_queries)
+            glDeleteQueries(static_cast<GLsizei>(gpu_pass_queries_.size()),gpu_pass_queries_.data());
+        gpu_queries_={};gpu_frames_={};gpu_pending_={};gpu_active_.reset();
+        gpu_pass_queries_={};gpu_pass_frames_={};
+        gpu_timing_={};gpu_timing_failed_=false;gpu_timing_unsupported_=false;
+        release_world_resources();entity_renderer_.reset_session_resources();
+        statistics_={};decal_statistics_={};decal_frame_serial_=0;
+        hud_textures_.clear();hud_vertices_.clear();hud_batches_.clear();
+        hud_commands_.reset();hud_extent_={};hud_cache_clock_=0;hud_statistics_={};
+        sky_asset_.reset();sky_texture_.reset();
+        image_texture_.reset();image_program_.reset();image_array_.reset();
+        image_adjustments_=-1;image_extent_={};image_statistics_={};
+        scene_target.reset_session_resources();
+        // Immutable shaders, font geometry facilities and screen_ui_textures_
+        // belong to the application, not to a server/map generation.
     }
     bool begin_gpu_timing(const std::uint64_t frame_number) noexcept {
-        if(gpu_timing_failed_ || !glGenQueries || !glBeginQuery || !glEndQuery || !glGetQueryObjectiv || !glGetQueryObjectui64v) {
-            ++gpu_timing_.unavailable; return false;
+        if(gpu_timing_failed_) {
+            ++gpu_timing_.unavailable;
+            gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::invalid;
+            return false;
+        }
+        if(gpu_timing_unsupported_ || !glGenQueries || !glBeginQuery || !glEndQuery || !glGetQueryObjectiv || !glGetQueryObjectui64v) {
+            ++gpu_timing_.unavailable;
+            gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::unsupported;
+            return false;
         }
         GLint foreign{};
         glGetQueryiv(GL_TIME_ELAPSED,GL_CURRENT_QUERY,&foreign);
         if(!gpu_call_succeeded())return false;
-        if(foreign || gpu_active_) {++gpu_timing_.unavailable;return false;}
+        if(foreign || gpu_active_) {
+            ++gpu_timing_.unavailable;
+            gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::invalid;
+            return false;
+        }
         if(!gpu_timing_.allocated_queries) {
             GLint bits{};glGetQueryiv(GL_TIME_ELAPSED,GL_QUERY_COUNTER_BITS,&bits);
             if(!gpu_call_succeeded())return false;
-            if(!bits){gpu_timing_failed_=true;++gpu_timing_.unavailable;return false;}
+            if(!bits){gpu_timing_unsupported_=true;++gpu_timing_.unavailable;
+                gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::unsupported;return false;}
             glGenQueries(8,gpu_queries_.data());
             gpu_timing_.allocated_queries=8U;
+            if(!gpu_call_succeeded())return false;
+            GLint timestamp_bits{};
+            if(glQueryCounter)glGetQueryiv(GL_TIMESTAMP,GL_QUERY_COUNTER_BITS,&timestamp_bits);
+            if(!gpu_call_succeeded())return false;
+            gpu_timing_.pass_timestamps_supported=timestamp_bits>0;
+            if(gpu_timing_.pass_timestamps_supported) {
+                glGenQueries(static_cast<GLsizei>(gpu_pass_queries_.size()),gpu_pass_queries_.data());
+                gpu_timing_.allocated_pass_queries=gpu_pass_queries_.size();
+                if(!gpu_call_succeeded())return false;
+            }
+            GLint extensions{};glGetIntegerv(GL_NUM_EXTENSIONS,&extensions);
+            for(GLint extension=0;extension<extensions;++extension) {
+                const auto* name=glGetStringi(GL_EXTENSIONS,static_cast<GLuint>(extension));
+                if(name && std::string_view{reinterpret_cast<const char*>(name)}=="GL_EXT_disjoint_timer_query")
+                    gpu_timing_.disjoint_detection_supported=true;
+            }
             if(!gpu_call_succeeded())return false;
         }
         for(std::size_t i=0;i<gpu_queries_.size();++i) if(!gpu_pending_[i] && gpu_queries_[i]) {
             glBeginQuery(GL_TIME_ELAPSED,gpu_queries_[i]);
             if(!gpu_call_succeeded())return false;
             gpu_frames_[i]=frame_number;gpu_pending_[i]=true;gpu_active_=i;
+            gpu_pass_frames_[i]={};
             ++gpu_timing_.submitted;++gpu_timing_.pending;
+            gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::pending;
+            // glBeginQuery was just checked, so there is no prior render
+            // operation whose error could be confused with this timestamp.
+            gpu_pass_boundary_query(OpenGlGpuPass::world);
             return true;
         }
-        ++gpu_timing_.capacity_drops;return false;
+        ++gpu_timing_.capacity_drops;
+        gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::capacity_dropped;
+        return false;
     }
-    void end_gpu_timing() noexcept {
+    void gpu_pass_boundary(const OpenGlGpuPass next) {
+        if(!gpu_active_ || !gpu_timing_.pass_timestamps_supported || gpu_timing_failed_)return;
+        const auto& frame=gpu_pass_frames_[*gpu_active_];
+        if(frame.count && frame.passes[frame.count-1U]==next)return;
+        // Errors from the preceding render pass are authoritative. Only an
+        // error created after this clean boundary may disable optional timing.
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+            "Render pass before GPU timestamp");
+        gpu_pass_boundary_query(next);
+    }
+    void gpu_pass_boundary_query(const OpenGlGpuPass next) noexcept {
+        if(!gpu_active_ || !gpu_timing_.pass_timestamps_supported || gpu_timing_failed_)return;
+        auto& frame=gpu_pass_frames_[*gpu_active_];
+        if(frame.count && frame.passes[frame.count-1U]==next)return;
+        // Reserve the final timestamp. Overflow invalidates observations, not
+        // the frame or its rendering. The ordered production path uses <=10.
+        if(frame.count>=kGpuPassBoundaryLimit-1U) {frame.invalid=true;return;}
+        const auto index=*gpu_active_*kGpuPassBoundaryLimit+frame.count;
+        glQueryCounter(gpu_pass_queries_[index],GL_TIMESTAMP);
+        if(!gpu_call_succeeded()){frame.invalid=true;return;}
+        frame.passes[frame.count++]=next;
+    }
+    void end_gpu_timing(const bool frame_completed=true) noexcept {
         if(gpu_active_) {
+            auto& frame=gpu_pass_frames_[*gpu_active_];
+            if(gpu_timing_.pass_timestamps_supported && frame.count && !gpu_timing_failed_) {
+                const auto index=*gpu_active_*kGpuPassBoundaryLimit+frame.count;
+                glQueryCounter(gpu_pass_queries_[index],GL_TIMESTAMP);
+                if(!gpu_call_succeeded())frame.invalid=true;
+                ++frame.count;
+            }
             glEndQuery(GL_TIME_ELAPSED);
-            if(!gpu_call_succeeded()) {gpu_pending_[*gpu_active_]=false;--gpu_timing_.pending;}
+            if(!gpu_call_succeeded() || !frame_completed) {
+                gpu_pending_[*gpu_active_]=false;--gpu_timing_.pending;
+                gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::invalid;
+            }
             gpu_active_.reset();
         }
     }
+    std::optional<OpenGlGpuFrameTiming> consume_invalid_gpu_timing() noexcept {
+        // A failed optional query disables further submissions, but every
+        // already-submitted frame still receives a bounded terminal result.
+        // No GL call is needed to drain these at-most-eight identities.
+        for(std::size_t i=0;i<gpu_pending_.size();++i)
+            if(gpu_pending_[i] && gpu_active_!=i) {
+                gpu_pending_[i]=false;--gpu_timing_.pending;
+                ++gpu_timing_.completed;++gpu_timing_.invalid_results;
+                OpenGlGpuFrameTiming result;
+                result.frame_number=gpu_frames_[i];
+                result.elapsed_ms=std::numeric_limits<double>::quiet_NaN();
+                result.status=OpenGlGpuTimingStatus::invalid;
+                return result;
+            }
+        return {};
+    }
     std::optional<OpenGlGpuFrameTiming> poll_gpu_timing() noexcept {
-        if(gpu_timing_failed_)return {};
+        if(gpu_timing_failed_)return consume_invalid_gpu_timing();
+        if(gpu_timing_.disjoint_detection_supported) {
+            GLboolean disjoint{};
+            // EXT exposes a reset-on-read sticky flag. Mark every outstanding
+            // slot together; a later poll must not accidentally bless one.
+            glGetBooleanv(0x8FBB /* GL_GPU_DISJOINT_EXT */,&disjoint);
+            if(!gpu_call_succeeded())return consume_invalid_gpu_timing();
+            if(disjoint==GL_TRUE)
+                for(std::size_t i=0;i<gpu_pending_.size();++i)
+                    if(gpu_pending_[i])gpu_pass_frames_[i].disjoint=true;
+        }
         // Availability is checked first; never wait/flush for a pending query.
         for(std::size_t i=0;i<gpu_queries_.size();++i) if(gpu_pending_[i] && gpu_active_!=i) {
             GLint available{};glGetQueryObjectiv(gpu_queries_[i],GL_QUERY_RESULT_AVAILABLE,&available);
-            if(!gpu_call_succeeded())return {};
+            if(!gpu_call_succeeded())return consume_invalid_gpu_timing();
             if(available!=GL_TRUE) continue;
+            const auto& passes=gpu_pass_frames_[i];
+            if(passes.count) {
+                GLint final_available{};
+                glGetQueryObjectiv(gpu_pass_queries_[i*kGpuPassBoundaryLimit+passes.count-1U],
+                    GL_QUERY_RESULT_AVAILABLE,&final_available);
+                if(!gpu_call_succeeded())return consume_invalid_gpu_timing();
+                if(final_available!=GL_TRUE)continue;
+            }
             GLuint64 elapsed{};glGetQueryObjectui64v(gpu_queries_[i],GL_QUERY_RESULT,&elapsed);
-            if(!gpu_call_succeeded())return {};
+            if(!gpu_call_succeeded())return consume_invalid_gpu_timing();
+            OpenGlGpuFrameTiming result;
+            result.frame_number=gpu_frames_[i];
+            result.elapsed_ms=static_cast<double>(elapsed)/1'000'000.0;
+            result.status=gpu_timing_.pass_timestamps_supported ?
+                OpenGlGpuTimingStatus::ready:OpenGlGpuTimingStatus::unsupported;
+            if(passes.disjoint) {
+                result.status=OpenGlGpuTimingStatus::disjoint;
+                result.elapsed_ms=std::numeric_limits<double>::quiet_NaN();
+                ++gpu_timing_.disjoint_results;
+                gpu_pending_[i]=false;--gpu_timing_.pending;++gpu_timing_.completed;
+                return result;
+            }
+            if(passes.invalid) {
+                result.status=OpenGlGpuTimingStatus::invalid;++gpu_timing_.invalid_results;
+                gpu_pending_[i]=false;--gpu_timing_.pending;++gpu_timing_.completed;
+                return result;
+            }
+            if(passes.count>1U) {
+                std::array<GLuint64,kGpuPassBoundaryLimit> timestamps{};
+                // Completion of the final timestamp implies prior timestamp
+                // completion in this same GL stream. No flush or blocking read
+                // is used when either the total or final query is pending.
+                for(std::size_t stamp=0;stamp<passes.count;++stamp) {
+                    glGetQueryObjectui64v(gpu_pass_queries_[i*kGpuPassBoundaryLimit+stamp],
+                        GL_QUERY_RESULT,&timestamps[stamp]);
+                    if(!gpu_call_succeeded())return consume_invalid_gpu_timing();
+                }
+                for(std::size_t stamp=1U;stamp<passes.count;++stamp) {
+                    if(timestamps[stamp]<timestamps[stamp-1U]) {
+                        result.status=OpenGlGpuTimingStatus::disjoint;
+                        result.elapsed_ms=std::numeric_limits<double>::quiet_NaN();
+                        result.pass_elapsed_ms={};result.valid_pass_mask=0;
+                        ++gpu_timing_.disjoint_results;
+                        gpu_pending_[i]=false;--gpu_timing_.pending;++gpu_timing_.completed;
+                        return result;
+                    }
+                    const auto pass=static_cast<std::size_t>(passes.passes[stamp-1U]);
+                    result.pass_elapsed_ms[pass]+=static_cast<float>(
+                        static_cast<double>(timestamps[stamp]-timestamps[stamp-1U])/1'000'000.0);
+                    result.valid_pass_mask|=static_cast<std::uint8_t>(1U<<pass);
+                }
+            }
             gpu_pending_[i]=false;--gpu_timing_.pending;++gpu_timing_.completed;
-            return OpenGlGpuFrameTiming{gpu_frames_[i],static_cast<double>(elapsed)/1'000'000.0};
+            return result;
         }
         return {};
     }
@@ -1381,7 +1578,8 @@ void main() {
         // Only optional query-operation errors are consumed here, and disable
         // timing rather than poisoning the ordinary renderer/gameplay path.
         for(std::size_t error=0;error<8U;++error)if(glGetError()==GL_NO_ERROR)break;
-        gpu_timing_failed_=true;++gpu_timing_.unavailable;return false;
+        gpu_timing_failed_=true;++gpu_timing_.unavailable;
+        gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::invalid;return false;
     }
     const OpenGlGpuTimingStatistics& gpu_timing_statistics() const noexcept {return gpu_timing_;}
     void adjust_image(const core::ImageAdjustments& settings, const RenderExtent extent) {
@@ -1959,6 +2157,106 @@ void main(){
             effects.modulate ? GL_ZERO : GL_ONE_MINUS_SRC_ALPHA,GL_ZERO,GL_ONE);
         glUseProgram(hud_program_.name());glDrawArrays(GL_TRIANGLES,0,3);
         require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Screen overlay draw");
+    }
+
+    void render_screen_ui(const ScreenUiFrame& ui,const RenderExtent extent) {
+        if(!valid_screen_ui(ui))throw std::invalid_argument{"Screen UI command budget or geometry is invalid"};
+        if(extent.width<=0||extent.height<=0||ui.commands.empty())return;
+        const HudGlStateGuard state;
+        const ImageCopyGlStateGuard extra_state;
+        if(!hud_program_.name())create_hud_program();
+        if(!screen_ui_array_.name()) {
+            screen_ui_array_=create_vertex_array();screen_ui_buffer_=create_buffer();
+            glBindVertexArray(screen_ui_array_.name());glBindBuffer(GL_ARRAY_BUFFER,screen_ui_buffer_.name());
+            glEnableVertexAttribArray(0);glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,6*sizeof(float),nullptr);
+            glEnableVertexAttribArray(1);glVertexAttribPointer(1,4,GL_FLOAT,GL_FALSE,6*sizeof(float),
+                reinterpret_cast<const void*>(2*sizeof(float)));
+        }
+        glDisable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glDisable(GL_CULL_FACE);
+        glDisable(GL_STENCIL_TEST);glDisable(GL_FRAMEBUFFER_SRGB);
+        glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+        glEnable(GL_BLEND);glBlendEquation(GL_FUNC_ADD);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+        glActiveTexture(GL_TEXTURE0);
+        glBindSampler(0,0);glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS,0);glPixelStorei(GL_UNPACK_SKIP_PIXELS,0);
+        std::vector<float> vertices;
+        const auto rectangle=[&](float x,float y,float w,float h,const std::array<float,4>& color) {
+            const float x0=2*x/extent.width-1,x1=2*(x+w)/extent.width-1;
+            const float y0=1-2*y/extent.height,y1=1-2*(y+h)/extent.height;
+            for(const auto p:std::array<std::array<float,2>,6>{{{x0,y0},{x0,y1},{x1,y1},{x0,y0},{x1,y1},{x1,y0}}})
+                vertices.insert(vertices.end(),{p[0],p[1],color[0],color[1],color[2],color[3]});
+        };
+        for(const auto& command:ui.commands)std::visit([&](const auto& item) {
+            int left=0,top=0,right=extent.width,bottom=extent.height;
+            if(item.clip) {
+                left=std::clamp(static_cast<int>(std::floor(item.clip->x)),0,extent.width);
+                top=std::clamp(static_cast<int>(std::floor(item.clip->y)),0,extent.height);
+                right=std::clamp(static_cast<int>(std::ceil(item.clip->x+item.clip->width)),0,extent.width);
+                bottom=std::clamp(static_cast<int>(std::ceil(item.clip->y+item.clip->height)),0,extent.height);
+            }
+            if(right<=left||bottom<=top)return;
+            glEnable(GL_SCISSOR_TEST);glScissor(left,extent.height-bottom,right-left,bottom-top);
+            using Type=std::decay_t<decltype(item)>;
+            if constexpr(std::is_same_v<Type,ScreenUiImage>) {
+                auto found=std::find_if(screen_ui_textures_.begin(),screen_ui_textures_.end(),
+                    [&](const auto& cached){return cached.pixels==item.pixels;});
+                GLuint texture{};
+                if(found!=screen_ui_textures_.end())texture=found->texture.name();
+                else {
+                    // Owning immutable pixels prevent an address-reuse cache hit.
+                    std::size_t retained{};for(const auto& cached:screen_ui_textures_)retained+=cached.pixels->pixels.size();
+                    while(!screen_ui_textures_.empty()&&(screen_ui_textures_.size()>=8||
+                        retained+item.pixels->pixels.size()>32U*1024U*1024U)) {
+                        retained-=screen_ui_textures_.front().pixels->pixels.size();
+                        screen_ui_textures_.erase(screen_ui_textures_.begin());
+                    }
+                    auto uploaded=create_texture(OpenGlRendererErrorCode::texture_upload_failed,"Screen UI image");
+                    glBindTexture(GL_TEXTURE_2D,uploaded.name());
+                    glPixelStorei(GL_UNPACK_ALIGNMENT,1);glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+                    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,static_cast<GLsizei>(item.pixels->width),
+                        static_cast<GLsizei>(item.pixels->height),0,GL_RGBA,GL_UNSIGNED_BYTE,item.pixels->pixels.data());
+                    texture=uploaded.name();screen_ui_textures_.push_back({item.pixels,std::move(uploaded)});
+                }
+                if(!hud_sprite_program_.name())create_hud_sprite_program();
+                const float x0=2*item.x/extent.width-1,x1=2*(item.x+item.width)/extent.width-1;
+                const float y0=1-2*item.y/extent.height,y1=1-2*(item.y+item.height)/extent.height;
+                const std::array<float,24> quad{x0,y0,0,0,x0,y1,0,1,x1,y1,1,1,
+                    x0,y0,0,0,x1,y1,1,1,x1,y0,1,0};
+                glBindTexture(GL_TEXTURE_2D,texture);glUseProgram(hud_sprite_program_.name());
+                glUniform4fv(hud_sprite_color_,1,item.color.data());glUniform1i(hud_sprite_masked_,0);
+                glBindVertexArray(hud_sprite_array_.name());glBindBuffer(GL_ARRAY_BUFFER,hud_sprite_buffer_.name());
+                glBufferData(GL_ARRAY_BUFFER,sizeof(quad),quad.data(),GL_STREAM_DRAW);glDrawArrays(GL_TRIANGLES,0,6);
+            } else {
+                vertices.clear();
+                if constexpr(std::is_same_v<Type,ScreenUiRectangle>)rectangle(item.x,item.y,item.width,item.height,item.color);
+                else {
+                    float x=item.x,y=item.y;std::size_t offset{};
+                    while(offset<item.text.size()) {
+                        const auto codepoint=next_screen_ui_codepoint(item.text,offset);
+                        if(codepoint==U'\n'){x=item.x;y+=item.line_height;continue;}
+                        if(codepoint==U'\r')continue;
+                        if(x+5*item.pixel_size>left&&x<right&&y+9*item.pixel_size>top&&y<bottom) {
+                            const auto rows=screen_ui_glyph(codepoint);
+                            for(std::size_t row=0;row<rows.size();++row)for(unsigned col=0;col<5;++col)
+                                if((rows[row]&(1U<<(4-col)))!=0U)
+                                    rectangle(x+col*item.pixel_size,y+static_cast<float>(row)*item.pixel_size,
+                                        item.pixel_size,item.pixel_size,item.color);
+                        }
+                        x+=item.advance;
+                    }
+                }
+                if(vertices.empty())return;
+                glUseProgram(hud_program_.name());glBindVertexArray(screen_ui_array_.name());
+                glBindBuffer(GL_ARRAY_BUFFER,screen_ui_buffer_.name());
+                glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(vertices.size()*sizeof(float)),vertices.data(),GL_STREAM_DRAW);
+                glDrawArrays(GL_TRIANGLES,0,static_cast<GLsizei>(vertices.size()/6));
+            }
+        },command);
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Screen UI rendering");
     }
 
     void render_hud(const RenderBasicHud& hud, const RenderExtent extent,
@@ -2620,6 +2918,9 @@ private:
     GlObject hud_array_;
     GlObject hud_buffer_;
     GlObject screen_overlay_array_,screen_overlay_buffer_;
+    GlObject screen_ui_array_,screen_ui_buffer_;
+    struct ScreenUiTexture {std::shared_ptr<const ScreenUiImagePixels> pixels;GlObject texture;};
+    std::vector<ScreenUiTexture> screen_ui_textures_;
     std::vector<float> hud_vertices_;
     std::vector<HudBatch> hud_batches_;
     std::optional<RenderBasicHud> hud_commands_;
@@ -2644,9 +2945,18 @@ private:
     std::array<GLuint,8> gpu_queries_{};
     std::array<std::uint64_t,8> gpu_frames_{};
     std::array<bool,8> gpu_pending_{};
+    static constexpr std::size_t kGpuPassBoundaryLimit=16U;
+    struct GpuPassFrame {
+        std::array<OpenGlGpuPass,kGpuPassBoundaryLimit> passes{};
+        std::size_t count{};
+        bool invalid{},disjoint{};
+    };
+    std::array<GLuint,8U*kGpuPassBoundaryLimit> gpu_pass_queries_{};
+    std::array<GpuPassFrame,8> gpu_pass_frames_{};
     std::optional<std::size_t> gpu_active_;
     OpenGlGpuTimingStatistics gpu_timing_;
     bool gpu_timing_failed_{};
+    bool gpu_timing_unsupported_{};
 };
 
 OpenGlRenderer::OpenGlRenderer()
@@ -2713,13 +3023,24 @@ const RendererInfo& OpenGlRenderer::information() const noexcept
     return information_;
 }
 
+void OpenGlRenderer::reset_session_resources()
+{
+    require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Session reset prior GL state");
+    implementation_->reset_session_resources();
+    require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Session resource reset");
+}
+
 void OpenGlRenderer::render_with_gpu_timing(const RenderScene& scene,const RenderExtent extent,
     const std::uint64_t frame_number)
 {
     require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"GPU timing prior GL state");
     const bool active=implementation_->begin_gpu_timing(frame_number);
-    try {render(scene,extent);} catch(...) {
-        if(active)implementation_->end_gpu_timing();
+    try {
+        render(scene,extent);
+        if(active)require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+            "Rendered frame before GPU timing completion");
+    } catch(...) {
+        if(active)implementation_->end_gpu_timing(false);
         throw;
     }
     if(active)implementation_->end_gpu_timing();
@@ -2877,6 +3198,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             static_cast<std::size_t>(scene.secondary_world_decals.has_value()));
         if(scene.additional_world_decals.size()>additional)
             implementation_->reject_decal_batches(scene.additional_world_decals.size()-additional);
+        implementation_->gpu_pass_boundary(OpenGlGpuPass::studio_viewmodel);
         if (scene.dynamic_entities) {
             const auto matrix = camera_view_projection(
                 view_camera, RenderExtent{width, height});
@@ -2897,6 +3219,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             implementation_->render_entities(*scene.transient_world_entities,
                 view_camera,*matrix.matrix,scene.transient_world_light,scene.effect_lights());
         }
+        implementation_->gpu_pass_boundary(OpenGlGpuPass::effects_decals);
         if(scene.transient_sprite_entities) {
             const auto matrix=camera_view_projection(view_camera,RenderExtent{width,height});
             if(!matrix || !matrix.matrix) fail(OpenGlRendererErrorCode::camera_invalid,"Transient sprite camera is invalid");
@@ -2919,6 +3242,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             if(matrix && matrix.matrix) implementation_->render_world_flashes(scene,*matrix.matrix,view_camera);
         }
         if (scene.first_person_entities) {
+            implementation_->gpu_pass_boundary(OpenGlGpuPass::studio_viewmodel);
             const auto first_person_camera =
                 camera_local_first_person_camera(scene.camera);
             const auto matrix = camera_view_projection(
@@ -2932,6 +3256,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 fail(OpenGlRendererErrorCode::camera_invalid,"First-person lighting camera is invalid");
             implementation_->render_entities(*scene.first_person_entities,
                 first_person_camera, *matrix.matrix,scene.transient_first_person_light,{},*light_direction);
+            implementation_->gpu_pass_boundary(OpenGlGpuPass::effects_decals);
             if(scene.first_person_muzzle_entities)
                 implementation_->render_entities(*scene.first_person_muzzle_entities,first_person_camera,*matrix.matrix);
             if (scene.first_person_flash)
@@ -2939,12 +3264,16 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             glDepthFunc(GL_LEQUAL);
             glDepthMask(GL_TRUE);
         }
+        implementation_->gpu_pass_boundary(OpenGlGpuPass::msaa_resolve);
         implementation_->scene_target.resolve(target_frame);
         require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Native scene resolve");
+        implementation_->gpu_pass_boundary(OpenGlGpuPass::image_adjustments);
         implementation_->adjust_image(scene.image_adjustments,{width,height});
+        implementation_->gpu_pass_boundary(OpenGlGpuPass::hud_console);
         implementation_->render_screen_overlay(scene.screen_effects);
         if (scene.basic_hud)
             implementation_->render_hud(*scene.basic_hud, {width, height},scene.hud_sprite_bindings);
+        if(scene.screen_ui)implementation_->render_screen_ui(*scene.screen_ui,{width,height});
         ++statistics.rendered_frame_count;
         return;
     }
@@ -3036,6 +3365,8 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     }
 
     FrameDrawCounters frame;
+    FrameDrawState draw_state{scene.transient_world_light,scene.effect_lights(),
+        sky_texture,view_camera.position};
     if (scene.static_world->scene_package) {
         auto& resources = implementation_->ensure_scene_resources(
             scene.static_world->scene_package);
@@ -3108,10 +3439,8 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     command.render_material_index,
                     mvp,
                     command.model_transform,
-                    scene.transient_world_light,
-                    scene.effect_lights(),
                     brush,
-                    frame,0,sky_texture,view_camera.position);
+                    frame,draw_state);
             }
             statistics.rendered_command_count +=
                 static_cast<std::uint64_t>(commands.size());
@@ -3125,10 +3454,8 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     batch.render_material_index,
                     *matrix.matrix,
                     RenderMatrix4{},
-                    scene.transient_world_light,
-                    scene.effect_lights(),
                     false,
-                    frame,0,sky_texture,view_camera.position);
+                    frame,draw_state);
             }
         }
         if (scene.static_world->runtime_brushes) {
@@ -3179,8 +3506,8 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                         alternate = resources.brush_alternate_textures[*mapping[surface.render_material_index]].name();
                     draw_package_range(*resources.brushes, *library.render_package(),
                         surface.first_index, surface.index_count, surface.render_material_index,
-                        mvp, instance.model_transform, scene.transient_world_light,scene.effect_lights(),
-                        true, frame, alternate,sky_texture,view_camera.position);
+                        mvp, instance.model_transform,
+                        true, frame, draw_state,alternate);
                 }
                 ++statistics.runtime_brush_submitted_count;
             }
@@ -3198,10 +3525,8 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 batch.render_material_index,
                 *matrix.matrix,
                 RenderMatrix4{},
-                scene.transient_world_light,
-                scene.effect_lights(),
                 false,
-                frame,0,sky_texture,view_camera.position);
+                frame,draw_state);
         }
     }
 
@@ -3211,6 +3536,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     glBindVertexArray(0U);
     glUseProgram(0U);
 
+    implementation_->gpu_pass_boundary(OpenGlGpuPass::effects_decals);
     if (scene.world_decals)
         implementation_->render_decals(*scene.world_decals,*matrix.matrix,frame);
     if (scene.secondary_world_decals)
@@ -3221,6 +3547,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     if(scene.additional_world_decals.size()>decal_batches)
         implementation_->reject_decal_batches(scene.additional_world_decals.size()-decal_batches);
 
+    implementation_->gpu_pass_boundary(OpenGlGpuPass::studio_viewmodel);
     if (scene.dynamic_entities) {
         implementation_->render_entities(
             *scene.dynamic_entities, view_camera, *matrix.matrix,
@@ -3231,6 +3558,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     if (scene.transient_world_entities)
         implementation_->render_entities(*scene.transient_world_entities,
             view_camera,*matrix.matrix,scene.transient_world_light,scene.effect_lights());
+    implementation_->gpu_pass_boundary(OpenGlGpuPass::effects_decals);
     if(scene.transient_sprite_entities)
         implementation_->render_entities(*scene.transient_sprite_entities,
             view_camera,*matrix.matrix,scene.transient_world_light,scene.effect_lights());
@@ -3243,6 +3571,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     implementation_->render_world_flashes(scene,*matrix.matrix,view_camera);
 
     if (scene.first_person_entities) {
+        implementation_->gpu_pass_boundary(OpenGlGpuPass::studio_viewmodel);
         // The world retains its color; this pass receives independent depth
         // so near walls cannot erase the first-person Studio model. The
         // model and its view are camera-local; the world view/projection is
@@ -3261,6 +3590,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         implementation_->render_entities(*scene.first_person_entities,
             first_person_camera, *first_person_matrix.matrix,
             scene.transient_first_person_light,{},*light_direction);
+        implementation_->gpu_pass_boundary(OpenGlGpuPass::effects_decals);
         if(scene.first_person_muzzle_entities)
             implementation_->render_entities(*scene.first_person_muzzle_entities,first_person_camera,*first_person_matrix.matrix);
         if (scene.first_person_flash)
@@ -3268,9 +3598,12 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         glDepthFunc(GL_LEQUAL);
         glDepthMask(GL_TRUE);
     }
+    implementation_->gpu_pass_boundary(OpenGlGpuPass::msaa_resolve);
     implementation_->scene_target.resolve(target_frame);
     require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Native scene resolve");
+    implementation_->gpu_pass_boundary(OpenGlGpuPass::image_adjustments);
     implementation_->adjust_image(scene.image_adjustments,{width,height});
+    implementation_->gpu_pass_boundary(OpenGlGpuPass::hud_console);
     implementation_->render_screen_overlay(scene.screen_effects);
     if (scene.basic_hud) {
         implementation_->render_hud(*scene.basic_hud, {width, height},scene.hud_sprite_bindings);
@@ -3281,12 +3614,44 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         }
     }
 
+    if(scene.screen_ui)implementation_->render_screen_ui(*scene.screen_ui,{width,height});
     ++statistics.rendered_frame_count;
     statistics.draw_call_count += frame.draw_calls;
     statistics.brush_draw_call_count += frame.brush_draw_calls;
     statistics.triangle_count += frame.triangles;
     statistics.base_texture_bind_count += frame.base_texture_binds;
     statistics.lightmap_bind_count += frame.lightmap_binds;
+    statistics.program_bind_count += frame.program_binds;
+    statistics.vertex_array_bind_count += frame.vertex_array_binds;
+    statistics.sky_texture_bind_count += frame.sky_texture_binds;
+    statistics.transform_upload_count += frame.transform_uploads;
+    statistics.camera_upload_count += frame.camera_uploads;
+    statistics.light_upload_count += frame.light_uploads;
+}
+
+std::string_view to_string(const OpenGlGpuTimingStatus status) noexcept {
+    switch(status) {
+    case OpenGlGpuTimingStatus::not_observed:return "not_observed";
+    case OpenGlGpuTimingStatus::pending:return "pending";
+    case OpenGlGpuTimingStatus::ready:return "ready";
+    case OpenGlGpuTimingStatus::unsupported:return "unsupported";
+    case OpenGlGpuTimingStatus::disjoint:return "disjoint";
+    case OpenGlGpuTimingStatus::invalid:return "invalid";
+    case OpenGlGpuTimingStatus::capacity_dropped:return "capacity_dropped";
+    }
+    return "invalid";
+}
+
+std::string_view to_string(const OpenGlGpuPass pass) noexcept {
+    switch(pass) {
+    case OpenGlGpuPass::world:return "world";
+    case OpenGlGpuPass::studio_viewmodel:return "studio_viewmodel";
+    case OpenGlGpuPass::effects_decals:return "effects_decals";
+    case OpenGlGpuPass::msaa_resolve:return "msaa_resolve";
+    case OpenGlGpuPass::image_adjustments:return "image_adjustments";
+    case OpenGlGpuPass::hud_console:return "hud_console";
+    }
+    return "invalid";
 }
 
 const OpenGlWorldRendererStatistics& OpenGlRenderer::statistics() const noexcept

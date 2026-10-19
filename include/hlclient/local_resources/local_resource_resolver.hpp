@@ -79,6 +79,13 @@ public:
     [[nodiscard]] LocalResourceResolutionResult resolve(
         std::string_view untrusted_name) const;
 
+    // Explicitly authorized installation checks only. Names are relative to
+    // the selected game root; exactly one leading ../ selects the pinned
+    // installation base. No game/Valve fallback or further traversal occurs.
+    // This API does not grant permission: the caller must gate the request.
+    [[nodiscard]] LocalResourceResolutionResult resolve_installation_check(
+        std::string_view server_relative_name) const;
+
     [[nodiscard]] std::size_t root_count() const noexcept;
     [[nodiscard]] const LocalResourceResolverLimits& limits() const noexcept;
 
@@ -96,7 +103,9 @@ private:
         LocalResourceRootId root_id) const;
     [[nodiscard]] LocalResourceResolutionResult resolve_from_roots(
         const LocalVirtualResourceName& name,
-        std::optional<LocalResourceRootId> exact_root_id) const;
+        std::optional<LocalResourceRootId> exact_root_id,
+        bool use_installation_base = false,
+        bool strict_race_failures = false) const;
 
     LocalResourceSearchRoots roots_;
     LocalResourceResolverLimits limits_;

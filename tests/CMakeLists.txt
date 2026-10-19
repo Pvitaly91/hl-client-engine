@@ -9,7 +9,8 @@ hlclient_enable_warnings(hlclient_remote_snapshot_buffer_tests)
 hlclient_enable_address_sanitizer(hlclient_remote_snapshot_buffer_tests)
 
 add_executable(hlclient_movement_effect_tests
-    test_post_movement_effect.cpp test_reference_brush_boundary_recovery.cpp)
+    test_post_movement_effect.cpp test_reference_brush_boundary_recovery.cpp
+    test_movement_tangent_rounding.cpp)
 target_link_libraries(hlclient_movement_effect_tests PRIVATE Catch2::Catch2WithMain
     hlclient::goldsrc_local_movement hlclient::goldsrc_usercmd_session
     hlclient::prediction_api hlclient::local_prediction hlclient::client)
@@ -19,6 +20,21 @@ hlclient_enable_warnings(hlclient_movement_effect_tests)
 hlclient_enable_address_sanitizer(hlclient_movement_effect_tests)
 
 add_executable(hlclient_tests
+    test_model_preparation_cache.cpp
+    test_gauss_frame_cost_71b97.cpp
+    gauss_world_visibility_control.cpp
+    test_runtime_world_visibility.cpp
+    test_movement_tangent_rounding.cpp
+    test_stock_viewmodel_projection.cpp
+    test_console_messages_e33_2.cpp
+    test_console_server_text_e33.cpp
+    test_console_lifecycle_e33.cpp
+    test_console_application_e33.cpp
+    test_console_preworld_e33_1.cpp
+    test_console_e33.cpp
+    test_console_game_e33.cpp
+    test_console_network_e33.cpp
+    test_console_screen_e33.cpp
     test_screen_effects.cpp
     test_screen_effects_renderer.cpp
     test_post_movement_effect.cpp
@@ -30,6 +46,7 @@ add_executable(hlclient_tests
     test_external_diagnostics_e31.cpp
     test_external_session_e31.cpp
     test_movement_diagnostics_e32.cpp
+    test_priority_movement_capture_b080.cpp
     test_movement_session_diagnostics.cpp
     test_remote_movement_diagnostics.cpp
     test_video_image_e31.cpp
@@ -49,6 +66,7 @@ add_executable(hlclient_tests
     test_server_decal_birth_e30.cpp
     test_server_decal_composition_e30.cpp
     test_halflife_sprite_hud_e29.cpp
+    test_hud_damage_direction.cpp
     test_application_close_e281.cpp
     test_session_receipt_e281.cpp
     test_graceful_disconnect_e281.cpp
@@ -116,6 +134,7 @@ add_executable(hlclient_tests
     test_halflife_weapon_presentation_opengl.cpp
     test_auth_material_file.cpp
     test_authentication_provider.cpp
+    test_steam_connection_diagnostics.cpp
     test_asset_manager.cpp
     test_asset_importer_dispatch.cpp
     test_asset_registry.cpp
@@ -262,6 +281,7 @@ add_executable(hlclient_tests
     test_sha256.cpp
     test_local_resource_paths.cpp
     test_local_resource_search_roots.cpp
+    test_installation_file_checks_permission.cpp
     test_local_read_only_file.cpp
     test_local_resource_locator.cpp
     test_local_resource_md5.cpp
@@ -346,11 +366,13 @@ add_executable(hlclient_tests
     test_resource_client_response_stage.cpp
     test_resource_response_carrier.cpp
     test_resource_consistency_provider.cpp
+    test_file_consistency_response.cpp
     test_resource_transition_control.cpp
     test_resource_transition_request.cpp
     test_resource_transition_stage.cpp
     test_resource_transition_udp_integration.cpp
     test_runtime_control_decoder.cpp
+    test_runtime_public_server_controls.cpp
     test_entity_baseline_decoder.cpp
     test_client_data_decoder.cpp
     test_packet_entity_decoder.cpp
@@ -403,6 +425,7 @@ if(WIN32)
 endif()
 
 target_link_libraries(hlclient_tests
+    PRIVATE hlclient::application_console hlclient::console_assets
     PRIVATE
         hlclient::session_receipts
         hlclient::audio_sdl hlclient::goldsrc_sound_assets hlclient::goldsrc_hud_assets
@@ -519,6 +542,231 @@ if(WIN32)
             hlclient::windows_stock_source_eligibility
             hlclient::windows_secure_output
             ws2_32)
+endif()
+
+add_executable(hlclient_console_tests
+    test_console_messages_e33_2.cpp
+    test_application_close_e281.cpp
+    test_command_line.cpp
+    test_external_launcher_e31.cpp
+    test_external_session_e31.cpp
+    test_game_client_module.cpp
+    test_peer_disconnect_e28.cpp
+    test_runtime_replay_local_assets.cpp
+    test_session_receipt_e281.cpp
+    test_console_server_text_e33.cpp
+    test_console_lifecycle_e33.cpp
+    test_console_application_e33.cpp
+    test_console_preworld_e33_1.cpp
+    test_console_e33.cpp test_console_game_e33.cpp test_console_network_e33.cpp test_console_screen_e33.cpp)
+get_target_property(_e33_test_links hlclient_tests LINK_LIBRARIES)
+
+add_executable(hlclient_steam_diagnostics_tests
+    test_authentication_provider.cpp test_steam_connection_diagnostics.cpp
+    test_connect_request.cpp test_connect_request_stage.cpp
+    test_connect_response.cpp test_connect_response_wait.cpp
+    test_connect_udp_integration.cpp test_connect_response_udp_integration.cpp
+    test_handshake_connect_response.cpp test_handshake_netchan.cpp
+    test_stock_captured_signon_replay.cpp test_stock_runtime_transport_replay.cpp
+    test_console_preworld_e33_1.cpp)
+target_link_libraries(hlclient_steam_diagnostics_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_steam_diagnostics_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_steam_diagnostics_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_steam_diagnostics_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_steam_diagnostics_tests)
+hlclient_enable_address_sanitizer(hlclient_steam_diagnostics_tests)
+
+add_executable(hlclient_installation_check_tests
+    test_installation_file_checks_permission.cpp
+    test_local_resource_search_roots.cpp
+    test_file_consistency_response.cpp)
+target_link_libraries(hlclient_installation_check_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_installation_check_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_installation_check_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_installation_check_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_installation_check_tests)
+hlclient_enable_address_sanitizer(hlclient_installation_check_tests)
+
+add_executable(hlclient_resource_transition_tests
+    test_resource_transition_control.cpp test_resource_transition_request.cpp
+    test_resource_transition_stage.cpp test_resource_transition_udp_integration.cpp
+    test_resource_client_response_stage.cpp
+    test_resource_list.cpp test_resource_list_stage.cpp
+    test_file_consistency_response.cpp
+    test_local_resource_inventory.cpp test_local_resource_readiness.cpp
+    test_precache_manifest.cpp test_precache_manifest_stage.cpp
+    test_external_diagnostics_e31.cpp)
+target_link_libraries(hlclient_resource_transition_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_resource_transition_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_resource_transition_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_resource_transition_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_resource_transition_tests)
+hlclient_enable_address_sanitizer(hlclient_resource_transition_tests)
+
+add_executable(hlclient_early_signon_tests
+    test_byte_io.cpp
+    test_netchan_driver.cpp
+    test_service_message_stream.cpp test_initial_signon_stage.cpp
+    test_initial_signon_udp_integration.cpp test_pre_resource_service_stream.cpp
+    test_pre_resource_signon_stage.cpp test_pre_resource_udp_integration.cpp
+    test_delta_description.cpp test_delta_description_stream.cpp
+    test_delta_description_stage.cpp test_post_movevars_stream.cpp
+    test_user_info_update.cpp test_user_info_stream.cpp
+    test_external_diagnostics_e31.cpp)
+target_link_libraries(hlclient_early_signon_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_early_signon_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_early_signon_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_early_signon_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_early_signon_tests)
+hlclient_enable_address_sanitizer(hlclient_early_signon_tests)
+
+add_executable(hlclient_public_server_control_tests
+    test_runtime_control_decoder.cpp test_runtime_public_server_controls.cpp
+    test_packet_entity_decoder.cpp test_runtime_replay_session.cpp
+    test_external_diagnostics_e31.cpp test_goldsrc_usercmd_input_adapter.cpp)
+if(HLCLIENT_BUILD_GAME_HALFLIFE)
+    target_sources(hlclient_public_server_control_tests PRIVATE test_halflife_multiplayer.cpp)
+endif()
+target_link_libraries(hlclient_public_server_control_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_public_server_control_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_public_server_control_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_public_server_control_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_public_server_control_tests)
+hlclient_enable_address_sanitizer(hlclient_public_server_control_tests)
+
+if(HLCLIENT_BUILD_GAME_HALFLIFE)
+    add_executable(hlclient_hud_damage_tests
+        test_hud_damage_direction.cpp test_halflife_sprite_hud_e29.cpp
+        test_hud_resources_core_e29.cpp test_hud_resources_e29.cpp
+        test_hud_integration_e29.cpp test_hud_sprite_renderer_e29.cpp)
+    target_link_libraries(hlclient_hud_damage_tests PRIVATE ${_e33_test_links})
+    target_compile_features(hlclient_hud_damage_tests PRIVATE cxx_std_20)
+    target_compile_definitions(hlclient_hud_damage_tests PRIVATE HLCLIENT_HAS_GAME_HALFLIFE=1)
+    set_property(TARGET hlclient_hud_damage_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+    hlclient_enable_warnings(hlclient_hud_damage_tests)
+    hlclient_enable_address_sanitizer(hlclient_hud_damage_tests)
+endif()
+
+if(HLCLIENT_BUILD_GAME_HALFLIFE)
+    add_executable(hlclient_reload_tests
+        test_mp5_primary.cpp test_crossbow_local.cpp
+        test_local_weapon_presentation.cpp test_local_weapon_audio.cpp
+        test_mp5_secondary.cpp test_rpg_local.cpp test_shotgun_local.cpp
+        test_python_357_local.cpp test_weapon_suite_lifecycle_e28.cpp)
+    target_link_libraries(hlclient_reload_tests PRIVATE ${_e33_test_links})
+    target_compile_features(hlclient_reload_tests PRIVATE cxx_std_20)
+    target_compile_definitions(hlclient_reload_tests PRIVATE HLCLIENT_HAS_GAME_HALFLIFE=1)
+    set_property(TARGET hlclient_reload_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+    hlclient_enable_warnings(hlclient_reload_tests)
+    hlclient_enable_address_sanitizer(hlclient_reload_tests)
+    add_test(NAME hlclient_reload_sync_offline
+        COMMAND hlclient_reload_tests "[reload-sync]" --reporter compact)
+endif()
+
+add_executable(hlclient_gauss_71b97_tests test_gauss_frame_cost_71b97.cpp
+    gauss_world_visibility_control.cpp
+    test_runtime_world_visibility.cpp
+    test_video_image_e31.cpp test_external_diagnostics_e31.cpp
+    test_opengl_world_renderer.cpp test_runtime_replay_local_assets.cpp)
+if(HLCLIENT_BUILD_GAME_HALFLIFE)
+    target_sources(hlclient_gauss_71b97_tests PRIVATE test_player_appearance_e31.cpp)
+endif()
+target_link_libraries(hlclient_gauss_71b97_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_gauss_71b97_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_gauss_71b97_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_gauss_71b97_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_gauss_71b97_tests)
+hlclient_enable_address_sanitizer(hlclient_gauss_71b97_tests)
+
+# Same production-path asset cases also remain in normal full acceptance.
+add_executable(hlclient_server_entity_presentation_tests
+    test_studio_entity_animation.cpp test_remote_support_presentation.cpp
+    test_opengl_studio_entity_renderer.cpp test_entity_scene_render_package.cpp
+    test_remote_movement_diagnostics.cpp test_remote_player_visibility_trace.cpp
+    test_runtime_replay_local_assets.cpp test_runtime_replay_session.cpp)
+target_link_libraries(hlclient_server_entity_presentation_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_server_entity_presentation_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_server_entity_presentation_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_server_entity_presentation_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_server_entity_presentation_tests)
+hlclient_enable_address_sanitizer(hlclient_server_entity_presentation_tests)
+target_sources(hlclient_tests PRIVATE test_studio_entity_animation.cpp test_remote_support_presentation.cpp)
+target_sources(hlclient_tests PRIVATE test_multiplayer_timeline.cpp test_multiplayer_presentation_diagnostics.cpp test_weapon_diagnostics.cpp)
+add_executable(hlclient_comprehensive_diagnostics_tests
+    test_multiplayer_timeline.cpp test_multiplayer_presentation_diagnostics.cpp
+    test_weapon_diagnostics.cpp
+    test_movement_diagnostics_e32.cpp test_remote_movement_diagnostics.cpp
+    test_input_events.cpp test_sdl_input_translation.cpp)
+target_link_libraries(hlclient_comprehensive_diagnostics_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_comprehensive_diagnostics_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_comprehensive_diagnostics_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_comprehensive_diagnostics_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_comprehensive_diagnostics_tests)
+hlclient_enable_address_sanitizer(hlclient_comprehensive_diagnostics_tests)
+
+add_executable(hlclient_b080_cpu_tests test_runtime_replay_local_assets.cpp
+    test_model_preparation_cache.cpp
+    test_entity_snapshot_history.cpp)
+target_link_libraries(hlclient_b080_cpu_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_b080_cpu_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_b080_cpu_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_b080_cpu_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_b080_cpu_tests)
+hlclient_enable_address_sanitizer(hlclient_b080_cpu_tests)
+
+# The same cases remain in the full suite. This small driver makes Debug
+# verification of the shared movement mechanism and normal host practical.
+add_executable(hlclient_movement_c6_tests
+    test_local_player_movement_integration.cpp
+    test_post_movement_effect.cpp
+    test_movement_tangent_rounding.cpp
+    test_movement_diagnostics_e32.cpp
+    test_priority_movement_capture_b080.cpp
+    test_movement_session_diagnostics.cpp
+    test_reference_lift_stability_e32.cpp
+    test_resource_client_response_stage.cpp)
+target_link_libraries(hlclient_movement_c6_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_movement_c6_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_movement_c6_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_movement_c6_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_movement_c6_tests)
+hlclient_enable_address_sanitizer(hlclient_movement_c6_tests)
+add_dependencies(hlclient_movement_c6_tests hlclient)
+
+if(HLCLIENT_BUILD_GAME_HALFLIFE)
+    add_executable(hlclient_viewmodel_tests test_stock_viewmodel_projection.cpp
+        test_game_camera_intent.cpp test_render_camera_math.cpp test_viewmodel_clipping.cpp)
+    target_link_libraries(hlclient_viewmodel_tests PRIVATE ${_e33_test_links})
+    target_compile_features(hlclient_viewmodel_tests PRIVATE cxx_std_20)
+    target_compile_definitions(hlclient_viewmodel_tests PRIVATE HLCLIENT_HAS_GAME_HALFLIFE=1)
+    set_property(TARGET hlclient_viewmodel_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+    hlclient_enable_warnings(hlclient_viewmodel_tests)
+    hlclient_enable_address_sanitizer(hlclient_viewmodel_tests)
+endif()
+target_link_libraries(hlclient_console_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_console_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_console_tests PRIVATE HLCLIENT_HAS_GAME_HALFLIFE=1)
+set_property(TARGET hlclient_console_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_console_tests)
+hlclient_enable_address_sanitizer(hlclient_console_tests)
+if(MSVC AND HLCLIENT_ENABLE_ADDRESS_SANITIZER)
+    # Keep the instrumented test driver debuggable and avoid MSVC 14.34's
+    # excessive /O2 work on large synthetic asset fixtures. This does not alter
+    # production library optimization or normal Debug/Release acceptance.
+    target_compile_options(hlclient_console_tests PRIVATE /Od /Ob0)
+endif()
+if(WIN32)
+    add_dependencies(hlclient_console_tests hlclient_external_process_fixture)
 endif()
 
 target_compile_features(hlclient_tests PRIVATE cxx_std_20)
@@ -953,6 +1201,14 @@ set_tests_properties(
 
 if(WIN32 AND HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE)
     add_test(
+        NAME hlclient_movement_session_analysis_b080
+        COMMAND "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+            -NoProfile -NonInteractive -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/scripts/test_movement_session_analysis.ps1"
+    )
+    set_tests_properties(hlclient_movement_session_analysis_b080 PROPERTIES
+        LABELS "offline;no-stock;reporting;b080" TIMEOUT 60)
+    add_test(
         NAME hlclient_normal_close_verdict_e282_no_stock
         COMMAND "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
             -NoProfile -NonInteractive -ExecutionPolicy Bypass
@@ -960,5 +1216,8 @@ if(WIN32 AND HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE)
             -OrchestratorPath $<TARGET_FILE:hlclient_stock_runtime_orchestrator>
     )
     set_tests_properties(hlclient_normal_close_verdict_e282_no_stock PROPERTIES
-        LABELS "offline;no-stock;reporting;e282" TIMEOUT 180)
+        # Repeated production-AST validation in 32 child processes is CPU
+        # intensive. Keep the existing timeout/assertions; avoid overlapping
+        # this offline reporting gate with other expensive fixture processes.
+        LABELS "offline;no-stock;reporting;e282" TIMEOUT 180 RUN_SERIAL TRUE)
 endif()

@@ -1,5 +1,18 @@
 # Architecture
 
+## Stock viewmodel and muzzle projection correction (2026-10-17)
+
+The neutral camera intent optionally names the aspect at which its horizontal
+FOV is defined; absence preserves the previous actual-viewport behavior.
+Half-Life selects 4:3 reference coverage for its modern stock widescreen policy.
+The existing world/first-person/sprite projection is shared, with no renderer
+weapon-name policy. A bounded neutral camera-local held-origin translation is
+applied to Studio instance and both attachment samplers, never to canonical
+movement/aim or source mesh scale. Half-Life selects the SDK full-view baseline
+of one unit below the eye. Existing source SPR scales remain unchanged; the
+corrected projection removes their wide-screen enlargement. See
+[stock framing verification and limits](STOCK_VIEWMODEL_MUZZLE_PROJECTION.md).
+
 ## Published continuation checkpoint and artifact cleanup (2026-10-16)
 
 Source checkpoint `1d98b90ba4589e327ac73a94120ad212574ef7ba` is published on
@@ -2596,3 +2609,47 @@ not create a second motion floor when its flag clears. All independent position
 and lifetime discontinuities, ordinary entities and default/core behavior remain
 strict. The renderer knows no effect-bit meaning, attack label or weapon. The
 HL module retains separate gait continuity and main-animation restart handling.
+
+### Application console and loading lifetime (E33)
+
+The neutral console model, typed command/cvar registries, bounded executor and
+user-scoped configuration store live in `hlclient_console`. Application input
+arbitration and loading presentation live in `hlclient_application_console`.
+The application owns one window/context across fresh, isolated connection
+attempts; game/network/audio/prediction owners end before the next attempt.
+Cancellation and generation checks prevent late CPU import results from being
+installed. GL work and event pumping stay on the application thread.
+
+The concrete module supplies its visual theme and game command registrations
+through neutral contracts. The renderer accepts only ordered screen-space
+image/text/clip values; it knows neither Half-Life resource names nor console
+commands. UI draws after scene correction and HUD, also without a world.
+Approved console image preparation uses the existing exact-root locator and
+verified read-only opener, with a narrow indexed LMP decoder. A project-owned
+fallback is available before any resource or network operation.
+
+Local commands retain origin through bounded alias/exec expansion. Server text
+is data, not input to the executor; the established narrow stufftext protocol
+policy is unchanged. Typed server requests use the existing reliable channel.
+Console `disconnect` has a separate durable close reason from window close.
+Each connection attempt retains immutable, role-qualified evidence, including
+earlier failures. Shared launcher settings use field-wise merging; console
+scripts never write stock configuration. See `WON_STYLE_CONSOLE_LOADING_E33.md`
+for the compatibility matrix, tests and local-compatible limits.
+
+E33.2 uses owning neutral text events at the existing module/host commit seam.
+The concrete Half-Life module alone formats DeathMsg snapshots and selects
+TextMsg destinations. The generic host validates provenance/bounds, orders
+accepted publication and deduplicates by the established source cursor. A
+bounded payload scope defers console emission while the live initialization
+owner validates all of its subrecords; failure/reset discards deferred text.
+HUD sampling never writes console history. The same core queue distinguishes
+accepted game sentences from received server data and technical diagnostics.
+
+The existing exact-world-root HUD preparation worker may additionally read the
+module-declared fixed `titles.txt` dependency. A filesystem-free GoldSrc parser
+returns a bounded neutral catalogue; no concrete game dependency enters asset
+or renderer code, and no server text can choose a path or execute a command.
+Notify/talk/center values use existing neutral HUD primitives; console history
+retains independent ownership and Unicode sanitation. See
+`CONSOLE_GAMEPLAY_SERVER_MESSAGES_E33_2.md` for limits and source semantics.

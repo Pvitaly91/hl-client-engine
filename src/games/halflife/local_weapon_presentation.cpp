@@ -1,5 +1,6 @@
 #include <hlclient/games/halflife/local_weapon_presentation.hpp>
 #include <hlclient/games/halflife/firearm_profile.hpp>
+#include <hlclient/games/halflife/weapon_diagnostics.hpp>
 #include <hlclient/goldsrc/reference_prediction_command.hpp>
 #include <algorithm>
 #include <array>
@@ -73,6 +74,7 @@ void LocalWeaponPresentationController::start_crossbow(std::uint32_t command,dou
       role ? 1U : previous ? previous->body : idle_body_,at+2.25,false,!sniper);
   if(!action_) return;
   action_->crossbow_sniper=sniper;
+  diagnostic_action(core::MultiplayerActionPhase::accepted);
   if(sniper) recoil_active_=false; // EV_FireCrossbow2 has no V_PunchAxis
   if(!role && previous) action_->visual=*previous; // no event animation when clip=reserve=0
 }
@@ -86,6 +88,7 @@ void LocalWeaponPresentationController::bind_model(std::optional<LocalWeaponMode
     }
   }
   if (model_ == model) return;
+  server_reload_predecessor_deadline_.reset();
   finish_pending(LocalWeaponActionStatus::server_rejected);
   action_.reset(); server_visual_.reset(); recoil_active_ = false;
   model_ = std::move(model); idle_sequence_ = 0U; idle_body_ = 0U;
@@ -100,6 +103,7 @@ void LocalWeaponPresentationController::bind_model(std::optional<LocalWeaponMode
   audio_.bind(model_);
 }
 void LocalWeaponPresentationController::publish_idle(double now) {
+  server_reload_predecessor_deadline_.reset();
   if (!valid_pose(idle_sequence_, idle_body_)) {
     counters_.error = LocalWeaponPresentationError::unsupported_pose; return;
   }
@@ -154,11 +158,13 @@ void LocalWeaponPresentationController::observe_shotgun_reload(
         LocalWeaponActionStatus::retained_server_event};
   }
 }
-void LocalWeaponPresentationController::observe_empty_magazine_reload(std::optional<bool> previous_reload,
+void LocalWeaponPresentationController::observe_conventional_reload(std::optional<bool> previous_reload,
     bool client_pose_published,std::uint32_t sequence,double now) {
-  if(in_reload_!=true || previous_reload==true || clip_!=0 || !valid_pose(sequence,0U)) return;
+  const auto maximum_clip=mp5_selected_ ? 50 : crossbow_selected_ ? 5 : 1;
+  if(in_reload_!=true || previous_reload!=false || !clip_ || *clip_<0 ||
+      *clip_>=maximum_clip || !valid_pose(sequence,0U)) return;
   // Stock auto-reload and held-R retries have no new local command edge. A
-  // fresh m_fInReload occurrence authorizes the existing MP5/RPG reload pose
+  // fresh m_fInReload occurrence authorizes the conventional reload pose
   // even when clientdata weaponanim retains the previous reload's role.
   // This is presentation of a server transition, not a local Reload/ammo edit.
   if(action_ && action_->identity.kind==LocalWeaponAction::reload) {
@@ -167,12 +173,92 @@ void LocalWeaponPresentationController::observe_empty_magazine_reload(std::optio
     action_->visual.source=LocalWeaponAnimationSource::confirmed_weapon_state;
     return; // Keep the provisional command's restart/time and confirmation count.
   }
-  finish_pending(LocalWeaponActionStatus::server_rejected);
+  server_reload_predecessor_deadline_.reset();
+  if(action_ && (bullet_fire(action_->identity.kind) ||
+      (mp5_selected_ && action_->identity.kind==LocalWeaponAction::secondary_launch)))
+    server_reload_predecessor_deadline_=action_->deadline;
+  else {
+    for(const auto& prior:pending_fire_) if(prior &&
+        (!server_reload_predecessor_deadline_ || prior->deadline>*server_reload_predecessor_deadline_))
+      server_reload_predecessor_deadline_=prior->deadline;
+    if(pending_launch_ && (!server_reload_predecessor_deadline_ ||
+        pending_launch_->deadline>*server_reload_predecessor_deadline_))
+      server_reload_predecessor_deadline_=pending_launch_->deadline;
+  }
+  if((mp5_selected_ || crossbow_selected_) && action_ && bullet_fire(action_->identity.kind))
+    retain_fire_predecessor();
+  else if(mp5_selected_ && action_ && action_->identity.kind==LocalWeaponAction::secondary_launch)
+    pending_launch_=action_;
+  else finish_pending(LocalWeaponActionStatus::server_rejected);
   action_.reset();recoil_active_=false;
   if(client_pose_published && server_visual_ && server_visual_->sequence==sequence && server_visual_->body==0U)
     server_visual_->source=LocalWeaponAnimationSource::confirmed_weapon_state;
   else server_visual_=LocalWeaponVisual{sequence,0U,++restart_identity_,now,
       LocalWeaponAnimationSource::confirmed_weapon_state,LocalWeaponActionStatus::retained_server_event};
+}
+void LocalWeaponPresentationController::retain_fire_predecessor() noexcept {
+  auto& previous=pending_fire_[next_pending_fire_++%pending_fire_.size()];
+  if(previous && previous->status==LocalWeaponActionStatus::predicted_pending) {
+    ++counters_.actions_rejected;if(!previous->crossbow_sniper)++counters_.recoil_rejected;
+    provisional_rounds_-=std::min(provisional_rounds_,static_cast<std::size_t>(previous->rounds_reserved));
+  }
+  previous=action_;
+}
+bool LocalWeaponPresentationController::reload_predecessor_active(double now) const noexcept {
+  if(!mp5_selected_ && !crossbow_selected_) return false;
+  if(action_) return action_->identity.kind==LocalWeaponAction::reload &&
+      action_->reload_predecessor_deadline && now<=*action_->reload_predecessor_deadline &&
+      (action_->status==LocalWeaponActionStatus::predicted_pending || in_reload_==true ||
+       (next_client_attack_ && std::isfinite(*next_client_attack_) &&
+        *next_client_attack_>std::max(0.0,now-timer_observed_at_)+.001));
+  if(in_reload_!=true || !server_visual_ ||
+      server_visual_->sequence!=(mp5_selected_ ? 3U : 7U)) return false;
+  return (server_reload_predecessor_deadline_ && now<=*server_reload_predecessor_deadline_) ||
+    std::any_of(pending_fire_.begin(),pending_fire_.end(),[now](const auto& prior) {
+      return prior && now<=prior->deadline;
+    }) || (pending_launch_ && now<=pending_launch_->deadline);
+}
+void LocalWeaponPresentationController::diagnostic_rejection(const LocalWeaponSubmittedCommand& command,std::string_view reason) const noexcept {
+  if(!diagnostic_observer_ || !diagnostic_observer_->weapon_diagnostics_enabled() || !weapon_id_ ||
+      *weapon_id_==9 || *weapon_id_==10 || !(command.buttons&(1U|(1U<<11)|(1U<<13))))return;
+  WeaponActionDiagnosticObservation o;o.identity={generation_,*weapon_id_,model_ ? model_->model_index : 0,
+      model_ ? model_->resource_revision : 0,command.sequence,LocalWeaponAction::primary_fire,command.sample_end_seconds,canonical_revision_};
+  o.mode=(command.buttons&(1U<<11)) ? WeaponDiagnosticMode::secondary : (command.buttons&1) ? WeaponDiagnosticMode::primary : WeaponDiagnosticMode::reload;
+  if(const auto* capability=weapon_diagnostic_capability(*weapon_id_))o.kind=capability->modes[static_cast<std::size_t>(o.mode)];
+  o.command=command;o.phase=core::MultiplayerActionPhase::rejected;o.reason=reason;
+  o.clip=clip_;if(reserve_)o.reserve=*reserve_;o.reloading=in_reload_;
+  o.next_attack=o.mode==WeaponDiagnosticMode::secondary ? next_secondary_attack_ : next_primary_attack_;
+  diagnostic_observer_->weapon_action_observed(o);
+}
+void LocalWeaponPresentationController::diagnostic_action(core::MultiplayerActionPhase phase) const noexcept {
+  if(!diagnostic_observer_ || !diagnostic_observer_->weapon_diagnostics_enabled() || !action_)return;
+  WeaponActionDiagnosticObservation observation;
+  observation.identity=action_->identity;observation.phase=phase;observation.status=action_->status;
+  const auto kind=action_->identity.kind;
+  observation.mode=kind==LocalWeaponAction::reload ? WeaponDiagnosticMode::reload :
+      kind==LocalWeaponAction::secondary_fire || kind==LocalWeaponAction::secondary_launch || action_->glock_secondary ?
+      WeaponDiagnosticMode::secondary : WeaponDiagnosticMode::primary;
+  if(const auto* capability=weapon_diagnostic_capability(action_->identity.weapon_id))
+    observation.kind=capability->modes[static_cast<std::size_t>(observation.mode)];
+  if(kind==LocalWeaponAction::prime) {observation.kind=core::MultiplayerActionKind::throw_object;
+    if(phase==core::MultiplayerActionPhase::accepted)observation.phase=core::MultiplayerActionPhase::begin;}
+  else if(kind==LocalWeaponAction::throw_release || kind==LocalWeaponAction::deploy_charge)
+    observation.kind=tripmine_selected_ ? core::MultiplayerActionKind::place : core::MultiplayerActionKind::throw_object;
+  else if(kind==LocalWeaponAction::remote_detonate)observation.kind=core::MultiplayerActionKind::detonate;
+  if(hand_grenade_selected_ && kind==LocalWeaponAction::throw_release && hand_grenade_.prime_command)
+    observation.related_command_sequence=hand_grenade_.prime_command;
+  if(action_->crossbow_sniper && bullet_fire(kind))observation.kind=core::MultiplayerActionKind::fire;
+  observation.clip=clip_;if(reserve_)observation.reserve=*reserve_;
+  observation.reloading=in_reload_;observation.next_attack=observation.mode==WeaponDiagnosticMode::secondary ? next_secondary_attack_ : next_primary_attack_;
+  const auto& command=command_history_[action_->identity.command_sequence%command_history_.size()];
+  if(command && command->sequence==action_->identity.command_sequence && command->generation==action_->identity.generation) {
+    observation.command=command;
+    if((kind==LocalWeaponAction::deploy_charge || kind==LocalWeaponAction::remote_detonate) &&
+        (command->buttons&(1U<<11)))observation.mode=WeaponDiagnosticMode::secondary;
+  }
+  // Exact current local visual emitters, not an assertion about server RNG/rays.
+  if(shotgun_selected_ && bullet_fire(kind))observation.emitter_count=kind==LocalWeaponAction::secondary_fire ? 8U : 4U;
+  diagnostic_observer_->weapon_action_observed(observation);
 }
 void LocalWeaponPresentationController::finish_pending(LocalWeaponActionStatus status) noexcept {
   if (!action_ || action_->status != LocalWeaponActionStatus::predicted_pending) return;
@@ -183,6 +269,8 @@ void LocalWeaponPresentationController::finish_pending(LocalWeaponActionStatus s
         receipt->reserved=false;
     }
   action_->status = status; action_->visual.status = status; counters_.status = status;
+  diagnostic_action(status==LocalWeaponActionStatus::server_confirmed || status==LocalWeaponActionStatus::server_corrected ?
+      core::MultiplayerActionPhase::server_observed : core::MultiplayerActionPhase::cancel);
   if (status == LocalWeaponActionStatus::server_confirmed || status == LocalWeaponActionStatus::server_corrected) {
     ++counters_.actions_confirmed;
     if (status == LocalWeaponActionStatus::server_corrected) ++counters_.actions_corrected;
@@ -217,20 +305,27 @@ void LocalWeaponPresentationController::finish_pending(LocalWeaponActionStatus s
 void LocalWeaponPresentationController::start(LocalWeaponAction kind, std::uint32_t command,
     double at, std::uint32_t seq, std::uint8_t body, double deadline, bool glock_secondary,bool apply_recoil) {
   if (!valid_pose(seq,body)) { counters_.error = LocalWeaponPresentationError::unsupported_pose; return; }
-  if((mp5_selected_ || shotgun_selected_) && (bullet_fire(kind) || kind==LocalWeaponAction::secondary_launch) && action_ &&
+  const bool conventional_reload=kind==LocalWeaponAction::reload && (mp5_selected_ || crossbow_selected_);
+  const auto predecessor_deadline=conventional_reload && action_ &&
+      (bullet_fire(action_->identity.kind) || (mp5_selected_ && action_->identity.kind==LocalWeaponAction::secondary_launch))
+      ? std::optional{action_->deadline} : std::nullopt;
+  if((mp5_selected_ || shotgun_selected_ || crossbow_selected_) &&
+      (bullet_fire(kind) || kind==LocalWeaponAction::secondary_launch || conventional_reload) && action_ &&
       bullet_fire(action_->identity.kind) &&
-      action_->status==LocalWeaponActionStatus::predicted_pending) {
-    auto& previous=pending_fire_[next_pending_fire_++%pending_fire_.size()];
-    if(previous) {++counters_.actions_rejected;++counters_.recoil_rejected;
-      provisional_rounds_-=std::min(provisional_rounds_,static_cast<std::size_t>(previous->rounds_reserved));}
-    previous=action_;
+      (action_->status==LocalWeaponActionStatus::predicted_pending ||
+       (crossbow_selected_ && conventional_reload && !action_->scripted_event_confirmed))) {
+    retain_fire_predecessor();
   }
+  if(conventional_reload && mp5_selected_ && action_ &&
+      action_->identity.kind==LocalWeaponAction::secondary_launch)
+    pending_launch_=action_;
   action_ = ActionState{{generation_,*weapon_id_,*model_index_,model_->resource_revision,
       command,kind,at,canonical_revision_},LocalWeaponActionStatus::predicted_pending,
       client_source_ ? client_source_->record_ordinal : model_bound_record_ordinal_,
       clip_,reserve_,deadline,{seq,body,++restart_identity_,at,
       LocalWeaponAnimationSource::provisional_command,LocalWeaponActionStatus::predicted_pending},
       glock_secondary};
+  action_->reload_predecessor_deadline=predecessor_deadline;
   if(kind==LocalWeaponAction::secondary_launch) {
     action_->reserve_before=secondary_reserve_;
     ++provisional_grenades_;
@@ -241,6 +336,10 @@ void LocalWeaponPresentationController::start(LocalWeaponAction kind, std::uint3
     provisional_rounds_+=action_->rounds_reserved;
   }
   ++counters_.actions_started; counters_.status = LocalWeaponActionStatus::predicted_pending;
+  // Some profiles finalize an identity/mode after start; their owning caller
+  // emits once after that finalization, never before a provisional model ID.
+  if(kind==LocalWeaponAction::reload || (!crossbow_selected_ && !satchel_selected_ && !tripmine_selected_ && !snark_selected_))
+    diagnostic_action(core::MultiplayerActionPhase::accepted);
   audio_.action(action_->identity);
   if (bullet_fire(kind)) {
     if(kind==LocalWeaponAction::secondary_fire) ++counters_.secondary_fire_starts;
@@ -628,7 +727,9 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
     if(generation_!=0U) secondary_event.reset();
     if(generation_!=0U) glock_secondary_event.reset();
     if(generation_!=0U) { shotgun_single_event.reset(); shotgun_double_event.reset(); }
+    const auto diagnostic_observer=diagnostic_observer_;
     *this = LocalWeaponPresentationController{};
+    diagnostic_observer_=diagnostic_observer;
     maximum_clients_=maximum_clients;
     python_event_index_=python_event;
     crossbow_event_index_=crossbow_event;crossbow_sniper_event_index_=crossbow_sniper_event;
@@ -648,6 +749,7 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
   }
   const auto& hud = state.weapon_hud;
   if (life_epoch_ != state.lifecycle.life_epoch || life_deaths_ != state.lifecycle.deaths) {
+    server_reload_predecessor_deadline_.reset();
     const bool shotgun_transition=weapon_id_==7U || hud.active_weapon_id==7U;
     audio_.cancel();
     life_epoch_ = state.lifecycle.life_epoch;
@@ -685,6 +787,7 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
       [&](const auto& variant){return variant && variant->generation==state.generation && variant->model_index==*index;}))
     model_index_=index; // Satchel's server-confirmed model pair shares one lifecycle.
   if (weapon_id_ != active || model_index_ != index) {
+    server_reload_predecessor_deadline_.reset();
     const bool shotgun_transition=weapon_id_==7U || active==7U;
     audio_.cancel();
     finish_pending(LocalWeaponActionStatus::server_rejected);
@@ -715,6 +818,7 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
           state.lifecycle.last_death_source->record_ordinal))
     canonical_dead_ = true; // wait for server-owned new-life weapon binding
   if (canonical_dead_) {
+    server_reload_predecessor_deadline_.reset();
     finish_pending(LocalWeaponActionStatus::server_rejected);
     pending_fire_.fill(std::nullopt);provisional_rounds_=0;
     pending_launch_.reset();provisional_grenades_=0;
@@ -812,7 +916,10 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
         if (valid_pose(seq,state_body)) {
           if (idle(*active,seq)) idle_sequence_ = seq;
           // State is not a repeat event. Unchanged idle cannot erase a local action.
-          if (!action_ && (!server_visual_ || server_visual_->sequence != seq)) {
+          const bool retain_observed_reload=fresh_weapon_slot && in_reload_==true &&
+              (mp5_selected_ || crossbow_selected_) && server_visual_ &&
+              server_visual_->sequence==(mp5_selected_ ? 3U : 7U);
+          if (!action_ && !retain_observed_reload && (!server_visual_ || server_visual_->sequence != seq)) {
             server_visual_ = LocalWeaponVisual{seq,state_body,++restart_identity_,now,
               LocalWeaponAnimationSource::clientdata_state,LocalWeaponActionStatus::retained_server_event};
             client_pose_published=true;
@@ -900,27 +1007,34 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
     if(pending_launch_ && pending_launch_->reserve_before &&
         canonical_revision_>pending_launch_->identity.canonical_pre_revision &&
         *secondary_reserve_<*pending_launch_->reserve_before) {
-      ++counters_.actions_confirmed;++counters_.secondary_launch_confirmed;++counters_.recoil_confirmed;
+      if(pending_launch_->status==LocalWeaponActionStatus::predicted_pending) {
+        ++counters_.actions_confirmed;++counters_.secondary_launch_confirmed;++counters_.recoil_confirmed;
+      }
       pending_launch_.reset();
     }
   }
   if(fresh_client && pending_launch_ && old_secondary_timer && next_secondary_attack_ &&
       *next_secondary_attack_>*old_secondary_timer+0.01 && client_source_ &&
       client_source_->record_ordinal>pending_launch_->pre_record_ordinal) {
-    ++counters_.actions_confirmed;++counters_.secondary_launch_confirmed;++counters_.recoil_confirmed;
+    if(pending_launch_->status==LocalWeaponActionStatus::predicted_pending) {
+      ++counters_.actions_confirmed;++counters_.secondary_launch_confirmed;++counters_.recoil_confirmed;
+    }
     pending_launch_.reset();
   }
-  if((mp5_selected_ || shotgun_selected_) && fresh && old_clip && clip_ && *clip_<*old_clip) {
+  if((mp5_selected_ || shotgun_selected_ || crossbow_selected_) && fresh && old_clip && clip_ && *clip_<*old_clip) {
     const auto consumed=static_cast<std::size_t>(*old_clip-*clip_);
     provisional_rounds_=consumed>=provisional_rounds_ ? 0U : provisional_rounds_-consumed;
-    for(auto& pending:pending_fire_) if(pending && pending->clip_before &&
+    for(auto& pending:pending_fire_) if(pending && pending->status==LocalWeaponActionStatus::predicted_pending && pending->clip_before &&
         canonical_revision_>pending->identity.canonical_pre_revision &&
         *clip_<=*pending->clip_before-pending->rounds_reserved) {
       ++counters_.actions_confirmed;
       if(pending->identity.kind==LocalWeaponAction::secondary_fire) ++counters_.secondary_fire_confirmed;
       else ++counters_.primary_fire_confirmed;
-      ++counters_.recoil_confirmed;
-      pending.reset();
+      if(!pending->crossbow_sniper) ++counters_.recoil_confirmed;
+      if(crossbow_selected_ || (mp5_selected_ && !action_ && in_reload_==true &&
+          server_visual_ && server_visual_->sequence==3U))
+        pending->status=LocalWeaponActionStatus::server_confirmed;
+      else pending.reset();
     }
   }
   const bool post_action = action_ && canonical_revision_ > action_->identity.canonical_pre_revision &&
@@ -958,11 +1072,12 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
   }
   if(shotgun_selected_ && fresh_client)
     observe_shotgun_reload(old_special_reload,old_clip,now);
-  if((mp5_selected_ || rpg_selected_) && fresh_weapon_slot && !canonical_dead_)
-    observe_empty_magazine_reload(old_reload,client_pose_published,mp5_selected_ ? 3U : 2U,now);
+  if((mp5_selected_ || crossbow_selected_ || rpg_selected_) && fresh_weapon_slot && !canonical_dead_)
+    observe_conventional_reload(old_reload,client_pose_published,mp5_selected_ ? 3U : crossbow_selected_ ? 7U : 2U,now);
+  const bool inherited_reload_pose=reload_predecessor_active(now);
   // A changed current-record clientdata state has higher precedence than a
   // derived/predicted pose, but is never an automatic repeated restart event.
-  if (changed_client_animation && action_ && fresh_client &&
+  if (changed_client_animation && action_ && fresh_client && !inherited_reload_pose &&
       client_source_->record_ordinal > action_->pre_record_ordinal) {
     const auto seq = *changed_client_animation;
     if (!valid_pose(seq, action_->visual.body)) {
@@ -992,7 +1107,13 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
       [&](const auto& item) { return item && item->source == event.source; });
     if (!seen) {
       if (!valid_pose(event.sequence,event.body)) counters_.error = LocalWeaponPresentationError::unsupported_pose;
-      else {
+      else if(inherited_reload_pose &&
+          (mp5_selected_ ? event.sequence==2U || (event.sequence>=5U && event.sequence<=7U) :
+           crossbow_selected_ && (event.sequence==4U || event.sequence==6U))) {
+        // The previous shot's exact pose is consumed once without taking
+        // ownership from the newer reload or replaying its audio markers.
+        event_history_[event_history_next_++ % event_history_.size()] = event;
+      } else {
         event_history_[event_history_next_++ % event_history_.size()] = event;
         const bool related = action_ && event.source.record_ordinal > action_->pre_record_ordinal &&
           now <= action_->deadline;
@@ -1017,10 +1138,11 @@ void LocalWeaponPresentationController::observe(const client::RuntimeClientObser
           if (!same) { action_->status = LocalWeaponActionStatus::server_corrected; action_->visual.status = action_->status; }
           action_->visual.source = LocalWeaponAnimationSource::service_event;
           if (idle(*active,event.sequence)) { server_visual_ = action_->visual; action_.reset(); }
-        } else if((mp5_selected_ || rpg_selected_) && in_reload_==true &&
-            event.sequence==(mp5_selected_ ? 3U : 2U) && event.body==0U &&
+        } else if((mp5_selected_ || crossbow_selected_ || rpg_selected_) && in_reload_==true &&
+            event.sequence==(mp5_selected_ ? 3U : crossbow_selected_ ? 7U : 2U) && event.body==0U &&
             server_visual_ && server_visual_->sequence==event.sequence && server_visual_->body==0U &&
-            server_visual_->source==LocalWeaponAnimationSource::confirmed_weapon_state) {
+            (server_visual_->source==LocalWeaponAnimationSource::confirmed_weapon_state ||
+             server_visual_->source==LocalWeaponAnimationSource::service_event)) {
           // First matching svc confirmation of this observed reload occurrence
           // upgrades provenance without restarting its already visible timeline.
           server_visual_->source=LocalWeaponAnimationSource::service_event;
@@ -1051,11 +1173,13 @@ void LocalWeaponPresentationController::submit(const LocalWeaponSubmittedCommand
         goldsrc::kReferenceGoldSrcButtonUse | goldsrc::kReferenceGoldSrcButtonReload;
     if (!canonical_dead_ && (command.buttons & action_buttons) == 0U)
       life_release_barrier_ = false;
+    diagnostic_rejection(command,canonical_dead_ ? "local_dead" : "local_release_required");
     return; // presentation only; immutable committed wire command is unchanged
   }
   const bool reload = (command.buttons & goldsrc::kReferenceGoldSrcButtonReload) != 0U;
   const bool reload_edge = reload && !reload_button_held_; reload_button_held_ = reload;
-  if (!supported()) return;
+  if (!supported()) {diagnostic_rejection(command,canonical_dead_ ? "local_dead" : "local_model_or_state_unavailable");return;}
+  const auto actions_before=counters_.actions_started;
   const auto at = std::clamp(command.sample_end_seconds,std::max(0.0,now - 0.25),now);
   const bool attack = (command.buttons & goldsrc::kReferenceGoldSrcButtonAttack) != 0U;
   const bool secondary=(command.buttons & goldsrc::kReferenceGoldSrcButtonAttack2)!=0U;
@@ -1070,11 +1194,34 @@ void LocalWeaponPresentationController::submit(const LocalWeaponSubmittedCommand
       *timer <= now - timer_observed_at_ + 0.001);
   };
   const bool ready = timer_ready(next_primary_attack_) && timer_ready(next_client_attack_);
+  // SDK ItemPostFrame gives eligible attack2/attack precedence, then retries
+  // held R each command. Reload itself waits only for the player's timer.
+  const bool conventional_reload_request=reload && timer_ready(next_client_attack_) &&
+      !(secondary && timer_ready(next_secondary_attack_)) &&
+      !(attack && timer_ready(next_primary_attack_));
+  const bool reload_can_replace=!pending || (action_ &&
+      (bullet_fire(action_->identity.kind) ||
+       (mp5_selected_ && action_->identity.kind==LocalWeaponAction::secondary_launch)));
+  const auto diagnostic_no_action=[&] {
+    if(counters_.actions_started!=actions_before)return;
+    const auto mode=secondary ? WeaponDiagnosticMode::secondary : attack ? WeaponDiagnosticMode::primary : WeaponDiagnosticMode::reload;
+    const auto* capability=weapon_id_ ? weapon_diagnostic_capability(*weapon_id_) : nullptr;
+    // These are observed local gates, not a claim that the server rejected a command.
+    if(capability && capability->modes[static_cast<std::size_t>(mode)]==core::MultiplayerActionKind::unknown)
+      diagnostic_rejection(command,"local_mode_unsupported");
+    else if(in_reload_==true || reload_visual)diagnostic_rejection(command,"local_reload_gate");
+    else if(!timer_ready(next_client_attack_) || !timer_ready(secondary ? next_secondary_attack_ : next_primary_attack_))
+      diagnostic_rejection(command,"local_attack_timer_gate");
+    else if((clip_ && *clip_==0 && !secondary) || (reserve_ && *reserve_==0 && clip_==-1) ||
+        (secondary && mp5_selected_ && secondary_reserve_==0))diagnostic_rejection(command,"local_ammo_gate");
+    else if(pending)diagnostic_rejection(command,"local_pending_action_gate");
+    else diagnostic_rejection(command,"local_action_not_accepted");
+  };
   if(snark_selected_) {
     if(command.sample_end_seconds>now || now-command.sample_end_seconds>.25) {counters_.error=LocalWeaponPresentationError::invalid_time;return;}
-    submit_snark(command,ready);return;
+    submit_snark(command,ready);if(!snark_attempt_count_)diagnostic_no_action();return;
   }
-  if(tripmine_selected_) {if(!secondary)submit_tripmine(command,ready);return;}
+  if(tripmine_selected_) {if(!secondary)submit_tripmine(command,ready);if(!tripmine_attempt_)diagnostic_no_action();return;}
   if(satchel_selected_) {
     if(command.sample_end_seconds>now) {counters_.error=LocalWeaponPresentationError::invalid_time;return;}
     submit_satchel(command,ready,timer_ready(next_secondary_attack_) && timer_ready(next_client_attack_));
@@ -1088,7 +1235,7 @@ void LocalWeaponPresentationController::submit(const LocalWeaponSubmittedCommand
     // The server's biological Reload is not the R-key magazine action. No
     // provisional regeneration, empty auto-switch, or negative reserve here.
     if(clip_!=-1 || !reserve_ || *reserve_>hornet_maximum_ammo || *reserve_<=reserved ||
-        (in_reload_ && *in_reload_) || !timer_ready(next_client_attack_)) return;
+        (in_reload_ && *in_reload_) || !timer_ready(next_client_attack_)) {diagnostic_no_action();return;}
     if(secondary && timer_ready(next_secondary_attack_) && at+1e-8>=hornet_secondary_ready_at_)
       start_hornet(HornetFireMode::fast,command.sequence,at);
     else if(attack && !secondary && ready && at+1e-8>=hornet_primary_ready_at_)
@@ -1128,13 +1275,16 @@ void LocalWeaponPresentationController::submit(const LocalWeaponSubmittedCommand
         rpg_state_.can_reload_or_holster())
       start(LocalWeaponAction::reload,command.sequence,at,2U,0U,at+2.0);
   } else if (crossbow_selected_) {
+    const auto reserved_shot=action_ && bullet_fire(action_->identity.kind) &&
+        action_->clip_before==clip_ ? 1 : 0;
+    const auto available=clip_.value_or(-1)-reserved_shot;
     if(attack && !secondary && clip_ && *clip_>0 && *clip_<=5 && reserve_ &&
         (!in_reload_ || !*in_reload_) && !pending && !reload_visual && ready &&
         at-last_primary_fire_at_>=.75-1e-8)
       start_crossbow(command.sequence,at,*clip_-1,*reserve_,crossbow_sniper_);
-    else if((reload_edge || (attack && clip_==0)) && clip_ && *clip_>=0 && *clip_<5 &&
-        reserve_ && *reserve_>0 && (!in_reload_ || !*in_reload_) && !pending && !reload_visual && ready &&
-        at-last_primary_fire_at_>=.75-1e-8)
+    else if((conventional_reload_request || (attack && clip_==0 && ready &&
+        at-last_primary_fire_at_>=.75-1e-8)) && clip_ && *clip_>=0 && *clip_<=5 && available<5 &&
+        reserve_ && *reserve_>0 && (!in_reload_ || !*in_reload_) && reload_can_replace && !reload_visual)
       start(LocalWeaponAction::reload,command.sequence,at,7U,0U,at+4.5);
   } else if (python_selected_) {
     const auto body=static_cast<std::uint8_t>(maximum_clients_>1U ? 1U : 0U);
@@ -1173,11 +1323,13 @@ void LocalWeaponPresentationController::submit(const LocalWeaponSubmittedCommand
         at-last_primary_fire_at_>=0.1-1e-8 && ready) {
       LocalWeaponActionIdentity key;key.generation=generation_;key.command_sequence=command.sequence;
       start(LocalWeaponAction::primary_fire,command.sequence,at,5U+firearm_variant(key)%3U,2U,at+0.75);
-    } else if(reload_edge && clip_ && *clip_>=0 && *clip_<50 && reserve_ && *reserve_>0 &&
-        (!in_reload_ || !*in_reload_) && !pending && !reload_visual && ready)
+    } else if(conventional_reload_request && clip_ && *clip_>=0 && *clip_<=50 &&
+        *clip_-static_cast<std::int32_t>(provisional_rounds_)<50 && reserve_ && *reserve_>0 &&
+        (!in_reload_ || !*in_reload_) && reload_can_replace && !reload_visual)
       start(LocalWeaponAction::reload,command.sequence,at,3U,0U,at+1.5);
   } else if (*weapon_id_ == 1U && attack && !pending && at - last_melee_swing_at_ >= 0.5 && ready)
     start(LocalWeaponAction::melee_swing,command.sequence,at,misses[crowbar_cycle_],1U,at + 0.8);
+  diagnostic_no_action();
 }
 void LocalWeaponPresentationController::configure_scripted_events(
     std::span<const ScriptedEventBinding> bindings) noexcept {
@@ -1286,15 +1438,25 @@ void LocalWeaponPresentationController::committed_scripted_event(
     action_->visual.source=LocalWeaponAnimationSource::service_event;
     finish_pending(LocalWeaponActionStatus::server_confirmed);return;
   }
-  if(shotgun) for(auto& pending:pending_fire_) if(pending && relates(*pending)) {
-    ++counters_.actions_confirmed;++counters_.recoil_confirmed;
-    if(shotgun_double) ++counters_.secondary_fire_confirmed;else ++counters_.primary_fire_confirmed;
-    pending.reset();return;
+  if(shotgun || crossbow) for(auto& pending:pending_fire_) if(pending && relates(*pending)) {
+    if(pending->status==LocalWeaponActionStatus::predicted_pending) {
+      ++counters_.actions_confirmed;if(!pending->crossbow_sniper)++counters_.recoil_confirmed;
+      if(shotgun_double) ++counters_.secondary_fire_confirmed;else ++counters_.primary_fire_confirmed;
+    }
+    if(crossbow) {
+      pending->status=LocalWeaponActionStatus::server_confirmed;
+      pending->scripted_event_confirmed=true;
+    } else pending.reset();
+    return;
   }
   if(mp5_secondary && pending_launch_ && relates(*pending_launch_)) {
-    ++counters_.actions_confirmed;++counters_.secondary_launch_confirmed;++counters_.recoil_confirmed;
+    if(pending_launch_->status==LocalWeaponActionStatus::predicted_pending) {
+      ++counters_.actions_confirmed;++counters_.secondary_launch_confirmed;++counters_.recoil_confirmed;
+    }
     pending_launch_.reset();return;
   }
+  if((crossbow || mp5_secondary) && reload_predecessor_active(event.received_at_seconds))
+    return;
   if(python && action_ && action_->identity.kind==LocalWeaponAction::primary_fire &&
       event.received_at_seconds-action_->identity.started_at_seconds<=1.25) return;
   if(crossbow && action_ && action_->scripted_event_confirmed &&
@@ -1383,6 +1545,7 @@ bool LocalWeaponPresentationController::resolve_crowbar_world_hit(
   return false;
 }
 void LocalWeaponPresentationController::cancel_uncommitted() noexcept {
+  server_reload_predecessor_deadline_.reset();
   if(snark_selected_) {
     snark_attempt_count_=0;snark_attempts_={};snark_release_required_=true;
     for(auto& r:snark_receipts_)if(r)r->reserved=false;
@@ -1433,12 +1596,16 @@ LocalWeaponPresentationSnapshot LocalWeaponPresentationController::sample(double
   if(tripmine_selected_) expire_tripmine_receipts(now);
   if(snark_selected_) expire_snark_receipts(now);
   for(auto& pending:pending_fire_) if(pending && now>=pending->deadline) {
-    ++counters_.actions_rejected;++counters_.recoil_rejected;
-    provisional_rounds_-=std::min(provisional_rounds_,static_cast<std::size_t>(pending->rounds_reserved));
+    if(pending->status==LocalWeaponActionStatus::predicted_pending) {
+      ++counters_.actions_rejected;if(!pending->crossbow_sniper)++counters_.recoil_rejected;
+      provisional_rounds_-=std::min(provisional_rounds_,static_cast<std::size_t>(pending->rounds_reserved));
+    }
     pending.reset();
   }
   if(pending_launch_ && now>=pending_launch_->deadline) {
-    ++counters_.actions_rejected;++counters_.recoil_rejected;
+    if(pending_launch_->status==LocalWeaponActionStatus::predicted_pending) {
+      ++counters_.actions_rejected;++counters_.recoil_rejected;
+    }
     pending_launch_.reset();if(provisional_grenades_) --provisional_grenades_;
   }
   if (!hand_grenade_selected_ && !satchel_selected_ && !snark_selected_ && action_ && action_->status == LocalWeaponActionStatus::predicted_pending && now >= action_->deadline) {

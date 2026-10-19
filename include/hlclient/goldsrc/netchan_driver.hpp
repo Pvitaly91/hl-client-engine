@@ -17,6 +17,7 @@
 #include <string_view>
 #include <vector>
 
+namespace hlclient::core { class MultiplayerDiagnosticSink; }
 namespace hlclient::goldsrc {
 
 using NetchanDriverClock = std::chrono::steady_clock;
@@ -305,6 +306,14 @@ enum class NetchanDriverEventType {
     protocol_error,
 };
 
+// Owning completion evidence retained before the ACK clears session state.
+// Bounded by the outgoing canonical-transfer and fragment limits; not emitted
+// through trace/log callbacks. This also covers send + ACK within one update.
+struct NetchanCompletedFragmentTransfer {
+    NetchanOutgoingFragmentTransfer transfer;
+    InFlightReliablePayload final_fragment;
+};
+
 struct NetchanDriverEvent {
     NetchanDriverEventType type{NetchanDriverEventType::protocol_error};
     std::optional<OwnedNetchanPayload> payload;
@@ -321,6 +330,7 @@ struct NetchanDriverEvent {
     // outgoing fragment transfer. Captured before session commit clears that
     // transfer, and therefore suitable for exact generation auditing.
     std::optional<std::uint64_t> completed_reliable_generation;
+    std::optional<NetchanCompletedFragmentTransfer> completed_fragment_transfer;
 };
 
 enum class NetchanDriverTraceClassification {
@@ -458,6 +468,8 @@ public:
     [[nodiscard]] std::size_t transmitted_packet_count() const noexcept;
     [[nodiscard]] NetchanDriverReceiveStatistics receive_statistics() const noexcept;
     void set_movement_diagnostics_enabled(bool enabled) noexcept;
+    void set_multiplayer_diagnostics(core::MultiplayerDiagnosticSink* sink,
+        std::uint64_t network_generation=0U, std::uint64_t map_generation=0U) noexcept;
     // Identity of the most recent sequence-bound unreliable context whose
     // datagram reached IDatagramTransport::send_to successfully. This narrow
     // receipt lets the owner commit semantic history without inferring success
@@ -470,6 +482,14 @@ public:
 
 private:
     friend class NetchanBootstrapStage;
+    friend class InitialSignonStage;
+    friend class ResourceTransitionStage;
+
+    // Same-driver stage handoff only: restore already accepted owning payloads
+    // before later pending events, without replaying transport or ACK state.
+    // Failure leaves all input ownership and queue state unchanged.
+    [[nodiscard]] bool prepend_retained_payloads(
+        std::span<OwnedNetchanPayload> payloads) noexcept;
 
     // Narrow compatibility seam for the legacy bootstrap facade. Persistent
     // driver consumers intentionally receive only the const session view.

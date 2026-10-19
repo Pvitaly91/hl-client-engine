@@ -4,16 +4,20 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <hlclient/core/movement_correction_witness.hpp>
 
 namespace hlclient::app {
 struct MovementFrameRecord;
+enum class MovementCaptureOwnerState : std::uint8_t { unknown,waiting,active,suspended,failed };
 
 // Exact application observations, separate from the bounded detailed record.
 // Unknown is not treated as focused, alive, or eligible for local control.
 struct MovementFrameContext final {
     std::optional<bool> focused,captured,alive,control_active;
     std::optional<std::uint64_t> life_epoch;
+    MovementCaptureOwnerState prediction_owner_state{MovementCaptureOwnerState::unknown};
 };
 struct MovementSessionStatistics final {
     std::uint64_t accepted_frames{},generation_boundaries{},life_boundaries{};
@@ -42,11 +46,15 @@ public:
     [[nodiscard]] bool enabled() const noexcept;
     [[nodiscard]] std::size_t capacity_bytes() const noexcept;
     void observe(const MovementFrameRecord&,const MovementFrameContext&) noexcept;
+    // Called once per producer event accepted by the detailed recorder, not
+    // reconstructed from its sticky end-of-update frame snapshot.
+    void observe_correction(const core::MovementCorrectionWitness&,const MovementFrameContext&) noexcept;
     [[nodiscard]] bool mark_manual(std::uint64_t monotonic_us) noexcept;
     [[nodiscard]] bool observe_gpu(std::uint64_t frame_number,double gpu_ms) noexcept;
     [[nodiscard]] MovementSessionStatistics statistics() const noexcept;
     // Exit/test work only. Returned JSON is one object suitable for embedding.
-    [[nodiscard]] std::optional<std::string> encode() const;
+    [[nodiscard]] std::optional<std::string> encode(
+        std::span<const core::MovementCorrectionWitness> retained_witnesses={}) const;
 private:
     struct Impl;
     bool requested_{};

@@ -14,13 +14,34 @@
 
 namespace hlclient::renderer::opengl {
 
+enum class OpenGlGpuPass : std::uint8_t {
+    world, studio_viewmodel, effects_decals, msaa_resolve,
+    image_adjustments, hud_console
+};
+inline constexpr std::size_t kOpenGlGpuPassCount = 6U;
+enum class OpenGlGpuTimingStatus : std::uint8_t {
+    not_observed, pending, ready, unsupported, disjoint, invalid, capacity_dropped
+};
+[[nodiscard]] std::string_view to_string(OpenGlGpuTimingStatus status) noexcept;
+[[nodiscard]] std::string_view to_string(OpenGlGpuPass pass) noexcept;
+
 struct OpenGlGpuFrameTiming final {
     std::uint64_t frame_number{};
     double elapsed_ms{};
+    // Non-overlapping timestamp segments are summed by pass; Studio and
+    // effects may alternate in the actual ordered draw stream. No unavailable
+    // pass is represented by a valid zero: consumers must check this mask.
+    std::array<float, kOpenGlGpuPassCount> pass_elapsed_ms{};
+    std::uint8_t valid_pass_mask{};
+    OpenGlGpuTimingStatus status{OpenGlGpuTimingStatus::not_observed};
 };
 struct OpenGlGpuTimingStatistics final {
     std::uint64_t submitted{},completed{},capacity_drops{},unavailable{};
     std::size_t pending{},allocated_queries{};
+    std::size_t allocated_pass_queries{};
+    std::uint64_t disjoint_results{},invalid_results{};
+    OpenGlGpuTimingStatus last_submission_status{OpenGlGpuTimingStatus::not_observed};
+    bool pass_timestamps_supported{},disjoint_detection_supported{};
 };
 
 enum class OpenGlRendererErrorCode {
@@ -68,6 +89,12 @@ struct OpenGlWorldRendererStatistics {
     std::uint64_t triangle_count{0U};
     std::uint64_t base_texture_bind_count{0U};
     std::uint64_t lightmap_bind_count{0U};
+    std::uint64_t program_bind_count{0U};
+    std::uint64_t vertex_array_bind_count{0U};
+    std::uint64_t sky_texture_bind_count{0U};
+    std::uint64_t transform_upload_count{0U};
+    std::uint64_t camera_upload_count{0U};
+    std::uint64_t light_upload_count{0U};
     RenderExtent last_extent{};
     bool world_present{false};
     bool scene_present{false};
@@ -199,6 +226,10 @@ public:
     OpenGlRenderer& operator=(OpenGlRenderer&&) = delete;
 
     [[nodiscard]] const RendererInfo& information() const noexcept override;
+    // Between connection attempts, on the current context's owner thread.
+    // Release per-session resources/statistics without destroying the window,
+    // context or the persistent screen UI and its owned background texture.
+    void reset_session_resources();
     void render(const RenderScene& scene, RenderExtent extent) override;
     // Optional nonblocking GPU observation. Ordinary render() allocates no
     // queries. Results retain the original frame identity, not the poll frame.

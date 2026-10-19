@@ -145,9 +145,13 @@ enum class CameraIntentStatus : std::uint8_t {
   ready, health_unavailable, receiving_client_not_alive, invalid_local_punch
 };
 struct CameraIntent final {
-  // Horizontal degrees at the actual viewport aspect; absence preserves the
-  // existing host projection. No concrete weapon/message semantics here.
+  // Horizontal degrees (actual viewport unless a reference aspect is set);
+  // absence preserves the host projection. No concrete weapon/message policy.
   std::optional<double> horizontal_field_of_view_degrees;
+  // Optional reference aspect for that horizontal angle. When supplied, keep
+  // its vertical coverage as the viewport changes (Hor+); absence retains the
+  // actual-viewport horizontal policy used by alternate modules.
+  std::optional<double> field_of_view_reference_aspect_ratio;
   enum class ProjectionStatus : std::uint8_t { unavailable, server_confirmed, reset, invalid };
   ProjectionStatus projection_status{ProjectionStatus::unavailable};
   CameraIntentStatus status{CameraIntentStatus::ready};
@@ -173,6 +177,9 @@ struct ViewmodelIntent final {
   std::uint8_t body{};
   double frame_coordinate{};
   double local_time_seconds{};
+  // Presentation-space translation shared by geometry and evaluated sockets.
+  // Source model units, +X forward/+Y left/+Z up; no canonical state mutation.
+  std::array<float, 3U> camera_local_origin{};
   friend bool operator==(const ViewmodelIntent&, const ViewmodelIntent&) = default;
 };
 struct HudRectangle final {

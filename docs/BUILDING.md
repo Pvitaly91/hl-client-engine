@@ -20,15 +20,15 @@ build command below (`-Configuration Release`, or Debug when needed). A first
 rebuild after cleanup will take longer. Neither old source snapshots nor
 private captures are required for the source-only build/test workflow.
 
-## Recover the current H2 source checkpoint (not historical main)
+## Recover the current source from main
 
-The accumulated A-I, live sign-on/usercmd, OpenGL/input, jump/duck, normal/Shift,
-reference dry-walk prediction/reconciliation and RX fix are published on
-`codex/stock-runtime-campaign-5e48b7c1`. Do not substitute an old `main` checkout.
+The current working source, including the accumulated A-I, live sign-on/usercmd,
+OpenGL/input, jump/duck, normal/Shift, reference dry-walk prediction/reconciliation
+and RX fixes, is published on `main`.
 In PowerShell 7, after installing the tools below:
 
 ```powershell
-git clone --branch codex/stock-runtime-campaign-5e48b7c1 --recurse-submodules https://github.com/Pvitaly91/hl-client-engine.git
+git clone --branch main --recurse-submodules https://github.com/Pvitaly91/hl-client-engine.git
 Set-Location hl-client-engine
 git rev-parse HEAD # record the exact published SHA; checkout that SHA for future recovery
 pwsh -NoProfile -File .\scripts\build_source.ps1
@@ -139,7 +139,7 @@ reliable tool discovery.
 ## Clone and initialize the SDK reference
 
 ```powershell
-git clone --branch codex/stock-runtime-campaign-5e48b7c1 --recurse-submodules https://github.com/Pvitaly91/hl-client-engine.git
+git clone --branch main --recurse-submodules https://github.com/Pvitaly91/hl-client-engine.git
 Set-Location hl-client-engine
 ```
 

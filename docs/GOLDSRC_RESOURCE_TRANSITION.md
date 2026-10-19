@@ -1,5 +1,37 @@
 # GoldSrc resource-transition boundary
 
+## FastDL compatibility update — 2026-10-18
+
+The current parser also accepts the documented optional resource-location
+message between opcode 45's fixed eight-byte body and opcode 43:
+
+```text
+45 + u32le + zero-u32le + [56 + location bytes + NUL] + 43 + resource-list body
+```
+
+[ReHLDS SV_SendResources](https://github.com/rehlds/ReHLDS/blob/550f2d62f13f4ebeb029c1d9d1c212133202611d/rehlds/engine/sv_main.cpp#L1207-L1217)
+emits this optional field for `sv_downloadurl` below 129 bytes;
+[Xash3D protocol definitions](https://github.com/FWGS/xash3d-fwgs/blob/master/engine/common/protocol.h)
+identify `svc_resourcelocation` as 56. The implementation consumes exactly one
+bounded NUL-terminated field (0–128 non-NUL bytes), then requires 43 at the
+exact next cursor. It does not scan for opcodes, follow/store/log the URL,
+download resources, or weaken validation of the resource-list body.
+
+The no-FastDL path is unchanged. Opcode-45 state remains nine bytes; parser
+consumed length and the retained list boundary additionally account for the
+optional message. Missing terminators, oversized strings, repeated location
+messages and unknown following opcodes fail closed.
+
+Transition errors now retain the numeric parser error offset. For a
+decoder-established next-message boundary, diagnostics report that boundary
+and its actual opcode rather than the original 45. String/body bytes are not
+published as opcodes. The external JSON retains the typed error and exact
+offset without the URL. See [public-server diagnostics](STEAM_PUBLIC_SERVER_DIAGNOSTICS.md)
+for the triggering run and follow-up verification.
+
+The following M3.1.1 sections record the original no-FastDL capture scope;
+their fixed `45 -> 43` observations are not a universal adjacency rule.
+
 M3.1.1 implements the exact client transition request, its persistent reliable
 lifecycle, the bounded second service transfer, strict opcode-45 control, and
 an exact neutral stop at numeric opcode 43. It deliberately does not parse or

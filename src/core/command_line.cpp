@@ -67,6 +67,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         // research switches or arbitrary overrides is intentionally rejected.
         for (std::size_t i=0; i<arguments.size(); ++i) {
             const auto key=arguments[i];
+            if(key=="--open-client") {
+                if(options.open_client)return failure("duplicate --open-client");
+                options.open_client=true;
+                continue;
+            }
             if (i+1>=arguments.size()) return failure("Missing external launch value");
             const auto value=arguments[++i];
             if (value.empty() || value.find('\0')!=std::string_view::npos)
@@ -121,6 +126,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         }
         if (argument == "--version") {
             options.show_version = true;
+            continue;
+        }
+        if (argument == "--open-client") {
+            if(options.open_client)return failure("duplicate --open-client");
+            options.open_client=true;
             continue;
         }
         if (argument == "--net-trace") {
@@ -553,7 +563,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             options.renderer != RendererBackend::null) {
             return failure("Non-visual runtime replay requires --renderer null");
         }
-        if (options.connect_endpoint || (options.base_directory && !local_assets) ||
+        if (options.open_client || options.connect_endpoint || (options.base_directory && !local_assets) ||
             options.mute_glock_fire_sound || options.debug_freeze_tracer ||
             options.authentication_provider ||
             options.authentication_material_file ||
@@ -570,6 +580,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         return CommandLineParseResult{std::move(options), {}};
     }
     const bool any_receipt=options.session_receipt_root || options.session_run_id || options.session_role;
+    if(options.open_client && options.connect_endpoint)
+        return failure("--open-client starts idle and cannot be combined with --connect");
     if(any_receipt && (!options.session_receipt_root || !options.session_run_id ||
         !options.session_role || !options.connect_endpoint))
         return failure("Session receipt root/run/role require each other and a connection");
@@ -853,6 +865,7 @@ std::string_view command_line_help() noexcept
 Options:
   --help, -h          Show this help text and exit
   --version           Show version information and exit
+  --open-client       Open the client console/background without autoconnect
   --basedir <path>    Half-Life installation directory
   --game <directory>  Game directory below basedir (default: valve)
   --connect <ip:port> Start a GoldSrc handshake (challenge-only by default)

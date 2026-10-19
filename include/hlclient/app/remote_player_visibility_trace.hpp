@@ -135,7 +135,7 @@ build_remote_player_visibility_sample(const std::uint32_t entity,
     if (!source->ordinary_visual_schema || !source->player_movement_schema) result.stage=Stage::not_visual;
     else if (!result.model_advertised) result.stage=Stage::model_not_advertised;
     else if ((source->effects.value_or(0U)&128U)!=0U) result.stage=Stage::server_hidden128;
-    else if (source->render_mode.value_or(0U)!=0U) result.stage=Stage::unsupported_render_mode;
+    else if (source->render_mode.value_or(0U)>5U) result.stage=Stage::unsupported_render_mode;
     else if (!result.game_ready) result.stage=Stage::game_not_ready;
     else if (!result.pose_ready) result.stage=Stage::pose_unavailable;
     else if (!instance) result.stage=Stage::frame_unavailable;

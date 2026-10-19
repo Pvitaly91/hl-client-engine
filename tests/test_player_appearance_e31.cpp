@@ -117,6 +117,47 @@ TEST_CASE("E31 palette variants preserve untouched indexed pixels alpha and orig
   fields.top_color=30;const auto second=gs::remap_player_model_palette(source,hl::player_palette_ranges(fields,*skeleton));REQUIRE(second);
   CHECK(second->skeletal_data->textures[0].rgba8_level_zero!=result.rgba8_level_zero);
 }
+TEST_CASE("71b97 palette matching preserves exact ASCII names without owning string temporaries",
+    "[gauss-71b97][e31][appearance][palette]") {
+  assets::SkeletalModelAssetData model;
+  model.textures.resize(1);
+  api::PlayerAppearanceFields fields;fields.top_color=30;fields.bottom_color=240;
+  // Exhaust every ASCII upper/lower spelling, including the extension.
+  for(const std::string_view base:{"dm_base","dm_base.bmp"}) {
+    for(unsigned mask=0;mask<(1U<<base.size());++mask) {
+      std::string name{base};
+      for(std::size_t i=0;i<name.size();++i)
+        if((mask&(1U<<i))&&name[i]>='a'&&name[i]<='z')name[i]=static_cast<char>(name[i]-'a'+'A');
+      model.textures[0].source_name=name;
+      const auto ranges=hl::player_palette_ranges(fields,model);
+      REQUIRE(ranges.size()==2U);
+      CHECK(ranges[0].texture==0U);CHECK(ranges[0].first==160U);CHECK(ranges[0].last==191U);CHECK(ranges[0].hue_degrees==30U);
+      CHECK(ranges[1].texture==0U);CHECK(ranges[1].first==192U);CHECK(ranges[1].last==223U);CHECK(ranges[1].hue_degrees==240U);
+      CHECK(model.textures[0].source_name==name);
+    }
+  }
+  for(const std::string_view name:{"","dm_bas","dm_base.","dm_base.bmpx","xDM_Base.bmp","DM_Base.bmp "," dm_base",
+      "DM_Base/bmp","PLAYER_Shldr-Joint.bmp","dm_base.bmP/","dm_base.BMP.bak"}) {
+    model.textures[0].source_name=name;
+    CHECK(hl::player_palette_ranges(fields,model).empty());
+  }
+  // High-bit bytes and embedded NULs are not locale-folded or truncated.
+  for(const unsigned byte:{0U,0x80U,0xc4U,0xffU}) {
+    model.textures[0].source_name="DM_Base.bmp";
+    model.textures[0].source_name[0]=static_cast<char>(byte);
+    CHECK(hl::player_palette_ranges(fields,model).empty());
+    model.textures[0].source_name="DM_Base.bmp";
+    model.textures[0].source_name.push_back(static_cast<char>(byte));
+    CHECK(hl::player_palette_ranges(fields,model).empty());
+  }
+  model.textures[0].source_name="DM_Base.bmp";
+  fields.top_color.reset();fields.bottom_color.reset();
+  CHECK(hl::player_palette_ranges(fields,model).empty());
+  fields.top_color=0;
+  REQUIRE(hl::player_palette_ranges(fields,model).size()==1U);
+  model.textures.resize(129);
+  CHECK(hl::player_palette_ranges(fields,model).empty());
+}
 TEST_CASE("E31 retained model budget includes animation objects even without quantized values","[e31][appearance][bounds]") {
   assets::ModelAsset model;auto skeleton=std::make_shared<assets::SkeletalModelAssetData>();model.skeletal_data=skeleton;
   const auto before=gs::retained_player_model_bytes(model);

@@ -22,6 +22,7 @@ inline constexpr std::uint16_t kReferenceGoldSrcButtonJump = 1U << 1U;
 inline constexpr std::uint16_t kReferenceGoldSrcButtonDuck = 1U << 2U;
 inline constexpr std::uint16_t kReferenceGoldSrcButtonAttack2 = 1U << 11U;
 inline constexpr std::uint16_t kReferenceGoldSrcButtonReload = 1U << 13U;
+inline constexpr std::uint16_t kReferenceGoldSrcButtonScore = 1U << 15U;
 
 // Quantized network values, deliberately not a simulation/history command.
 // No fabricated local identity, sample clock, SDK pointer or weaponselect.

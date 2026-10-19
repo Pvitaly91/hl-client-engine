@@ -107,7 +107,10 @@ private:
     const bool graceful=close.outcome==SessionCloseOutcome::sent_but_unconfirmed ||
         close.outcome==SessionCloseOutcome::transport_acknowledged ||
         close.outcome==SessionCloseOutcome::server_disconnect_confirmed;
-    if(close.reason==SessionCloseReason::startup_cancel)
+    // A user can leave a still-loading session from the console without
+    // quitting the application. Clean close is not proof of gameplay readiness.
+    if(close.reason==SessionCloseReason::startup_cancel ||
+        close.reason==SessionCloseReason::console_disconnect)
         return graceful || close.outcome==SessionCloseOutcome::cancel_without_protocol_disconnect;
     return close.reason==SessionCloseReason::window_close && graceful &&
         external_gameplay_receipt_ready(*receipt);

@@ -50,6 +50,7 @@ struct SlideResult {
     assets::AssetVector3 origin{};
     assets::AssetVector3 velocity{};
     GoldSrcClipBlockedAxis blocked_axes{GoldSrcClipBlockedAxis::none};
+    std::optional<VelocityStopTransition> velocity_stop;
     std::optional<OperationError> error;
 };
 
@@ -57,6 +58,7 @@ struct StepResult {
     bool available{false};
     assets::AssetVector3 origin{};
     assets::AssetVector3 velocity{};
+    std::optional<VelocityStopTransition> velocity_stop;
     std::optional<OperationError> error;
 };
 
@@ -980,6 +982,86 @@ void record_solid_collision_failure(
     return assets::AssetVector3{};
 }
 
+[[nodiscard]] double precise_plane_dot(const assets::AssetVector3& velocity,
+    const assets::AssetVector3& normal) noexcept
+{
+    return static_cast<double>(velocity.x) * normal.x +
+        static_cast<double>(velocity.y) * normal.y +
+        static_cast<double>(velocity.z) * normal.z;
+}
+
+// Projection can round back into its plane by less than one float ULP. A
+// second identical projection need not change that value. Materialize only an
+// adjacent velocity which satisfies every retained plane in both the movement
+// and BSP-query arithmetic; an independent tangent axis is never changed.
+[[nodiscard]] std::optional<assets::AssetVector3> adjacent_clear_velocity(
+    const assets::AssetVector3& velocity,
+    const std::array<hlclient::movement::PlayerMovementPlane,
+        kValveMaximumClipPlanes>& planes,
+    const std::size_t plane_count, const float maximum_velocity) noexcept
+{
+    std::array<std::array<float, 3U>, 3U> neighbors{{
+        {velocity.x, velocity.x, velocity.x},
+        {velocity.y, velocity.y, velocity.y},
+        {velocity.z, velocity.z, velocity.z}}};
+    std::array<bool, 3U> constrained{};
+    for (std::size_t index = 0U; index < plane_count; ++index) {
+        constrained[0U] = constrained[0U] || planes[index].normal.x != 0.0F;
+        constrained[1U] = constrained[1U] || planes[index].normal.y != 0.0F;
+        constrained[2U] = constrained[2U] || planes[index].normal.z != 0.0F;
+    }
+    for (std::size_t axis = 0U; axis < neighbors.size(); ++axis) {
+        if (constrained[axis]) {
+            neighbors[axis][0U] = std::nextafter(neighbors[axis][1U],
+                -std::numeric_limits<float>::infinity());
+            neighbors[axis][2U] = std::nextafter(neighbors[axis][1U],
+                std::numeric_limits<float>::infinity());
+        }
+    }
+    std::optional<assets::AssetVector3> best;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (std::size_t x = 0U; x < 3U; ++x) {
+        for (std::size_t y = 0U; y < 3U; ++y) {
+            for (std::size_t z = 0U; z < 3U; ++z) {
+                const assets::AssetVector3 candidate{
+                    neighbors[0U][x], neighbors[1U][y], neighbors[2U][z]};
+                if (!finite(candidate) ||
+                    std::abs(candidate.x) > maximum_velocity ||
+                    std::abs(candidate.y) > maximum_velocity ||
+                    std::abs(candidate.z) > maximum_velocity)
+                    continue;
+                const auto distance = vector_length_squared(subtract(candidate, velocity));
+                if (distance == 0.0 || distance >= best_distance)
+                    continue;
+                bool clear = true;
+                for (std::size_t index = 0U; index < plane_count; ++index) {
+                    const auto dot = movement_dot(candidate, planes[index].normal);
+                    const auto precise = precise_plane_dot(candidate, planes[index].normal);
+                    if (!finite(dot) || !finite(precise) || dot < 0.0F || precise < 0.0) {
+                        clear = false;
+                        break;
+                    }
+                }
+                if (clear) {
+                    best = candidate;
+                    best_distance = distance;
+                }
+            }
+        }
+    }
+    return best;
+}
+
+void commit_velocity_stop(GoldSrcLocalMovementScratch& scratch,
+    const std::optional<VelocityStopTransition>& pending,
+    const VelocityStopCandidate candidate) noexcept
+{
+    if (scratch.capture_velocity_stops && !scratch.first_velocity_stop && pending) {
+        scratch.first_velocity_stop = *pending;
+        scratch.first_velocity_stop->candidate = candidate;
+    }
+}
+
 [[nodiscard]] SlideResult slide_move(
     const assets::AssetVector3& start_origin,
     const assets::AssetVector3& start_velocity,
@@ -994,7 +1076,8 @@ void record_solid_collision_failure(
     const std::size_t maximum_touches,
     PlayerMovementStatistics& statistics,
     std::vector<PlayerMovementTouch>& touches,
-    const bool reference_walk)
+    const bool reference_walk,
+    const float maximum_velocity)
 {
     SlideResult output;
     output.origin = start_origin;
@@ -1035,6 +1118,27 @@ void record_solid_collision_failure(
             return output;
         }
         const auto& trace = *traced.result;
+        const auto capture_stop = [&](const VelocityStopReason reason) {
+            if (!scratch.capture_velocity_stops || output.velocity_stop ||
+                vector_length_squared(bump_velocity) == 0.0 ||
+                vector_length_squared(output.velocity) != 0.0)
+                return;
+            VelocityStopTransition stop;
+            stop.command_sequence = command_sequence;
+            stop.phase = phase;
+            stop.reason = reason;
+            stop.hull = hull;
+            stop.before_origin = bump_origin;
+            stop.after_origin = output.origin;
+            stop.before_velocity = bump_velocity;
+            stop.after_velocity = output.velocity;
+            stop.query_start = bump_origin;
+            stop.query_end = end;
+            stop.trace = trace;
+            stop.clip_planes = planes;
+            stop.clip_plane_count = static_cast<std::uint8_t>(plane_count);
+            output.velocity_stop = stop;
+        };
         if (trace.start_solid || trace.all_solid) {
             record_solid_collision_failure(scratch, trace, hull,
                 output.origin, end);
@@ -1212,6 +1316,7 @@ void record_solid_collision_failure(
         }
         if (opposing) {
             output.velocity = {};
+            capture_stop(VelocityStopReason::opposing_planes);
             diagnostic.clip_plane_count =
                 static_cast<std::uint16_t>(plane_count);
             diagnostic.distinct_plane_count = diagnostic.clip_plane_count;
@@ -1272,6 +1377,7 @@ void record_solid_collision_failure(
             return output;
         }
         output.velocity = *solved;
+        capture_stop(VelocityStopReason::clip_solver);
         auto into_plane = movement_dot(
             output.velocity, trace.collision_plane->normal);
         if (into_plane < 0.0F) {
@@ -1288,14 +1394,27 @@ void record_solid_collision_failure(
                 return output;
             }
             output.velocity = current_plane_clipped.value->velocity;
+            capture_stop(VelocityStopReason::clip_solver);
             into_plane = movement_dot(
                 output.velocity, trace.collision_plane->normal);
+            const auto precise_into_plane = precise_plane_dot(
+                output.velocity, trace.collision_plane->normal);
             if (into_plane < 0.0F) {
-                // Binary32 projection may leave a negative residual. A
-                // bounded stop is preferable to publishing velocity back
-                // into collision on the next command.
-                output.velocity = {};
-                into_plane = 0.0F;
+                const auto repaired = into_plane >= -config.stop_epsilon &&
+                        precise_into_plane >= -config.stop_epsilon
+                    ? adjacent_clear_velocity(output.velocity, planes,
+                          plane_count, maximum_velocity)
+                    : std::nullopt;
+                if (repaired) {
+                    output.velocity = *repaired;
+                    into_plane = movement_dot(output.velocity, trace.collision_plane->normal);
+                } else {
+                    // A real contradiction, or no adjacent feasible float,
+                    // keeps the conservative stop rather than entering solid.
+                    output.velocity = {};
+                    into_plane = 0.0F;
+                    capture_stop(VelocityStopReason::tiny_residual);
+                }
             }
         }
         diagnostic.velocity_class = vector_length_squared(output.velocity) == 0.0
@@ -1364,6 +1483,7 @@ void record_solid_collision_failure(
     const std::uint32_t command_sequence,
     const float step_size,
     const bool reference_walk,
+    const float maximum_velocity,
     const ILocalMovementCollision& collision,
     hlclient::collision::CollisionQueryScratch& query_scratch,
     GoldSrcLocalMovementScratch& scratch,
@@ -1467,7 +1587,7 @@ void record_solid_collision_failure(
         raised_origin, start_velocity, duration, hull,
         PlayerMovementPhase::step_horizontal, command_sequence, collision,
         query_scratch, scratch, config, config.maximum_slide_bumps + 1U,
-        statistics, touches, reference_walk);
+        statistics, touches, reference_walk, maximum_velocity);
     if (horizontal.error) {
         output.error = horizontal.error;
         return output;
@@ -1543,6 +1663,7 @@ void record_solid_collision_failure(
     output.available = true;
     output.origin = landing_position;
     output.velocity = horizontal.velocity;
+    output.velocity_stop = horizontal.velocity_stop;
     return output;
 }
 
@@ -1679,7 +1800,8 @@ void record_solid_collision_failure(
         start, velocity, duration, state.hull,
         PlayerMovementPhase::direct_slide, command.command_sequence().value(),
         collision, scratch.direct_candidate_collision, scratch, config,
-        config.maximum_slide_bumps, direct_statistics, direct_touches, state.reference_walk);
+        config.maximum_slide_bumps, direct_statistics, direct_touches,
+        state.reference_walk, environment.maximum_velocity());
     if (direct.error) {
         return direct.error;
     }
@@ -1691,7 +1813,8 @@ void record_solid_collision_failure(
       ++statistics.step_attempt_count;
       step = step_candidate(
         start, velocity, duration, state.hull,
-        command.command_sequence().value(), environment.step_size(), state.reference_walk, collision,
+        command.command_sequence().value(), environment.step_size(), state.reference_walk,
+        environment.maximum_velocity(), collision,
         scratch.step_candidate_collision, scratch, config, step_statistics,
         step_touches);
     }
@@ -1727,6 +1850,9 @@ void record_solid_collision_failure(
     state.origin = select_step ? step.origin : direct.origin;
     state.velocity = select_step ? step.velocity : direct.velocity;
     if (select_step && state.reference_walk) state.velocity.z = direct.velocity.z;
+    commit_velocity_stop(scratch,
+        select_step ? step.velocity_stop : direct.velocity_stop,
+        select_step ? VelocityStopCandidate::step : VelocityStopCandidate::direct);
     // Step probing is speculative. Recommit the chosen route's terminal
     // diagnostic so a rejected step cannot label a successful direct result.
     if (selected_diagnostic) {
@@ -1795,12 +1921,13 @@ void record_solid_collision_failure(
         PlayerMovementPhase::airborne_slide,
         command.command_sequence().value(), collision, scratch.collision,
         scratch, config, config.maximum_touches_per_command, statistics,
-        touches, state.reference_walk);
+        touches, state.reference_walk, environment.maximum_velocity());
     if (moved.error) {
         return moved.error;
     }
     state.origin = moved.origin;
     state.velocity = moved.velocity;
+    commit_velocity_stop(scratch, moved.velocity_stop, VelocityStopCandidate::air);
     state.velocity.z -= effective_gravity * duration * 0.5F;
     if (auto error = clamp_velocity(state, environment)) {
         return error;
@@ -2109,7 +2236,8 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
         kSyntheticGoldSrcButtonJump | kSyntheticGoldSrcButtonDuck |
         (weapon_inert_profile
             ? kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload
-            : 0U) | (use_profile ? kReferenceGoldSrcButtonUse | kReferenceGoldSrcButtonAttack2 : 0U);
+            : 0U) | (use_profile ? kReferenceGoldSrcButtonUse |
+                kReferenceGoldSrcButtonAttack2 | kReferenceGoldSrcButtonScore : 0U);
     if (reference_actions &&
         (command.msec() > 50U || (command.buttons() & ~action_mask) != 0U ||
          command.up_move() != 0.0F || command.impulse() != 0U)) {
@@ -2322,6 +2450,15 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
         hlclient::movement::local_player_movement_state_signature(
             *created.state);
     result.state.emplace(std::move(*created.state));
+    if (scratch.capture_velocity_stops && scratch.first_velocity_stop &&
+        scratch.first_velocity_stop->command_sequence == sequence &&
+        scratch.first_velocity_stop->simulation_end_ns == 0U) {
+        scratch.first_velocity_stop->simulation_start_ns =
+            previous_state.simulation_time_nanoseconds();
+        scratch.first_velocity_stop->simulation_end_ns = simulation_time;
+        scratch.first_velocity_stop->command_msec = command.msec();
+        scratch.first_velocity_stop->collision_identity = collision.session_identity();
+    }
     result.touches = std::move(touches);
     result.statistics = statistics;
     result.command_sequence = sequence;

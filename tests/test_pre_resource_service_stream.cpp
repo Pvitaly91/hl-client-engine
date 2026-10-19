@@ -328,26 +328,152 @@ TEST_CASE("Post-serverinfo control layout is exact and never resynchronized",
             initial.payload.bytes.size());
     }
 
-    SECTION("nonempty string")
+    SECTION("unterminated string")
     {
         auto bytes = pre_resource_payload();
+        bytes.resize(control_offset + 2U);
         bytes[control_offset + 1U] = std::byte{'x'};
+        auto initial = decode_initial_boundary(decoder, std::move(bytes));
+        check_error(
+            decoder.continue_to_pre_resource(initial.payload, initial.boundary),
+            goldsrc::PreResourceServiceErrorCode::truncated_post_server_info_control,
+            initial.payload.bytes.size());
+    }
+
+    SECTION("duplicate extra info")
+    {
+        auto bytes = pre_resource_payload();
+        bytes.insert(bytes.begin() + static_cast<std::ptrdiff_t>(control_offset),
+                     {std::byte{54U}, std::byte{0U}, std::byte{1U}});
         auto initial = decode_initial_boundary(decoder, std::move(bytes));
         check_error(
             decoder.continue_to_pre_resource(initial.payload, initial.boundary),
             goldsrc::PreResourceServiceErrorCode::invalid_post_server_info_control,
             initial.payload.bytes.size());
     }
+}
 
-    SECTION("nonzero fixed value")
-    {
+TEST_CASE("Pre-resource controls allow bounded fallback and harmless interleaving",
+          "[goldsrc][signon][pre-resource][service][security]")
+{
+    std::vector<std::byte> bytes{std::byte{11U}};
+    const auto server_info = synthetic_server_info_body();
+    bytes.insert(bytes.end(), server_info.begin(), server_info.end());
+    bytes.push_back(std::byte{9U});
+    append_string(bytes, "exec untrusted.cfg; quit\n");
+    bytes.push_back(std::byte{1U});
+    const auto extra_offset = bytes.size();
+    bytes.push_back(std::byte{54U});
+    append_string(bytes, "../untrusted-fallback");
+    bytes.push_back(std::byte{1U});
+    bytes.push_back(std::byte{8U});
+    append_string(bytes, "custom server");
+    bytes.push_back(std::byte{9U});
+    append_string(bytes, "");
+    bytes.push_back(std::byte{14U});
+    bytes.push_back(std::byte{0xa5U});
+    const goldsrc::ServiceMessageStreamDecoder decoder;
+    auto initial = decode_initial_boundary(decoder, bytes);
+    const auto result = decoder.continue_to_pre_resource(initial.payload, initial.boundary);
+    REQUIRE(result);
+    CHECK(result.required_event_count == 7U);
+    REQUIRE(result.state->controls().size() == 5U);
+    CHECK(result.state->controls()[0U].opcode() == 9U);
+    CHECK(result.state->controls()[0U].string_length() == 25U);
+    CHECK(result.state->controls()[1U].opcode() == 1U);
+    const auto& extra = result.state->controls()[2U];
+    CHECK(extra.opcode() == 54U);
+    CHECK(extra.byte_offset() == extra_offset);
+    CHECK(extra.string_length() == 21U);
+    CHECK(extra.byte_count() == 24U);
+    CHECK(extra.control_value() == 1U);
+    CHECK(result.state->controls()[3U].opcode() == 8U);
+    CHECK(result.state->controls()[4U].string_length() == 0U);
+    CHECK(result.state->boundary().byte_offset() == bytes.size() - 2U);
+    CHECK(result.state->boundary().remaining_byte_count() == 1U);
+    CHECK(initial.payload.bytes == bytes);
+
+    auto limits = goldsrc::ServiceMessageLimits{};
+    limits.maximum_messages_per_payload = 6U;
+    const goldsrc::ServiceMessageStreamDecoder limited{limits};
+    check_error(limited.continue_to_pre_resource(initial.payload, initial.boundary),
+                goldsrc::PreResourceServiceErrorCode::message_limit_exceeded,
+                bytes.size());
+    limits.maximum_messages_per_payload = 7U;
+    REQUIRE(goldsrc::ServiceMessageStreamDecoder{limits}.continue_to_pre_resource(
+        initial.payload, initial.boundary));
+}
+
+TEST_CASE("Extra-info values are inert and control strings remain hard capped",
+          "[goldsrc][signon][pre-resource][service][security][limits]")
+{
+    const goldsrc::ServiceMessageStreamDecoder decoder;
+    for (const auto flag : {std::byte{1U}, std::byte{255U}}) {
         auto bytes = pre_resource_payload();
-        bytes[control_offset + 2U] = std::byte{1U};
-        auto initial = decode_initial_boundary(decoder, std::move(bytes));
-        check_error(
-            decoder.continue_to_pre_resource(initial.payload, initial.boundary),
-            goldsrc::PreResourceServiceErrorCode::invalid_post_server_info_control,
-            initial.payload.bytes.size());
+        bytes[87U] = flag;
+        auto initial = decode_initial_boundary(decoder, bytes);
+        const auto result = decoder.continue_to_pre_resource(initial.payload, initial.boundary);
+        REQUIRE(result);
+        CHECK(result.state->controls()[0U].control_value() ==
+              std::to_integer<std::uint8_t>(flag));
+    }
+    auto limits = goldsrc::ServiceMessageLimits{};
+    limits.maximum_string_length = 32U;
+    const goldsrc::ServiceMessageStreamDecoder limited{limits};
+    for (const auto opcode : {std::byte{8U}, std::byte{9U}, std::byte{54U}}) {
+        auto bytes = pre_resource_payload();
+        bytes.resize(85U);
+        bytes.push_back(opcode);
+        append_string(bytes, std::string(limits.maximum_string_length + 1U, 'x'));
+        bytes.push_back(std::byte{0U});
+        bytes.push_back(std::byte{14U});
+        bytes.push_back(std::byte{0xa5U});
+        auto initial = decode_initial_boundary(decoder, bytes);
+        check_error(limited.continue_to_pre_resource(initial.payload, initial.boundary),
+                    goldsrc::PreResourceServiceErrorCode::invalid_post_server_info_control,
+                    bytes.size());
+    }
+
+    auto exact = pre_resource_payload();
+    exact.resize(85U);
+    exact.push_back(std::byte{54U});
+    append_string(exact, std::string(limits.maximum_string_length, 'x'));
+    exact.push_back(std::byte{1U});
+    exact.push_back(std::byte{14U});
+    exact.push_back(std::byte{0xa5U});
+    auto exact_initial = decode_initial_boundary(decoder, exact);
+    REQUIRE(limited.continue_to_pre_resource(exact_initial.payload, exact_initial.boundary));
+}
+
+TEST_CASE("Pre-resource interleaving does not waive required controls or truncation",
+          "[goldsrc][signon][pre-resource][service][truncation]")
+{
+    const goldsrc::ServiceMessageStreamDecoder decoder;
+    auto missing = pre_resource_payload();
+    missing.erase(missing.begin() + 85, missing.begin() + 88);
+    missing.insert(missing.begin() + 85, std::byte{1U});
+    auto missing_initial = decode_initial_boundary(decoder, missing);
+    check_error(decoder.continue_to_pre_resource(missing_initial.payload, missing_initial.boundary),
+                goldsrc::PreResourceServiceErrorCode::missing_post_server_info_control,
+                missing.size());
+
+    auto bytes = pre_resource_payload();
+    bytes.resize(85U);
+    bytes.push_back(std::byte{54U});
+    append_string(bytes, "custom");
+    bytes.push_back(std::byte{1U});
+    bytes.push_back(std::byte{14U});
+    bytes.push_back(std::byte{0xa5U});
+    for (std::size_t size = 86U; size < bytes.size(); ++size) {
+        INFO("truncated extra-info fixture " << size);
+        auto prefix = bytes;
+        prefix.resize(size);
+        auto initial = decode_initial_boundary(decoder, prefix);
+        const auto result = decoder.continue_to_pre_resource(initial.payload, initial.boundary);
+        REQUIRE_FALSE(result);
+        REQUIRE(result.error.has_value());
+        CHECK(result.error->byte_offset <= size);
+        CHECK_FALSE(result.state.has_value());
     }
 }
 
@@ -449,6 +575,92 @@ TEST_CASE("Pre-resource state owns metadata after the source payload is destroye
     CHECK(result->state->server_info().maximum_clients().value() == 8U);
     CHECK(result->state->controls().size() == 1U);
     CHECK(result->state->boundary().remaining_byte_count() == 2U);
+}
+
+TEST_CASE("Pre-resource director metadata is inert before and after required extra-info",
+          "[goldsrc][signon][pre-resource][service][director-signon]")
+{
+    const goldsrc::ServiceMessageStreamDecoder decoder;
+    for(const std::size_t body_size:{0U,1U,255U}) {
+        CAPTURE(body_size);
+        std::vector<std::byte> fixture{std::byte{11U}};
+        const auto server=synthetic_server_info_body();
+        fixture.insert(fixture.end(),server.begin(),server.end());
+        const auto before=fixture.size();
+        fixture.push_back(std::byte{51U});fixture.push_back(static_cast<std::byte>(body_size));
+        fixture.insert(fixture.end(),body_size,std::byte{14U});
+        const auto extra=fixture.size();
+        fixture.insert(fixture.end(),{std::byte{54U},std::byte{0U},std::byte{0U}});
+        const auto after=fixture.size();
+        fixture.push_back(std::byte{51U});fixture.push_back(static_cast<std::byte>(body_size));
+        fixture.insert(fixture.end(),body_size,std::byte{43U});
+        const auto real_boundary=fixture.size();
+        fixture.insert(fixture.end(),{std::byte{14U},std::byte{0xa5U},std::byte{0x5aU}});
+        auto initial=decode_initial_boundary(decoder,fixture);
+        const auto result=decoder.continue_to_pre_resource(initial.payload,initial.boundary);
+        REQUIRE(result);CHECK(result.required_event_count==5U);
+        const auto& state=*result.state;
+        REQUIRE(state.controls().size()==3U);
+        for(const auto index:{0U,2U}) {
+            const auto& control=state.controls()[index];
+            CHECK(control.opcode()==51U);CHECK(control.byte_count()==body_size+2U);
+            CHECK(control.byte_offset()==(index==0U?before:after));
+            CHECK(control.string_length()==0U);CHECK(control.control_value()==0U);
+        }
+        CHECK(state.controls()[1].opcode()==54U);CHECK(state.controls()[1].byte_offset()==extra);
+        CHECK(state.boundary().byte_offset()==real_boundary);
+        CHECK(state.boundary().remaining_byte_count()==2U);
+        CHECK(state.source_payload().source_sequence()==31U);
+        CHECK(state.source_payload().source_acknowledgement()==17U);
+        CHECK(state.source_payload().initial_boundary_offset()==0U);
+        CHECK(state.source_payload().payload_size()==fixture.size());
+        CHECK(initial.payload.bytes==fixture);
+    }
+}
+
+TEST_CASE("Pre-resource director opaque bytes cannot satisfy required controls or evade framing limits",
+          "[goldsrc][signon][pre-resource][service][director-signon][security]")
+{
+    const goldsrc::ServiceMessageStreamDecoder decoder;
+    std::vector<std::byte> prefix{std::byte{11U}};
+    const auto server=synthetic_server_info_body();prefix.insert(prefix.end(),server.begin(),server.end());
+    auto hidden_extra=prefix;
+    hidden_extra.insert(hidden_extra.end(),{std::byte{51U},std::byte{6U},std::byte{54U},
+        std::byte{0U},std::byte{0U},std::byte{9U},std::byte{'x'},std::byte{0U},
+        std::byte{14U},std::byte{0xa5U}});
+    auto initial=decode_initial_boundary(decoder,hidden_extra);
+    check_error(decoder.continue_to_pre_resource(initial.payload,initial.boundary),
+        goldsrc::PreResourceServiceErrorCode::missing_post_server_info_control,hidden_extra.size());
+
+    for(const bool after_extra:{false,true}) {
+        auto fixture=prefix;
+        if(after_extra)fixture.insert(fixture.end(),{std::byte{54U},std::byte{0U},std::byte{0U}});
+        const auto director_offset=fixture.size();
+        fixture.insert(fixture.end(),{std::byte{51U},std::byte{255U}});
+        fixture.insert(fixture.end(),255U,std::byte{14U});
+        for(std::size_t size=director_offset+1U;size<fixture.size();++size) {
+            CAPTURE(after_extra,size);
+            auto truncated=fixture;truncated.resize(size);
+            auto current=decode_initial_boundary(decoder,std::move(truncated));
+            const auto decoded=decoder.continue_to_pre_resource(current.payload,current.boundary);
+            check_error(decoded,goldsrc::PreResourceServiceErrorCode::truncated_post_server_info_control,size);
+            CHECK(decoded.error->wire_opcode==51U);CHECK(decoded.error->byte_offset==size);
+        }
+    }
+    auto fixture=prefix;
+    fixture.insert(fixture.end(),{std::byte{54U},std::byte{0U},std::byte{0U},
+        std::byte{51U},std::byte{0U},std::byte{254U},std::byte{14U},std::byte{0xa5U}});
+    auto unknown_initial=decode_initial_boundary(decoder,fixture);
+    const auto unknown=decoder.continue_to_pre_resource(unknown_initial.payload,unknown_initial.boundary);
+    check_error(unknown,goldsrc::PreResourceServiceErrorCode::unsupported_post_server_info_opcode,fixture.size());
+    CHECK(unknown.error->wire_opcode==254U);CHECK(unknown.error->byte_offset==prefix.size()+5U);
+
+    fixture.erase(fixture.end()-3); // Remove only the actual unknown opcode.
+    auto limits=goldsrc::ServiceMessageLimits{};limits.maximum_messages_per_payload=3U;
+    const goldsrc::ServiceMessageStreamDecoder bounded{limits};
+    auto bounded_initial=decode_initial_boundary(bounded,fixture);
+    check_error(bounded.continue_to_pre_resource(bounded_initial.payload,bounded_initial.boundary),
+        goldsrc::PreResourceServiceErrorCode::message_limit_exceeded,fixture.size());
 }
 
 } // namespace

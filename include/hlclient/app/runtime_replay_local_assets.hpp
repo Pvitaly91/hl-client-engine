@@ -1,5 +1,6 @@
 #pragma once
 #include <hlclient/app/entity_follow_presentation.hpp>
+#include <hlclient/app/loading_presentation.hpp>
 #include <hlclient/app/remote_movement_diagnostics.hpp>
 #include <hlclient/app/world_impact_presentation.hpp>
 #include <hlclient/game_api/presentation.hpp>
@@ -9,6 +10,8 @@
 #include <hlclient/goldsrc/player_model_assets.hpp>
 #include <hlclient/goldsrc/decal_assets.hpp>
 #include <hlclient/goldsrc/studio/goldsrc_studio_pose.hpp>
+#include <hlclient/goldsrc/studio/goldsrc_studio_entity_animation.hpp>
+#include <hlclient/goldsrc/reference_brush_collision.hpp>
 #include <hlclient/goldsrc/entity_snapshot_interpolation.hpp>
 
 #include <hlclient/app/runtime_replay_visual_projection.hpp>
@@ -35,6 +38,14 @@ present_runtime_brushes(const world_scene_render::RuntimeBrushRenderFrame& commi
 enum class ReplayLocalCameraPolicy : std::uint8_t {
   offline_spectator,
   external_live_receiving_client,
+};
+
+// Resource identity is independent of the camera or server address. Recorded
+// evidence retains its exact-size guard. Live HL uses map-lump CRC identity;
+// resource-list download sizes are only diagnostic metadata.
+enum class ReplayLocalResourcePolicy : std::uint8_t {
+  recorded_exact_size,
+  live_standard_hl,
 };
 
 enum class ReplayLocalVisualStatus {
@@ -139,6 +150,8 @@ struct ReplayLocalVisualSummary {
     game_api::WorldEntityPresentationReason classification{};
     std::uint64_t network_generation{},map_generation{},entity_lifetime{};
     std::optional<std::uint32_t> render_effect,render_amount,weapon_model_index,gait_sequence;
+    std::optional<std::uint32_t> support_entity,support_model;
+    std::optional<double> support_offset_z;
     std::uint32_t effects{};
     bool no_interpolation{};
     ReplayAttachmentStatus attachment_status{ReplayAttachmentStatus::absent};
@@ -166,12 +179,17 @@ struct ReplayLocalVisualSummary {
   std::size_t imported_sprites{};
   std::size_t size_matches{};
   std::size_t size_unavailable{};
+  std::size_t size_mismatches{};
+  bool world_crc_verified{}; // Actual multiplayer BSP lump CRC matched.
   std::size_t decoded_entities{};
   std::size_t resolved_instances{};
   std::size_t rendered_instances{};
   std::size_t unsupported_instances{};
   std::size_t projected_frames{};
   std::size_t unchanged_records{};
+  // Last materialization only; ordinary poses share exact immutable inputs
+  // within that call, never across frames, generations, or player composition.
+  std::size_t ordinary_pose_evaluations{}, ordinary_pose_reuses{};
   std::size_t prepared_brush_models{};
   std::size_t missing_texture_placeholder_bindings{};
   std::size_t brush_candidates{};
@@ -201,6 +219,13 @@ struct ReplayLocalAssetsCreateResult {
 // environment and approved source capabilities; renderer inputs stay neutral.
 class RuntimeReplayLocalAssets final : public game_api::IStaticEffectTrace {
 public:
+  // Borrowed session-thread observer only. A zero map generation is unknown;
+  // the owning committed observation supplies the network generation.
+  void set_diagnostic_sink(core::MultiplayerDiagnosticSink*,
+      std::uint64_t map_generation = 0U) noexcept;
+  [[nodiscard]] std::optional<double> effective_remote_interpolation_delay_seconds() const noexcept {
+    return player_presentation_.effective_delay_seconds();
+  }
   game_api::StaticEffectTrace trace(assets::AssetVector3,assets::AssetVector3) const noexcept override;
   game_api::PlacementTraceResult placement_trace(const game_api::PlacementTraceRequest&) const noexcept override;
   void placement_observation(std::shared_ptr<const client::RuntimeClientObservationState> state) noexcept {
@@ -208,7 +233,8 @@ public:
   }
   [[nodiscard]] static ReplayLocalAssetsCreateResult
   create(const goldsrc::RuntimeReplayCaptureState &capture,
-         const std::filesystem::path &basedir, std::string_view game);
+         const std::filesystem::path &basedir, std::string_view game,
+         std::shared_ptr<LoadingWork> loading_work = {});
   [[nodiscard]] static ReplayLocalAssetsCreateResult
   create(const goldsrc::ResourceListState &resources,
          const goldsrc::ServerInfoState &server_info,
@@ -217,19 +243,30 @@ public:
              ReplayLocalCameraPolicy::offline_spectator,
          std::string_view effect_palette_dependency = {},
          std::span<const std::string> effect_sprite_dependencies = {},
-         std::string_view sky_name = {});
+         std::string_view sky_name = {},
+         std::shared_ptr<LoadingWork> loading_work = {},
+         ReplayLocalResourcePolicy resource_policy =
+             ReplayLocalResourcePolicy::recorded_exact_size);
   [[nodiscard]] RuntimeReplayVisualProjectionResult
   reset_generation(const client::RuntimeClientObservationState &,
                    client::ClientWorldState &);
   [[nodiscard]] RuntimeReplayVisualProjectionResult
   project_entities(const client::RuntimeClientObservationState &,
                    client::ClientWorldState &);
+  // Retain one authoritative entity observation for the normal presentation
+  // clock without constructing or publishing a discrete render frame.  This
+  // owns the same bounded histories, lifetimes, follows, decals and effect
+  // sources as project_entities; a later present_entities call materializes
+  // the sole visible sampled frame.  No ClientWorldState is mutated here.
+  [[nodiscard]] RuntimeReplayVisualProjectionResult
+  observe_entities(const client::RuntimeClientObservationState &);
   // Same materializer, presentation-only sample. The sole application clock
   // explicitly anchors to committed svc_time; sampling never changes RX state.
   [[nodiscard]] RuntimeReplayVisualProjectionResult present_entities(
       game_api::GameClientHost&, double application_seconds,
       std::optional<std::uint32_t> receiving_entity, client::ClientWorldState&,
-      renderer::RenderExtent, bool capture_remote_diagnostics = false);
+      renderer::RenderExtent, bool capture_remote_diagnostics = false,
+      std::shared_ptr<const goldsrc::collision::BrushCollisionScene> rendered_brush_scene = {});
   // Unavailable is not an empty actor list/removal. These observations belong
   // only to the successfully published normal presentation.
   [[nodiscard]] std::optional<std::span<const RemoteMovementObservation>>
@@ -418,6 +455,29 @@ private:
   std::shared_ptr<const client::RuntimeClientObservationState> previous_entities_, current_entities_;
   goldsrc::RuntimeOrdinarySnapshotPresentation ordinary_presentation_;
   goldsrc::RuntimePlayerSnapshotPresentation player_presentation_;
+  goldsrc::studio::StudioEntityAnimationPresentation ordinary_animation_;
+  core::MultiplayerDiagnosticSink* diagnostic_sink_{};
+  std::uint64_t diagnostic_map_generation_{}, ordinary_diagnostic_serial_{};
+  struct OrdinaryDiagnosticSample {
+    bool used{}, cache_hit{};
+    std::uint32_t entity{}, selected_sequence{};
+    std::optional<std::uint32_t> raw_sequence;
+    std::uint64_t generation{}, lifetime{}, model_resource{}, observed_ns{};
+    std::uint32_t suppressed{};
+  };
+  std::array<OrdinaryDiagnosticSample,128> ordinary_diagnostic_samples_{};
+  std::size_t ordinary_diagnostic_next_{};
+  std::uint32_t ordinary_diagnostic_evictions_{};
+  void observe_ordinary_studio(std::uint32_t entity, std::uint64_t model_resource,
+      const client::RuntimePacketEntityObservation* raw,
+      const client::RuntimeClientObservationState* source,
+      const goldsrc::studio::StudioPoseInput&, assets::AssetVector3 origin,
+      assets::AssetVector3 angles, bool cache_hit,
+      std::optional<double> sample_seconds,
+      std::optional<double> previous_source_seconds) noexcept;
+  std::vector<goldsrc::ReferenceBrushCollisionContext> remote_support_contexts_; // max17, cached per publication
+  std::shared_ptr<const goldsrc::collision::BrushCollisionScene> sampled_brush_scene_;
+  collision::CollisionQueryScratch remote_support_scratch_;
   std::shared_ptr<const client::RuntimeClientObservationState> sampled_player_previous_, sampled_player_current_;
   std::vector<goldsrc::RuntimePlayerInterpolationAnchor> sampled_player_anchors_;
   std::vector<goldsrc::RuntimePlayerAnimationEffectException> sampled_motion_exceptions_; // max16x32
@@ -426,6 +486,20 @@ private:
   void capture_remote_movement(const client::RuntimeClientObservationState&,
       const client::ClientWorldState&) noexcept;
   struct PlayerLifetime { std::uint64_t identity{}; std::optional<std::uint32_t> model; std::uint64_t continuity_floor{}; };
+  struct AuthoritativeObservationStage {
+    bool retain{};
+    std::shared_ptr<const client::RuntimeClientObservationState> retained;
+    std::optional<goldsrc::RuntimeOrdinarySnapshotPresentation> ordinary;
+    std::optional<goldsrc::RuntimePlayerSnapshotPresentation> players;
+    std::map<std::uint32_t, PlayerLifetime> lifetimes;
+    std::uint64_t lifetime_identity{};
+    std::unique_ptr<EntityFollowPresentation> follow;
+    std::vector<client::RuntimePacketEntityObservation> effect_entities;
+    std::vector<WorldImpactPresentation::ServerDecalTargetLifetime> decal_lifetimes;
+  };
+  [[nodiscard]] AuthoritativeObservationStage stage_authoritative_observation(
+      const client::RuntimeClientObservationState&);
+  void commit_authoritative_observation(AuthoritativeObservationStage&&) noexcept;
   std::map<std::uint32_t, PlayerLifetime> player_lifetimes_;
   std::uint64_t next_player_lifetime_{};
   // Receipt freshness for remote sockets only, not the buffered player clock.

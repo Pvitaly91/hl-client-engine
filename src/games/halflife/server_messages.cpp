@@ -8,13 +8,56 @@
 
 namespace hlclient::games::halflife {
 namespace {
+std::string resolve_text(std::string_view text,std::span<const game_api::TextMessageEntry> catalogue,
+    game_api::TextDestination* destination=nullptr) {
+    if(text.starts_with('#')) {
+        const auto entry=std::find_if(catalogue.begin(),catalogue.end(),[&](const auto& v){return v.key==text.substr(1);});
+        if(entry!=catalogue.end()) {
+            if(destination && entry->destination)*destination=*entry->destination;
+            return entry->text; // Exactly one lookup; resource text is never recursively evaluated.
+        }
+    }
+    return std::string{text};
+}
+std::string format_text(const std::vector<std::string>& values,std::span<const game_api::TextMessageEntry> catalogue,
+    game_api::TextDestination& destination) {
+    const auto format=resolve_text(values[0],catalogue,&destination);
+    std::array<std::string,4> parameters;
+    for(std::size_t i=1;i<values.size();++i) {
+        parameters[i-1]=resolve_text(values[i],catalogue);
+        while(!parameters[i-1].empty() && (parameters[i-1].back()=='\r' || parameters[i-1].back()=='\n'))parameters[i-1].pop_back();
+    }
+    std::string text;std::size_t parameter{};
+    for(std::size_t i=0;i<format.size() && text.size()<4096U;++i) {
+        if(format[i]=='%' && i+1U<format.size()) {
+            if(format[i+1U]=='%'){text+='%';++i;continue;}
+            if(format[i+1U]=='s' && parameter<parameters.size()) {
+                text.append(parameters[parameter++],0,4096U-text.size());++i;continue;
+            }
+        }
+        text+=format[i]; // %n, widths, positional and other directives remain literal data.
+    }
+    if(format.starts_with('#'))for(;parameter+1U<values.size() && text.size()<4000U;++parameter)
+        text+=" ["+parameters[parameter]+"]";
+    if(text.size()>4096U)text.resize(4096U);
+    return text;
+}
 [[nodiscard]] std::optional<game_api::GameMessageFailure> apply_messages(
     game_api::GameRecordState& staged,
     std::span<const game_api::GameMessageView> messages,
-    std::uint32_t maximum_clients)
+    std::uint32_t maximum_clients,std::span<const game_api::TextMessageEntry> catalogue)
 {
     auto& hud = staged.weapon_hud;
     auto& life_events = staged.life_events;
+    const auto console_text=[&](std::string text,const client::RuntimeObservationSource& source) {
+        staged.append_console_text(std::move(text),source);
+    };
+    std::size_t display_bytes{};
+    const auto display_text=[&](std::string text,game_api::TextDestination destination,const auto& source) {
+        if(staged.display_text.size()<32U && text.size()<=4096U-display_bytes) {
+            display_bytes+=text.size();staged.display_text.push_back({std::move(text),destination,source});
+        }
+    };
     const auto byte = [](const std::byte value) {
         return std::to_integer<std::uint8_t>(value);
     };
@@ -34,10 +77,20 @@ namespace {
                 animation ? std::string{"svc_weaponanim"} : std::string{name},
                 message.registration_id, source, expected, length, std::move(context), body_offset};
         };
+        if(message.kind==game_api::GameMessageKind::console_text && (name=="svc_print" || name=="svc_centerprint")) {
+            if(body.empty() || body.back()!=std::byte{0U} ||
+                std::find(body.begin(),body.end()-1U,std::byte{0U})!=body.end()-1U)
+                return reject(game_api::GameMessageErrorCode::invalid_body,"svc_print requires one exact terminated inert string");
+            const auto retained=std::min(length-1U,std::size_t{4096U});
+            std::string text{reinterpret_cast<const char*>(body.data()),retained};
+            if(name=="svc_centerprint")display_text(std::move(text),game_api::TextDestination::center,source);
+            else console_text(std::move(text),source);
+            continue;
+        }
         if (!animation && name == "SayText") {
             // Pinned SDK ClientDisconnect and CHudSayText use entity byte then
             // one NUL-terminated string. Validate the registered body exactly;
-            // text remains inert and is not retained or presented as chat.
+            // text remains inert and is delivered only after atomic commit.
             if (length < 2U || length > 255U || body.back() != std::byte{0U} ||
                 std::find(body.begin() + 1U, body.end() - 1U, std::byte{0U}) != body.end() - 1U)
                 return reject(game_api::GameMessageErrorCode::invalid_body,
@@ -45,6 +98,28 @@ namespace {
             if (byte(body[0U]) > maximum_clients)
                 return reject(game_api::GameMessageErrorCode::invalid_identifier,
                     "SayText entity exceeds negotiated client bounds", {}, 0U);
+            const std::string text{reinterpret_cast<const char*>(body.data()+1U),length-2U};
+            console_text(text,source);display_text(text,game_api::TextDestination::talk,source);
+            continue;
+        }
+        if(!animation && name=="TextMsg") {
+            // Pinned SDK text_message.cpp: destination byte, format string,
+            // then zero to four string parameters. No printf/command engine.
+            if(length<2U || length>255U || byte(body[0U])<1U || byte(body[0U])>4U)
+                return reject(game_api::GameMessageErrorCode::invalid_body,"TextMsg requires a bounded destination and terminated strings");
+            std::vector<std::string> values;
+            for(std::size_t at=1U;at<length;) {
+                if(values.size()>=5U)return reject(game_api::GameMessageErrorCode::invalid_body,"TextMsg has more than four string parameters");
+                const auto end=std::find(body.begin()+at,body.end(),std::byte{0U});
+                if(end==body.end())return reject(game_api::GameMessageErrorCode::invalid_body,"TextMsg string has no exact terminator");
+                const auto count=static_cast<std::size_t>(end-(body.begin()+at));
+                values.emplace_back(reinterpret_cast<const char*>(body.data()+at),count);at+=count+1U;
+            }
+            if(values.empty())return reject(game_api::GameMessageErrorCode::invalid_body,"TextMsg is missing its display string");
+            auto destination=static_cast<game_api::TextDestination>(byte(body[0]));
+            auto text=format_text(values,catalogue,destination);
+            if(destination!=game_api::TextDestination::console)display_text(text,destination,source);
+            if(destination!=game_api::TextDestination::center)console_text(std::move(text),source);
             continue;
         }
         if(!animation && name=="ScreenShake") {
@@ -295,7 +370,8 @@ namespace {
 
 game_api::GameRecordResult stage_record(
     const game_api::GameRecordInput& input,
-    const game_api::GameRecordState* previous_game)
+    const game_api::GameRecordState* previous_game,
+    std::span<const game_api::TextMessageEntry> catalogue)
 {
     game_api::GameRecordState staged;
     staged.screen_effect_seconds=input.presentation_seconds;
@@ -308,14 +384,58 @@ game_api::GameRecordResult stage_record(
         staged.weapon_hud = previous_game->weapon_hud;
         staged.pickup_high_water = previous_game->pickup_high_water;
     }
-    if (auto error = apply_messages(staged, input.messages, input.maximum_clients))
+    if (auto error = apply_messages(staged, input.messages, input.maximum_clients,catalogue))
         return {{}, error->context, std::move(error)};
     if (auto error = stage_multiplayer(staged, input))
         return {{}, error->context, std::move(error)};
+    // Text and multiplayer events are staged by their existing owners. Publish
+    // their combined output in the original committed wire cursor order.
+    std::stable_sort(staged.console_text.begin(),staged.console_text.end(),[](const auto& a,const auto& b) {
+        return a.source.record_ordinal<b.source.record_ordinal ||
+            (a.source.record_ordinal==b.source.record_ordinal && a.source.end_bit_offset<b.source.end_bit_offset);
+    });
     staged.lifecycle = advance_local_player_lifecycle(input.previous,
         input.observation, input.receiving_entity, staged.weapon_hud, staged.life_events,
         previous_game ? &previous_game->weapon_hud : nullptr,
         previous_game ? &previous_game->lifecycle : nullptr);
     return {std::move(staged), {}};
+}
+void ServerTextDisplay::committed(const game_api::GameRecordState& state) {
+    for(const auto& event:state.display_text) {
+        if(high_water_ && (event.source.record_ordinal<high_water_->record_ordinal ||
+            (event.source.record_ordinal==high_water_->record_ordinal && event.source.end_bit_offset<=high_water_->end_bit_offset)))continue;
+        high_water_=event.source;
+        std::size_t first{},last{};
+        if(event.destination==game_api::TextDestination::notify){first=0;last=3;}
+        else if(event.destination==game_api::TextDestination::talk){first=4;last=7;}
+        else if(event.destination==game_api::TextDestination::center){first=last=8;}
+        else continue;
+        for(auto i=first;i<last;++i)entries_[i]=std::move(entries_[i+1]);
+        std::string text;
+        for(unsigned char c:event.text) {
+            if(text.size()>=160U)break;
+            if(c>=32U && c<=126U)text+=static_cast<char>(c);
+            else if(c=='\r' || c=='\n' || c=='\t')text+=' ';
+            else if(c>=128U && (c&0xc0U)!=0x80U)text+='?';
+        }
+        entries_[last]={std::move(text),state.screen_effect_seconds};
+    }
+}
+void ServerTextDisplay::compose(game_api::HudState& hud,game_api::HudPresentationContext context,double now) {
+    if(!context.hud_draw || !std::isfinite(now) || context.viewport_width<160U || context.viewport_height<120U)return;
+    const float scale=context.viewport_height>720U?2.F:1.F,advance=6.F*scale,line=9.F*scale;
+    for(std::size_t i=0;i<entries_.size();++i) {
+        auto& entry=entries_[i];if(entry.text.empty())continue;
+        if(!entry.time)entry.time=now;
+        if(now>=*entry.time+5.0){entry={};continue;}
+        if(hud.draw.texts.size()>=game_api::kMaximumHudTexts)break;
+        const auto columns=std::min(std::size_t{160},static_cast<std::size_t>((context.viewport_width-16U)/advance));
+        auto text=entry.text.substr(0,columns);
+        const float x=i==8 ? (static_cast<float>(context.viewport_width)-static_cast<float>(text.size())*advance)*.5F:8.F;
+        const float y=i<4 ? 8.F+static_cast<float>(i)*line:i<8 ?
+            static_cast<float>(context.viewport_height)*.7F+static_cast<float>(i-4U)*line:
+            static_cast<float>(context.viewport_height)*.35F;
+        hud.draw.texts.push_back({std::move(text),x,y,scale,advance,line,{1,.7F,0,1},100});
+    }
 }
 } // namespace hlclient::games::halflife

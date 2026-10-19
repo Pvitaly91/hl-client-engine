@@ -2,6 +2,7 @@
 
 #include <hlclient/goldsrc/delta_description_stage.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
+#include <hlclient/goldsrc/user_info_signon_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -244,6 +245,23 @@ void deliver(
             request.header.sequence.sequence.value(),
             service_envelope(semantic)));
     stage.update(now);
+}
+
+TEST_CASE("Default nested sign-on event budgets cover atomic publication",
+          "[goldsrc][signon-capacity]")
+{
+    const goldsrc::UserInfoSignonStageConfig config{};
+
+    CHECK(config.movement_environment.delta.pre_resource.maximum_events ==
+          goldsrc::kDefaultMaximumServiceMessagesPerPayload);
+    CHECK(config.movement_environment.delta.maximum_events ==
+          goldsrc::kDefaultMaximumDeltaSchemaCount + 2U);
+    CHECK(config.movement_environment.maximum_events ==
+          goldsrc::kDefaultMaximumPostMoveVarsControls + 2U);
+    CHECK(config.maximum_stage_events ==
+          goldsrc::kDefaultMaximumUserInfoStageEvents);
+    CHECK(config.maximum_stage_events >=
+          goldsrc::kDefaultMaximumUserInfoMessagesPerBatch + 1U);
 }
 
 TEST_CASE("Delta description stage publishes registry and post-delta boundary once",

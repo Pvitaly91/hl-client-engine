@@ -10,6 +10,8 @@ $scratch = [IO.Path]::GetFullPath((Join-Path $FixtureRoot ([guid]::NewGuid().ToS
 [void][IO.Directory]::CreateDirectory((Join-Path $scratch 'valve'))
 $peer = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, 0))
 $process = [Diagnostics.Process]::new()
+$stdout = ''
+$stderr = ''
 try {
     $port = ([Net.IPEndPoint]$peer.Client.LocalEndPoint).Port
     $spec = [Diagnostics.ProcessStartInfo]::new([IO.Path]::GetFullPath($ToolPath))
@@ -17,9 +19,16 @@ try {
     $spec.RedirectStandardOutput = $true
     $spec.RedirectStandardError = $true
     $spec.WorkingDirectory = Split-Path -Parent ([IO.Path]::GetFullPath($ToolPath))
+    # The bounded production test hook disables real user startup config. This
+    # deliberately high cap leaves the actual owning challenge deadline in
+    # control; it is not an artificial wait or an early timeout substitute.
+    $spec.Environment['HLCLIENT_SMOKE_TEST_FRAMES'] = '1000000'
     foreach ($argument in @('--renderer','opengl','--connect',"127.0.0.1:$port",
         '--stop-after','live-visual-control','--live-input','keyboard-mouse',
-        '--prediction','reference','--live-session-unlimited','--basedir',$scratch,
+        # A finite managed attempt preserves this fixture's terminal exit2
+        # contract. Unlimited interactive attempts now correctly remain at the
+        # E33 recoverable error console instead of closing the application.
+        '--prediction','reference','--live-session-seconds','30','--basedir',$scratch,
         '--game','valve','--auth-provider','steam','--steam-api-runtime',
         (Join-Path $scratch 'never-loaded-steam-api.dll'))) {
         $spec.ArgumentList.Add($argument)
@@ -52,6 +61,16 @@ try {
         throw 'Unexpected request to silent peer'
     }
     Write-Host 'PASS normal application: preparation before challenge, RX loop survives first frame, typed timeout, exit2 preserved; no game/Steam initialization/live sessions.'
+} catch {
+    # Preserve bounded child diagnostics in CTest output when an assertion
+    # fails; an early application failure must not hide behind its first
+    # missing milestone. This owned fixture never reaches authentication.
+    foreach ($capture in @(@('stdout',$stdout),@('stderr',$stderr))) {
+        $bounded = [string]$capture[1]
+        if ($bounded.Length -gt 16384) { $bounded = $bounded.Substring($bounded.Length - 16384) }
+        [Console]::Error.WriteLine("[startup-fixture:$($capture[0])] $bounded")
+    }
+    throw
 } finally {
     if ($process.Id -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     $process.Dispose()

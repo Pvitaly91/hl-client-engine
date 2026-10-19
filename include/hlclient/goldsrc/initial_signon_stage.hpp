@@ -23,11 +23,17 @@ using InitialSignonClock = NetchanDriverClock;
 using InitialSignonTimePoint = NetchanDriverTimePoint;
 
 // Project safety limits. They are not claims about stock engine maxima.
-inline constexpr std::size_t kDefaultMaximumInitialSignonEvents = 32U;
+inline constexpr std::size_t kDefaultMaximumInitialSignonEvents = 128U;
 inline constexpr std::size_t kMaximumInitialSignonEvents = 256U;
+inline constexpr std::size_t kDefaultMaximumInitialSignonRetainedMessages = 256U;
+inline constexpr std::size_t kMaximumInitialSignonRetainedMessages = 256U;
 inline constexpr std::size_t kDefaultInitialSignonDriverEventsPerUpdate = 32U;
 inline constexpr std::size_t kMaximumInitialSignonDriverEventsPerUpdate = 64U;
 inline constexpr std::size_t kInitialSignonDiagnosticTextLimit = 256U;
+inline constexpr std::size_t kDefaultMaximumInitialPreAckPayloads = 16U;
+inline constexpr std::size_t kMaximumInitialPreAckPayloads = 64U;
+inline constexpr std::size_t kDefaultMaximumInitialPreAckPayloadBytes = 262'144U;
+inline constexpr std::size_t kMaximumInitialPreAckPayloadBytes = 1'048'576U;
 
 struct InitialSignonConfig {
     NetchanDriverConfig driver;
@@ -36,6 +42,11 @@ struct InitialSignonConfig {
     std::size_t maximum_events{kDefaultMaximumInitialSignonEvents};
     std::size_t maximum_driver_events_per_update{
         kDefaultInitialSignonDriverEventsPerUpdate};
+    std::size_t maximum_pre_ack_payloads{kDefaultMaximumInitialPreAckPayloads};
+    std::size_t maximum_pre_ack_payload_bytes{
+        kDefaultMaximumInitialPreAckPayloadBytes};
+    std::size_t maximum_retained_messages{
+        kDefaultMaximumInitialSignonRetainedMessages};
 };
 
 [[nodiscard]] bool valid_initial_signon_configuration(
@@ -82,6 +93,11 @@ struct InitialSignonError {
     std::optional<NetchanDriverErrorCode> driver_code;
     std::string context;
     std::optional<ServicePayloadEnvelopeErrorCode> envelope_code;
+    // Decoder-established numeric provenance; never recovered by scanning a
+    // failed body or by retaining server text.
+    std::optional<std::uint8_t> wire_opcode;
+    std::optional<std::size_t> service_error_byte_offset;
+    std::optional<std::uint32_t> source_sequence;
 };
 
 struct InitialSignonResult {
@@ -142,6 +158,11 @@ struct InitialSignonTraceEvent {
     std::size_t byte_count{0U};
     std::size_t service_payload_count{0U};
     std::size_t transmitted_packet_count{0U};
+    std::optional<ServiceMessageErrorCode> service_message_code;
+    std::optional<std::uint8_t> wire_opcode;
+    std::optional<std::size_t> service_error_byte_offset;
+    std::optional<std::uint32_t> source_sequence;
+    std::optional<InitialSignonErrorCode> stage_error_code;
 };
 
 using InitialSignonTraceCallback =

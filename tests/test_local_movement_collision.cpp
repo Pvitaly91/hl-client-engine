@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/movement/local_movement_collision.hpp>
+#include <hlclient/goldsrc/movement/measured_movement_collision.hpp>
 
 #include "collision_brush_test_fixture.hpp"
 #include "literal_movement_bsp_fixture.hpp"
@@ -846,6 +847,22 @@ TEST_CASE("Synthetic movement collision fails closed without explicit roles",
     CHECK(point.error->code == movement_collision::
         LocalMovementCollisionErrorCode::invalid_collision_source);
 
+    std::array<movement_collision::ServerEntityCollisionBox,
+        movement_collision::kMaximumServerEntityCollisionBoxes+1U> too_many{};
+    const movement_collision::BrushSceneMovementCollision invalid_both{
+        nullptr,too_many};
+    const auto point_with_invalid_boxes=invalid_both.point_contents({},scratch);
+    REQUIRE_FALSE(point_with_invalid_boxes);
+    REQUIRE(point_with_invalid_boxes.error);
+    CHECK(point_with_invalid_boxes.error->code==movement_collision::
+        LocalMovementCollisionErrorCode::invalid_collision_source);
+    const auto trace_with_invalid_boxes=invalid_both.trace_hull(
+        {},{},movement::PlayerMovementHull::standing,scratch);
+    REQUIRE_FALSE(trace_with_invalid_boxes);
+    REQUIRE(trace_with_invalid_boxes.error);
+    CHECK(trace_with_invalid_boxes.error->code==movement_collision::
+        LocalMovementCollisionErrorCode::invalid_configuration);
+
     const auto traced = null_adapter.trace_hull(
         {}, {}, movement::PlayerMovementHull::standing, scratch);
     REQUIRE_FALSE(traced);
@@ -896,4 +913,154 @@ TEST_CASE("Local movement collision configuration and labels are stable",
               static_cast<movement_collision::LocalMovementCollisionProfile>(
                   255U)) ==
         "unknown");
+}
+
+TEST_CASE("Brush scene movement adapter retains immutable identity and trace parity",
+    "[goldsrc][movement][collision][prediction][b080-cpu-workload]")
+{
+    const auto scene=literal_box_tangent_scene({0,0,0},true,false);
+    const movement_collision::BrushSceneMovementCollision adapter{scene};
+    REQUIRE(adapter.valid());
+    const auto identity=adapter.session_identity();
+    REQUIRE(identity);
+    REQUIRE(identity->valid());
+
+    collision::CollisionQueryScratch scratch;
+    const auto expected=adapter.trace_hull(
+        {0,0,36},{16,0,36},movement::PlayerMovementHull::standing,scratch);
+    REQUIRE(expected);
+    REQUIRE(expected.result);
+    for(unsigned repeat=0;repeat<32U;++repeat) {
+        CHECK(adapter.valid());
+        CHECK(adapter.session_identity()==identity);
+        const auto traced=adapter.trace_hull(
+            {0,0,36},{16,0,36},movement::PlayerMovementHull::standing,scratch);
+        REQUIRE(traced);
+        REQUIRE(traced.result);
+        CHECK(traced.result->fraction==expected.result->fraction);
+        CHECK(traced.result->start_solid==expected.result->start_solid);
+        CHECK(traced.result->all_solid==expected.result->all_solid);
+        CHECK(traced.result->end_position.x==expected.result->end_position.x);
+        CHECK(traced.result->end_position.y==expected.result->end_position.y);
+        CHECK(traced.result->end_position.z==expected.result->end_position.z);
+        CHECK(traced.result->hit==expected.result->hit);
+    }
+}
+
+TEST_CASE("Moved-from brush scene movement adapter is invalid without stale identity",
+    "[goldsrc][movement][collision][prediction][b080-cpu-workload]")
+{
+    const auto scene=literal_box_tangent_scene({0,0,0},true,false);
+    movement_collision::BrushSceneMovementCollision source{scene};
+    REQUIRE(source.valid());
+    const auto identity=source.session_identity();
+    REQUIRE(identity);
+
+    movement_collision::BrushSceneMovementCollision moved{std::move(source)};
+    CHECK(moved.valid());
+    CHECK(moved.session_identity()==identity);
+    CHECK_FALSE(source.valid());
+    CHECK_FALSE(source.session_identity());
+
+    collision::CollisionQueryScratch scratch;
+    const auto contents=source.point_contents({},scratch);
+    REQUIRE_FALSE(contents);
+    REQUIRE(contents.error);
+    CHECK(contents.error->code==
+        movement_collision::LocalMovementCollisionErrorCode::invalid_collision_source);
+    const auto trace=source.trace_hull({},{},
+        movement::PlayerMovementHull::standing,scratch);
+    REQUIRE_FALSE(trace);
+    REQUIRE(trace.error);
+    CHECK(trace.error->code==
+        movement_collision::LocalMovementCollisionErrorCode::invalid_collision_source);
+}
+
+TEST_CASE("Measured movement collision preserves queries while recording bounded work",
+    "[goldsrc][movement][collision][prediction][diagnostics]")
+{
+    const auto scene=literal_box_tangent_scene({0,0,0},true,false);
+    const movement_collision::BrushSceneMovementCollision source{scene};
+    REQUIRE(source.valid());
+    hlclient::core::PredictionWorkDiagnostics diagnostics;
+    const movement_collision::MeasuredMovementCollision measured{
+        source,&diagnostics};
+    CHECK(measured.profile()==source.profile());
+    CHECK(measured.valid()==source.valid());
+    CHECK(measured.session_identity()==source.session_identity());
+
+    collision::CollisionQueryScratch expected_scratch,measured_scratch;
+    const auto expected_contents=source.point_contents(
+        {0,0,36},expected_scratch);
+    const auto measured_contents=measured.point_contents(
+        {0,0,36},measured_scratch);
+    REQUIRE(expected_contents);REQUIRE(measured_contents);
+    CHECK(measured_contents.result->contents==expected_contents.result->contents);
+    CHECK(measured_contents.result->traversal_depth==
+        expected_contents.result->traversal_depth);
+
+    const auto expected_position=source.test_position(
+        {0,0,36},movement::PlayerMovementHull::standing,expected_scratch);
+    const auto measured_position=measured.test_position(
+        {0,0,36},movement::PlayerMovementHull::standing,measured_scratch);
+    REQUIRE(expected_position);REQUIRE(measured_position);
+    CHECK(measured_position.result->status==expected_position.result->status);
+    CHECK(measured_position.result->hit==expected_position.result->hit);
+
+    const auto expected_trace=source.trace_hull(
+        {0,0,36},{16,0,36},movement::PlayerMovementHull::standing,
+        expected_scratch);
+    const auto measured_trace=measured.trace_hull(
+        {0,0,36},{16,0,36},movement::PlayerMovementHull::standing,
+        measured_scratch);
+    REQUIRE(expected_trace);REQUIRE(measured_trace);
+    CHECK(measured_trace.result->fraction==expected_trace.result->fraction);
+    CHECK(measured_trace.result->hit==expected_trace.result->hit);
+    CHECK(diagnostics.contents_queries==1U);
+    CHECK(diagnostics.position_queries==1U);
+    CHECK(diagnostics.trace_queries==1U);
+    CHECK(diagnostics.traversal_steps==
+        measured_contents.result->traversal_depth+
+        measured_position.result->traversal_depth+
+        measured_trace.result->traversal_statistics.traversal_steps);
+    CHECK(diagnostics.collision_query_ms>=0.0);
+
+    const auto invalid_config=invalid_query_config();
+    const auto failed=measured.trace_hull(
+        {},{},movement::PlayerMovementHull::standing,measured_scratch,
+        invalid_config);
+    REQUIRE_FALSE(failed);REQUIRE(failed.error);
+    CHECK(diagnostics.trace_queries==2U);
+
+    diagnostics.trace_queries=UINT64_MAX;
+    diagnostics.position_queries=UINT64_MAX;
+    diagnostics.contents_queries=UINT64_MAX;
+    diagnostics.traversal_steps=UINT64_MAX;
+    REQUIRE(measured.point_contents({0,0,36},measured_scratch));
+    REQUIRE(measured.test_position({0,0,36},
+        movement::PlayerMovementHull::standing,measured_scratch));
+    REQUIRE(measured.trace_hull({0,0,36},{16,0,36},
+        movement::PlayerMovementHull::standing,measured_scratch));
+    CHECK(diagnostics.trace_queries==UINT64_MAX);
+    CHECK(diagnostics.position_queries==UINT64_MAX);
+    CHECK(diagnostics.contents_queries==UINT64_MAX);
+    CHECK(diagnostics.traversal_steps==UINT64_MAX);
+}
+
+TEST_CASE("Disabled measured movement collision is exact counter-free passthrough",
+    "[goldsrc][movement][collision][prediction][diagnostics]")
+{
+    const movement_collision::BrushSceneMovementCollision invalid{nullptr};
+    const movement_collision::MeasuredMovementCollision measured{invalid};
+    CHECK_FALSE(measured.valid());
+    CHECK(measured.profile()==invalid.profile());
+    CHECK(measured.session_identity()==invalid.session_identity());
+    collision::CollisionQueryScratch direct_scratch,measured_scratch;
+    const auto direct=invalid.trace_hull(
+        {},{},movement::PlayerMovementHull::standing,direct_scratch);
+    const auto forwarded=measured.trace_hull(
+        {},{},movement::PlayerMovementHull::standing,measured_scratch);
+    REQUIRE_FALSE(direct);REQUIRE_FALSE(forwarded);
+    REQUIRE(direct.error);REQUIRE(forwarded.error);
+    CHECK(forwarded.error->code==direct.error->code);
 }

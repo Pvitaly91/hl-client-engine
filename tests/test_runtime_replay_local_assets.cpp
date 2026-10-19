@@ -20,6 +20,7 @@
 #include <hlclient/renderer/null/null_renderer.hpp>
 #include <hlclient/world_scene_render/world_scene_render_types.hpp>
 #include <hlclient/goldsrc/runtime_replay_fixture.hpp>
+#include <hlclient/goldsrc/runtime_replay_session.hpp>
 #include <hlclient/goldsrc/entity_baseline_decoder.hpp>
 #include <hlclient/goldsrc/reference_brush_collision.hpp>
 #include <hlclient/goldsrc/reference_client_move.hpp>
@@ -40,9 +41,11 @@
 #include <hlclient/goldsrc/user_info_update.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -149,6 +152,78 @@ struct LocalContext {
         root.path(), "valve");
   }
 };
+
+// Independent test oracle for CRC_MapFile: unlike a whole-file CRC, the raw
+// accumulator visits BSP lumps 1..14 in directory order and excludes entities.
+std::uint32_t fixture_map_crc(const std::span<const std::byte> map) {
+  REQUIRE(map.size() >= fixture::kSyntheticBspHeaderSize);
+  std::uint32_t crc = 0xffff'ffffU;
+  for (std::size_t lump = 1U; lump < fixture::kSyntheticBspLumpCount; ++lump) {
+    const auto offset = fixture::synthetic_read_u32le(map, 4U + lump * 8U);
+    const auto length = fixture::synthetic_read_u32le(map, 8U + lump * 8U);
+    REQUIRE(offset <= map.size());
+    REQUIRE(length <= map.size() - offset);
+    for (const auto byte : map.subspan(offset, length)) {
+      crc ^= std::to_integer<std::uint8_t>(byte);
+      for (unsigned bit = 0U; bit < 8U; ++bit)
+        crc = (crc >> 1U) ^ ((crc & 1U) ? 0xedb8'8320U : 0U);
+    }
+  }
+  return crc; // GoldSrc's map checksum is not finalized with XOR FFFFFFFF.
+}
+
+void fixture_replace_map_entities(std::vector<std::byte>& map,
+                                  const std::string_view entities) {
+  const auto descriptor = fixture::synthetic_lump_descriptor_offset(
+      fixture::SyntheticBspLumpId::entities);
+  fixture::synthetic_write_u32le(map, descriptor,
+      static_cast<std::uint32_t>(map.size()));
+  fixture::synthetic_write_u32le(map, descriptor + 4U,
+      static_cast<std::uint32_t>(entities.size()));
+  const auto bytes = std::as_bytes(std::span{entities.data(), entities.size()});
+  map.insert(map.end(), bytes.begin(), bytes.end());
+}
+
+hlclient::goldsrc::ServerInfoState fixture_server_map_crc(
+    const std::uint32_t crc, const std::uint8_t slot = 0U,
+    const std::uint8_t maximum_clients = 8U) {
+  // Independently encode the four-byte COM_Munge3 value from serverinfo. This
+  // fixture deliberately does not call the production decoder to create input.
+  const std::uint32_t key = 255U - slot;
+  const auto value = crc ^ ~key;
+  const auto swapped = ((value & 0xffU) << 24U) |
+      ((value & 0xff00U) << 8U) | ((value >> 8U) & 0xff00U) |
+      ((value >> 24U) & 0xffU);
+  const auto wire_crc = swapped ^ 0xffbf'a7a5U ^ key;
+  std::vector<std::byte> body;
+  readiness::append_u32_le(body, 48U);
+  readiness::append_u32_le(body, 0x1234'5678U);
+  readiness::append_u32_le(body, wire_crc);
+  body.insert(body.end(), 16U, std::byte{0});
+  body.push_back(static_cast<std::byte>(maximum_clients));
+  body.push_back(static_cast<std::byte>(slot));
+  body.push_back(static_cast<std::byte>(maximum_clients > 1U ? 1U : 0U));
+  readiness::append_string(body, "valve");
+  readiness::append_string(body, "Local resource CRC fixture");
+  readiness::append_string(body, "maps/test_map.bsp");
+  readiness::append_string(body, "cursor-only");
+  body.push_back(std::byte{0});
+  const auto parsed = hlclient::goldsrc::ServerInfoParser{}.parse(body);
+  INFO((parsed.error ? parsed.error->context : std::string{}));
+  REQUIRE(parsed);
+  REQUIRE(parsed.state);
+  REQUIRE(parsed.state->world_map_crc() == crc);
+  return *parsed.state;
+}
+
+auto create_live_resource_fixture(const LocalContext& context,
+                                 const hlclient::goldsrc::ResourceListState& resources,
+                                 const hlclient::goldsrc::ServerInfoState& server) {
+  return app::RuntimeReplayLocalAssets::create(resources, server,
+      context.root.path(), "valve",
+      app::ReplayLocalCameraPolicy::external_live_receiving_client,
+      {}, {}, {}, {}, app::ReplayLocalResourcePolicy::live_standard_hl);
+}
 
 namespace {
 std::vector<std::byte> muzzle_fixture_sprite() {
@@ -387,6 +462,66 @@ TEST_CASE("E31 missing resource report preserves safe virtual names and concrete
   CHECK(absent.error->context.find(empty.path().string())==std::string::npos);
 }
 
+TEST_CASE("E33 cancelled asset work returns a typed empty result before touching roots",
+          "[e33][loading][local-assets][no-stock]") {
+  LocalContext context;
+  auto work=std::make_shared<app::LoadingWork>(33U);
+  work->stage.store(app::LoadingStage::idle);work->done.store(5U);work->total.store(9U);
+  work->cancelled.store(true);
+  const auto cancelled=app::RuntimeReplayLocalAssets::create(context.resources(),
+      readiness::parse_server_info("maps/test_map.bsp"),{},"valve",
+      app::ReplayLocalCameraPolicy::offline_spectator,{},{},{},work);
+  REQUIRE_FALSE(cancelled.projection);REQUIRE(cancelled.error);
+  CHECK(cancelled.error->code==app::RuntimeReplayVisualProjectionErrorCode::asset_preparation_cancelled);
+  CHECK(cancelled.error->context=="asset_preparation_cancelled");
+  CHECK(app::to_string(cancelled.error->code)=="asset_preparation_cancelled");
+  CHECK(cancelled.resource_issues.empty());CHECK(cancelled.resource_issues_omitted==0U);
+  CHECK(work->generation==33U);CHECK(work->stage.load()==app::LoadingStage::idle);
+  CHECK(work->done.load()==5U);CHECK(work->total.load()==9U);
+  app::LoadingPresentation presentation;presentation.begin(33U);
+  CHECK_FALSE(presentation.observe(*work));CHECK(presentation.stage==app::LoadingStage::connecting);
+}
+
+TEST_CASE("E33 asset preparation publishes actual stages but never claims scene presentation ready",
+          "[e33][loading][local-assets][no-stock]") {
+  LocalContext context;
+  auto work=std::make_shared<app::LoadingWork>(34U);
+  const auto created=app::RuntimeReplayLocalAssets::create(context.resources(),
+      readiness::parse_server_info("maps/test_map.bsp"),context.root.path(),"valve",
+      app::ReplayLocalCameraPolicy::offline_spectator,{},{},{},work);
+  REQUIRE(created.projection);CHECK_FALSE(created.error);
+  CHECK(work->stage.load()==app::LoadingStage::scene);
+  CHECK(work->total.load()==0U); // Scene/GPU totals are not fabricated.
+  app::LoadingPresentation presentation;presentation.begin(34U);REQUIRE(presentation.observe(*work));
+  CHECK(presentation.stage==app::LoadingStage::scene);CHECK_FALSE(presentation.percent);
+  presentation.begin(35U);CHECK_FALSE(presentation.observe(*work));
+  CHECK(presentation.stage==app::LoadingStage::connecting);
+}
+
+TEST_CASE("E33 failed resource texture and model preparation retain their real loading stage",
+          "[e33][loading][local-assets][no-stock]") {
+  LocalContext context;
+  auto work=std::make_shared<app::LoadingWork>(36U);
+  bool model_mismatch{};auto basedir=context.root.path();
+  app::LoadingStage expected=app::LoadingStage::resources;
+  fixture::ScopedLocalResourceTestRoot empty;
+  SECTION("missing world is resource validation, not finished map import") {basedir=empty.path();}
+  SECTION("malformed WAD fails during actual texture preparation") {
+    context.root.write("valve","test.wad",std::array<std::byte,4>{});
+    expected=app::LoadingStage::textures;
+  }
+  SECTION("model size mismatch fails during model preparation") {
+    model_mismatch=true;expected=app::LoadingStage::models;
+  }
+  const auto resources=context.resources(model_mismatch);
+  const auto failed=app::RuntimeReplayLocalAssets::create(resources,
+      readiness::parse_server_info("maps/test_map.bsp"),basedir,"valve",
+      app::ReplayLocalCameraPolicy::offline_spectator,{},{},{},work);
+  REQUIRE_FALSE(failed.projection);REQUIRE(failed.error);
+  CHECK(failed.error->code!=app::RuntimeReplayVisualProjectionErrorCode::asset_preparation_cancelled);
+  CHECK(work->stage.load()==expected);CHECK(work->stage.load()!=app::LoadingStage::ready);
+}
+
 TEST_CASE("E31 failed world preparation preserves the actual missing WAD dependency",
           "[e31][local-assets][world-textures][no-stock]") {
   LocalContext source;
@@ -484,7 +619,7 @@ public:
       const State*, std::size_t, double, double) noexcept override { return {}; }
   hlclient::game_api::DamageRespawnScriptSnapshot damage_respawn_snapshot() const noexcept override { return {}; }
   hlclient::game_api::RemotePlayerPresentationPolicy remote_player_policy() const noexcept override {
-    return {true, 0.1, 0.2, 128.0, 8U, 0U};
+    return {true, 0.1, 0.2, 128.0, maximum_players, 0U};
   }
   hlclient::game_api::RemotePlayerPresentationIntent remote_player(
       const hlclient::game_api::RemotePlayerPresentationContext& input) noexcept override {
@@ -503,6 +638,7 @@ public:
     return result;
   }
   std::int32_t selected_body{1};
+  std::uint32_t maximum_players{8};
   bool attachments{};
   bool sockets_enabled{};
   std::array<hlclient::game_api::RemoteWeaponPoseSample,32> sockets{};
@@ -579,6 +715,344 @@ e10_instance(const client::ClientWorldState& world, const std::uint32_t number) 
       (result.error ? result.error->context : std::string{}));
   REQUIRE(result);
   return result;
+}
+
+TEST_CASE("Opt-in ordinary installed NPC presents signed animation between unchanged raw snapshots",
+          "[studio][animation][installed-npc-production][local-capture-assets][runtime-presentation]") {
+  std::filesystem::path root;
+#ifdef _WIN32
+  wchar_t* value=nullptr;std::size_t count=0;
+  if(_wdupenv_s(&value,&count,L"HLCLIENT_LOCAL_GAME_ROOT")==0 && value)root=value;
+  std::free(value);
+#else
+  if(const char* value=std::getenv("HLCLIENT_LOCAL_GAME_ROOT"))root=value;
+#endif
+  if(root.lexically_normal()!=std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life"}.lexically_normal())
+    SKIP("No exact opt-in read-only research root for ordinary Studio control");
+  const std::array tokens{"maps/crossfire.bsp","models/tentacle2.mdl"};
+  std::array<std::filesystem::file_time_type,tokens.size()> times;
+  for(std::size_t i=0;i<tokens.size();++i) {
+    if(!std::filesystem::is_regular_file(root/"valve"/tokens[i]))SKIP("Optional approved NPC asset absent");
+    times[i]=std::filesystem::last_write_time(root/"valve"/tokens[i]);
+  }
+  const auto resources=readiness::parse_resource_list({{2U,tokens[0],9U,0U,0U},{2U,tokens[1],7U,0U,0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info(tokens[0]),root,"valve",
+      app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  INFO((created.error ? created.error->context : std::string{}));REQUIRE(created.projection);
+  const auto model=created.projection->studio_model_data(7U);REQUIRE(model);
+  namespace studio=hlclient::goldsrc::studio;
+  using Palette=std::vector<std::array<float,16U>>;
+  // Independent SDK frame formula, sampled through the imported real model.
+  const auto expected=[&](std::uint32_t sequence,double frame)->std::optional<Palette> {
+    studio::StudioPoseInput input;input.sequence_index=sequence;input.frame_coordinate=frame;
+    input.compatibility_profile=studio::StudioPoseCompatibilityProfile::public_goldsrc48_discrete_local_asset_v1;
+    const auto pose=studio::StudioPoseEvaluator{}.evaluate({"installed_npc_control",{31U,47U}},*model,input);
+    if(!pose)return {};
+    Palette result;
+    for(const auto& bone:pose.pose->world_bones()) {
+      const auto& m=bone.transform.values;
+      result.push_back({m[0],m[4],m[8],0,m[1],m[5],m[9],0,m[2],m[6],m[10],0,m[3],m[7],m[11],1});
+    }
+    return result;
+  };
+  const auto distance=[](const Palette& a,const Palette& b) {
+    REQUIRE(a.size()==b.size());double maximum=0.0;
+    for(std::size_t i=0;i<a.size();++i)for(std::size_t j=0;j<a[i].size();++j)
+      maximum=std::max(maximum,std::abs(static_cast<double>(a[i][j])-b[i][j]));
+    return maximum;
+  };
+  std::optional<std::uint32_t> selected;
+  for(std::uint32_t i=0;i<model->sequences.size();++i) {
+    const auto& sequence=model->sequences[i];const double fps=sequence.frames_per_second;
+    if(sequence.frame_count<4U || !std::isfinite(fps) || fps<=0.0 || sequence.frame_count-1.0<=fps*.4)continue;
+    const double center=(sequence.frame_count-1.0)*.5;
+    const auto base=expected(i,center),forward=expected(i,center+fps*.04),reverse=expected(i,center-fps*.04);
+    if(base && forward && reverse && distance(*base,*forward)>1e-4 && distance(*base,*reverse)>1e-4) {selected=i;break;}
+  }
+  REQUIRE(selected);const auto& sequence=model->sequences[*selected];
+  const double last=sequence.frame_count-1.0,fps=sequence.frames_per_second;
+  hlclient::game_api::GameClientHost host{std::make_unique<E10TestGameClientModule>()};host.reset({1,1,1});
+  for(const double rate:{1.0,-1.0}) {
+    INFO("signed-rate=" << rate << " sequence=" << *selected);
+    client::ClientWorldState world;auto first=e10_observation(1U,1.0,0,0,0,false);
+    first.packet_entities.erase(std::remove_if(first.packet_entities.begin(),first.packet_entities.end(),
+        [](const auto& entity){return entity.entity_number!=40U;}),first.packet_entities.end());
+    REQUIRE(first.packet_entities.size()==1U);auto& npc=first.packet_entities[0];npc.brush_move_type=5U;
+    npc.sequence=*selected;npc.frame=128.0;npc.animation_time_seconds=1.0;npc.frame_rate=rate;
+    npc.controllers.fill(0U);npc.blending.fill(0U);npc.effects=0U;
+    first.canonical_state_hash=client::runtime_observation_canonical_hash(first);
+    REQUIRE(created.projection->reset_generation(first,world));
+    auto second=first;second.publication_revision=2U;
+    second.entity_metadata.source=client::RuntimeObservationSource{2U,2U,44U,0U,8U};
+    second.server_time_seconds=1.1;second.server_time_metadata=second.entity_metadata;
+    second.packet_entities[0].animation_time_seconds=1.1;
+    second.packet_entities[0].frame=128.0+rate*fps*.1*256.0/last;
+    second.canonical_state_hash=client::runtime_observation_canonical_hash(second);
+    REQUIRE(created.projection->project_entities(second,world));const auto retained=second;
+    Palette initial;
+    for(const double elapsed:{0.0,.04,.08}) {
+      REQUIRE(e10_present(*created.projection,host,100.0+elapsed,1U,world,{320,240}));
+      const auto& instance=e10_instance(world,40U);
+      const auto& actual=world.entity_frame()->studio_poses()[instance.pose_index].bone_matrices;
+      const auto oracle=expected(*selected,last*.5+rate*fps*elapsed);REQUIRE(oracle);REQUIRE(actual.size()==oracle->size());
+      for(std::size_t i=0;i<actual.size();++i)for(std::size_t j=0;j<actual[i].size();++j)
+        CHECK(actual[i][j]==Catch::Approx((*oracle)[i][j]).margin(1e-4F));
+      if(elapsed==0.0)initial=actual;else CHECK(distance(actual,initial)>1e-4);
+      CHECK(second.canonical_state_hash==retained.canonical_state_hash);CHECK(second.packet_entities==retained.packet_entities);
+    }
+  }
+  CHECK(host.drain_audio().count==0U);host.teardown();
+  for(std::size_t i=0;i<tokens.size();++i)CHECK(times[i]==std::filesystem::last_write_time(root/"valve"/tokens[i]));
+}
+
+// Owned warm pipeline, not a replay checkpoint for the historical frame7270.
+// Packet preparation, resource import, assertions, fingerprints and encoding
+// are outside measured scopes. No socket, Steam, renderer or installed asset.
+[[nodiscard]] hlclient::goldsrc::ServerInfoState b080_server_info(std::uint32_t actors) {
+  std::vector<std::byte> body;
+  readiness::append_u32_le(body,48);readiness::append_u32_le(body,1);readiness::append_u32_le(body,2);
+  body.insert(body.end(),16,std::byte{});
+  body.push_back(static_cast<std::byte>(actors));body.push_back(std::byte{});body.push_back(std::byte{1});
+  for(const auto text:{"valve","Owned B080 CPU workload","maps/test_map.bsp","owned"})
+    readiness::append_string(body,text);
+  body.push_back(std::byte{});
+  auto parsed=hlclient::goldsrc::ServerInfoParser{}.parse(body);REQUIRE(parsed);REQUIRE(parsed.state);
+  return std::move(*parsed.state);
+}
+
+[[nodiscard]] hlclient::goldsrc::RuntimeReplayRecord b080_record(
+    std::uint32_t actors,std::uint32_t ordinal) {
+  namespace pf=hlclient::test::player_origin_fixture;
+  hlclient::test::delta_fixture::BitWriter writer;
+  writer.write(7,8);writer.write(std::bit_cast<std::uint32_t>(1.F+float(ordinal)*.005F),32);
+  pf::client_data(writer,{double(ordinal)*.125,0,0});
+  writer.write(40,8);writer.write(actors+64U,16);
+  for(std::uint32_t entity=1;entity<=actors+64U;++entity) {
+    writer.write(1,1);writer.write(0,1);writer.write(0,1); // sequential, ordinary schema, no intra base
+    writer.write(1,3);writer.write(255,8);
+    pf::coordinate(writer,double(entity)+double(ordinal)*.125,8,18);
+    pf::coordinate(writer,double(entity%8U)*2,8,18);pf::coordinate(writer,0,8,18);
+    writer.write(0,16);writer.write(0,16);writer.write(0,16);writer.write(7,10);writer.write(0,8);
+  }
+  writer.write(0,16);writer.align_zero();
+  hlclient::goldsrc::RuntimeReplayRecord record;
+  record.generation=1;record.record_identity=record.record_ordinal=ordinal;
+  record.payload=pf::payload(writer.bytes(),1000U+ordinal);
+  record.received_at=std::chrono::steady_clock::time_point{std::chrono::milliseconds{ordinal*5U}};
+  record.initial_cursor=*hlclient::goldsrc::StockRuntimeSourceCursor::create(0,0,record.payload.bytes.size());
+  return record;
+}
+
+struct B080Cost final {
+  std::array<std::vector<double>,5> durations;
+  std::uint64_t signature{14695981039346656037ULL},events{};
+  std::size_t history_entities{},history_value_bytes{},capture_bytes{},encoded_bytes{};
+  std::size_t ordinary_pose_evaluations{},ordinary_pose_reuses{};
+  std::size_t projected_frames{};
+  void integer(std::uint64_t value) {
+    for(unsigned byte=0;byte<8;++byte) {signature^=(value>>(byte*8U))&255U;signature*=1099511628211ULL;}
+  }
+  void real(float value) {integer(std::bit_cast<std::uint32_t>(value));}
+};
+
+[[nodiscard]] B080Cost b080_warm_pipeline(LocalContext& context,std::uint32_t actors,bool capture,
+    bool retain_only=false) {
+  namespace g=hlclient::goldsrc;
+  namespace pf=hlclient::test::player_origin_fixture;
+  using Clock=std::chrono::steady_clock;
+  constexpr std::uint32_t warm=80,samples=256,total=warm+samples;
+  std::vector<g::RuntimeReplayRecord> records;records.reserve(total);
+  for(std::uint32_t ordinal=1;ordinal<=total;++ordinal)records.push_back(b080_record(actors,ordinal));
+  g::RuntimeReplayInitialization initialization;
+  initialization.generation=1;initialization.max_clients=actors;initialization.receiving_player_entity=1;
+  initialization.schemas=pf::schemas();initialization.baselines=pf::baselines(*initialization.schemas);
+  client::ClientWorldState authoritative,visual_world;
+  auto session=g::RuntimeReplaySession::initialize(initialization,authoritative);REQUIRE(session);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/shared.mdl",7U,static_cast<std::uint32_t>(context.model.size()),0U},
+      {2U,"sprites/b080_trail.spr",19U,0U,0U}});
+  auto assets=app::RuntimeReplayLocalAssets::create(resources,b080_server_info(actors),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(assets.projection);
+  auto module=std::make_unique<E10TestGameClientModule>();module->maximum_players=actors;
+  hlclient::game_api::GameClientHost host{std::move(module)};host.reset({1,1,1});
+  visual_world.set_camera({{0,-100,40},{10,0,0},{0,0,1}});
+  app::MovementIncidentRecorder recorder{capture};B080Cost cost;
+  for(auto& values:cost.durations)values.reserve(samples);
+  bool initialized=false;
+  for(const auto& record:records) {
+    const auto ordinal=static_cast<std::uint32_t>(record.record_ordinal);
+    const double seconds=double(ordinal)*.005;
+    app::MovementFrameRecord frame;frame.frame_number=ordinal;frame.monotonic_us=std::uint64_t(ordinal)*5000;
+    frame.network_generation=frame.map_generation=1;frame.frame_interval_ms=5;frame.entities=actors+64U;
+    const auto begin=Clock::now();
+    auto applied=session.session->apply_record(record);
+    const auto parsed=Clock::now();
+    if(!applied) {INFO((applied.error ? applied.error->context : "missing apply result"));REQUIRE(applied);}
+    const auto& observation=*authoritative.runtime_observation();
+    auto projected=initialized
+        ? retain_only ? assets.projection->observe_entities(observation)
+                      : assets.projection->project_entities(observation,visual_world)
+        : assets.projection->reset_generation(observation,visual_world);
+    const auto committed=Clock::now();
+    if(!projected) {INFO((projected.error ? projected.error->context : "missing projection"));REQUIRE(projected);}
+    auto presented=assets.projection->present_entities(host,seconds,1,visual_world,{640,480},capture);
+    const auto materialized=Clock::now();
+    if(!presented) {INFO((presented.error ? presented.error->context : "missing presentation"));REQUIRE(presented);}
+    frame.parse_commit_ms=std::chrono::duration<double,std::milli>(parsed-begin).count();
+    frame.studio_ms=std::chrono::duration<double,std::milli>(materialized-committed).count();
+    static_cast<void>(recorder.observe(frame));
+    if(capture) {
+      const auto remote=assets.projection->remote_movement_observations();
+      if(remote)static_cast<void>(recorder.observe_remote(frame,*remote));
+    }
+    const auto ended=Clock::now();
+    // Populate real, evolving follow history outside timings; subsequent timed
+    // projections must preserve it, including presentation-only samples.
+    if(!initialized) {
+      client::CommittedTemporaryEffect follow;follow.generation=1;follow.record=follow.record_ordinal=1;
+      follow.received_at_seconds=seconds;follow.kind=client::TemporaryEffectKind::beam_follow;
+      follow.entity_attachment=static_cast<std::uint16_t>(actors+64U);follow.sprite_index=19;
+      follow.life_tenths=40;follow.width_tenths=5;follow.color={224,224,255};follow.brightness=255;
+      assets.projection->consume_follow(follow,seconds);initialized=true;
+    }
+    hlclient::renderer::RenderScene effects;assets.projection->present_entity_effects(effects,seconds);
+    REQUIRE(applied.event);cost.events+=applied.event->decoded_batch.events.size();
+    REQUIRE(observation.packet_entities.size()==actors+64U);
+    CHECK(observation.canonical_state_hash==client::runtime_observation_canonical_hash(observation));
+    CHECK(observation.packet_entities.back().origin.x==double(actors+64U)+double(ordinal)*.125);
+    REQUIRE(observation.receiving_client);CHECK(observation.receiving_client->origin.x==double(ordinal)*.125);
+    REQUIRE(visual_world.entity_frame());
+    const auto& output=*visual_world.entity_frame();
+    REQUIRE(output.studio_instances().size()==actors+63U);
+    cost.integer(observation.canonical_state_hash);cost.integer(output.studio_poses().size());
+    for(const auto& instance:output.studio_instances()) {
+      cost.integer(instance.entity_number);cost.integer(instance.studio_asset_index);cost.integer(instance.pose_index);
+      cost.integer(instance.body_value);cost.integer(instance.skin_family_index);cost.integer(static_cast<unsigned>(instance.visibility_status));
+      cost.real(instance.transform.origin.x);cost.real(instance.transform.origin.y);cost.real(instance.transform.origin.z);
+      cost.real(instance.transform.rotation_degrees.x);cost.real(instance.transform.rotation_degrees.y);cost.real(instance.transform.rotation_degrees.z);
+      cost.real(instance.transform.uniform_scale);cost.integer(static_cast<unsigned>(instance.material_support_status));
+      for(const auto point:{instance.interpolated_bounds.minimum,instance.interpolated_bounds.maximum}) {
+        cost.real(point.x);cost.real(point.y);cost.real(point.z);
+      }
+      for(const auto light:instance.static_light_rgb.value_or(std::array<float,3>{-1,-1,-1}))cost.real(light);
+    }
+    for(const auto& pose:output.studio_poses())for(const auto& matrix:pose.bone_matrices)
+      for(const auto value:matrix)cost.real(value);
+    const auto& trail=assets.projection->entity_effect_statistics();
+    cost.integer(trail.received);cost.integer(trail.accepted);cost.integer(trail.duplicate);
+    cost.integer(trail.detached);cost.integer(trail.discontinuity);cost.integer(trail.sampled);
+    for(const auto& lifetime:assets.projection->server_decal_lifetimes()) {
+      cost.integer(lifetime.entity_number);cost.integer(lifetime.lifetime);
+      cost.integer(lifetime.model_slot);cost.integer(lifetime.source_model_index);
+    }
+    if(ordinal>warm) {
+      REQUIRE(effects.follow_trail_entities);
+      for(const auto& sprite:effects.follow_trail_entities->frame->sprite_instances()) {
+        cost.integer(sprite.entity_number);cost.integer(sprite.sprite_asset_index);cost.integer(sprite.selected_frame_index);
+        cost.real(sprite.transform.origin.x);cost.real(sprite.transform.origin.y);cost.real(sprite.transform.origin.z);
+        cost.real(sprite.transform.uniform_scale);cost.real(sprite.opacity);cost.real(sprite.ribbon_width);
+        for(const auto color:sprite.tint)cost.real(color);
+        cost.integer(sprite.ribbon_end.has_value());
+        if(sprite.ribbon_end) {cost.real(sprite.ribbon_end->x);cost.real(sprite.ribbon_end->y);cost.real(sprite.ribbon_end->z);}
+      }
+    }
+    if(ordinal>warm) {
+      const std::array points{begin,parsed,committed,materialized,ended};
+      for(std::size_t scope=0;scope<4;++scope)
+        cost.durations[scope].push_back(std::chrono::duration<double,std::micro>(points[scope+1]-points[scope]).count());
+      cost.durations[4].push_back(std::chrono::duration<double,std::micro>(ended-begin).count());
+    }
+  }
+  const auto& history=session.session->decoder_state().history();
+  cost.ordinary_pose_evaluations=assets.projection->summary().ordinary_pose_evaluations;
+  cost.ordinary_pose_reuses=assets.projection->summary().ordinary_pose_reuses;
+  cost.projected_frames=assets.projection->summary().projected_frames;
+  REQUIRE(history.snapshot_count()==g::kDefaultMaximumEntitySnapshotHistory);
+  CHECK(history.oldest_reference()->value()==1000U+total-63U);CHECK(history.newest_reference()->value()==1000U+total);
+  for(const auto& snapshot:history.snapshots())cost.history_entities+=snapshot.entity_count();
+  cost.history_value_bytes=history.accounted_value_bytes();
+  CHECK(assets.projection->entity_effect_statistics().accepted==1);
+  CHECK(assets.projection->entity_effect_statistics().sampled>10);
+  // Rejected packet tail and forged observation must not partially publish.
+  const auto prior=authoritative.runtime_observation();const auto visual_prior=visual_world.entity_frame();
+  auto malformed=b080_record(actors,total+1U);malformed.payload.bytes.push_back(std::byte{254});
+  REQUIRE_FALSE(session.session->apply_record(malformed));CHECK(authoritative.runtime_observation()==prior);
+  auto invalid=*prior;invalid.packet_entities.back().origin.x=std::numeric_limits<double>::quiet_NaN();
+  const auto summary_prior=assets.projection->summary();
+  const auto effects_prior=assets.projection->entity_effect_statistics();
+  const std::vector lifetimes_prior(assets.projection->server_decal_lifetimes().begin(),
+      assets.projection->server_decal_lifetimes().end());
+  const auto invalid_projection=retain_only
+      ? assets.projection->observe_entities(invalid)
+      : assets.projection->project_entities(invalid,visual_world);
+  REQUIRE_FALSE(invalid_projection);CHECK(visual_world.entity_frame()==visual_prior);
+  CHECK(assets.projection->summary().projected_frames==summary_prior.projected_frames);
+  CHECK(assets.projection->entity_effect_statistics().received==effects_prior.received);
+  const auto lifetimes_after=assets.projection->server_decal_lifetimes();
+  REQUIRE(lifetimes_after.size()==lifetimes_prior.size());
+  for(std::size_t i=0;i<lifetimes_prior.size();++i) {
+    CHECK(lifetimes_after[i].entity_number==lifetimes_prior[i].entity_number);
+    CHECK(lifetimes_after[i].lifetime==lifetimes_prior[i].lifetime);
+    CHECK(lifetimes_after[i].model_slot==lifetimes_prior[i].model_slot);
+    CHECK(lifetimes_after[i].source_model_index==lifetimes_prior[i].source_model_index);
+  }
+  static_cast<void>(recorder.mark(app::MovementIncidentTrigger::manual,std::uint64_t(total)*5000));
+  const auto stats=recorder.statistics();cost.capture_bytes=stats.total_capacity_bytes;
+  const auto encoded=recorder.encode({"0123456789abcdef0123456789abcdef",app::SessionReceiptRole::A,123,456});
+  if(capture) {REQUIRE(encoded);cost.encoded_bytes=encoded->size();}
+  return cost;
+}
+
+TEST_CASE("B080 owned warmed decode commit and Studio paths retain exact output with diagnostics On Off",
+    "[b080-cpu-workload][benchmark][runtime-presentation][local-capture-assets][no-stock]") {
+  constexpr std::array<std::string_view,5> names{"parse_commit","authoritative_materialization", "sampled_materialization","capture_collection","owned_update_subset"};
+  LocalContext context;
+  context.root.write("valve","sprites/b080_trail.spr",fixture::sprite_fixture::literal_single_sprite(1));
+  for(const auto actors:{2U,16U,32U}) {
+    std::array<B080Cost,2> modes;
+    for(unsigned order=0;order<2;++order) {
+      const auto mode=(order+(actors==16U ? 1U : 0U))%2U;
+      modes[mode]=b080_warm_pipeline(context,actors,mode!=0);
+    }
+    CHECK(modes[0].signature==modes[1].signature);CHECK(modes[0].events==modes[1].events);
+    for(unsigned mode=0;mode<2;++mode)for(std::size_t scope=0;scope<names.size();++scope) {
+      auto& values=modes[mode].durations[scope];std::sort(values.begin(),values.end());REQUIRE(values.size()==256);
+      for(const auto value:values)CHECK(std::isfinite(value));
+      std::cout<<"[b080-cpu-workload] {\"actors\":"<<actors<<",\"ordinary_entities\":64,\"capture\":"<<(mode ? "true" : "false")
+        <<",\"scope\":\""<<names[scope]<<"\",\"samples\":256,\"p50_us\":"<<values[127]<<",\"p95_us\":"<<values[243]
+        <<",\"p99_us\":"<<values[253]<<",\"max_us\":"<<values.back()<<",\"output_signature\":\""<<modes[mode].signature
+        <<"\",\"events\":"<<modes[mode].events<<",\"retained_history_entities\":"<<modes[mode].history_entities
+        <<",\"retained_history_value_bytes\":"<<modes[mode].history_value_bytes<<",\"follow_fixed_bytes\":"<<sizeof(app::EntityFollowPresentation)
+        <<",\"capture_capacity_bytes\":"<<modes[mode].capture_bytes<<",\"encoded_bytes\":"<<modes[mode].encoded_bytes
+        <<",\"ordinary_pose_evaluations\":"<<modes[mode].ordinary_pose_evaluations<<",\"ordinary_pose_reuses\":"<<modes[mode].ordinary_pose_reuses<<"}\n";
+    }
+  }
+}
+
+TEST_CASE("B080 retain-only observation preserves authoritative presentation while avoiding a throwaway frame",
+    "[b080-cpu-workload][runtime-presentation][local-capture-assets][no-stock]") {
+  LocalContext context;
+  context.root.write("valve","sprites/b080_trail.spr",
+      fixture::sprite_fixture::literal_single_sprite(1));
+
+  const auto projected=b080_warm_pipeline(context,2U,false,false);
+  const auto observed=b080_warm_pipeline(context,2U,false,true);
+
+  // The retained histories, lifetime-derived decal ownership, follow output,
+  // poses and transforms must be byte-for-byte equivalent at presentation.
+  CHECK(observed.signature==projected.signature);
+  CHECK(observed.events==projected.events);
+  CHECK(observed.history_entities==projected.history_entities);
+  CHECK(observed.history_value_bytes==projected.history_value_bytes);
+  CHECK(observed.ordinary_pose_evaluations==projected.ordinary_pose_evaluations);
+  CHECK(observed.ordinary_pose_reuses<=projected.ordinary_pose_reuses);
+
+  // Record one is the shared reset frame. Every later authoritative record is
+  // retained without publishing the discrete frame that present_entities
+  // would immediately replace.
+  CHECK(projected.projected_frames-observed.projected_frames==335U);
 }
 
 TEST_CASE("E32 opt-in actor diagnostics join actual presentation without changing it",
@@ -1149,6 +1623,35 @@ TEST_CASE("Ordinary Studio pickups receive retained world light without player c
     CHECK(client::runtime_observation_canonical_hash(state)==canonical);
     CHECK(world.entity_frame()->studio_instances().size()==2U);
   }
+}
+
+TEST_CASE("Viewmodel held origin moves geometry and both socket samplers exactly once",
+          "[stock-viewmodel][local-capture-assets][first-person]") {
+  LocalContext context;auto created=context.create();REQUIRE(created.projection);
+  auto& assets=*created.projection;client::ClientWorldState world;
+  REQUIRE(assets.reset_generation(observation(),world));
+  hlclient::game_api::ViewmodelIntent intent;
+  intent.status=hlclient::game_api::ViewmodelStatus::ready;
+  intent.generation=1;intent.publication_revision=1;intent.model_index=7;
+  const auto original=assets.materialize_viewmodel(intent);REQUIRE(original);
+  const auto socket=assets.viewmodel_attachment_zero();REQUIRE(socket);
+  intent.camera_local_origin={0,0,-1};
+  for(double frame:{0.,.5,1.}) {
+    intent.frame_coordinate=frame;
+    const auto moved=assets.materialize_viewmodel(intent);REQUIRE(moved);
+    const auto& instance=moved->frame->studio_instances()[0];
+    CHECK(instance.transform.origin.z==-1.F);CHECK(instance.transform.uniform_scale==1.F);
+    const auto current=assets.viewmodel_attachment_zero();REQUIRE(current);
+    const auto marker=assets.viewmodel_attachment_at_frame(intent,0,frame);REQUIRE(marker);
+    CHECK(current->x==Catch::Approx(marker->x));CHECK(current->y==Catch::Approx(marker->y));
+    CHECK(current->z==Catch::Approx(marker->z));
+    if(frame==0.) CHECK(current->z==Catch::Approx(socket->z-1.F));
+  }
+  intent.camera_local_origin[2]=std::numeric_limits<float>::quiet_NaN();
+  CHECK_FALSE(assets.materialize_viewmodel(intent));CHECK_FALSE(assets.viewmodel_attachment_zero());
+  CHECK_FALSE(assets.viewmodel_attachment_at_frame(intent,0,0));
+  intent.camera_local_origin[2]=65.F;
+  CHECK_FALSE(assets.materialize_viewmodel(intent));CHECK_FALSE(assets.viewmodel_attachment_at_frame(intent,0,0));
 }
 
 TEST_CASE("Studio viewmodel and transient models sample world light without moving local geometry",
@@ -2777,6 +3280,231 @@ client::RuntimeClientObservationState observation() {
   return state;
 }
 
+TEST_CASE("Ordinary Studio diagnostics observe real raw and evaluated samples without extra pose work",
+          "[multiplayer-diagnostics][ordinary-studio-diagnostics][local-capture-assets][no-stock]") {
+  namespace core=hlclient::core;
+  struct Sink final : core::MultiplayerDiagnosticSink {
+    bool active{true},accept{true};std::vector<core::MultiplayerDiagnosticEvent> events;
+    bool enabled() const noexcept override {return active;}
+    bool observe(const core::MultiplayerDiagnosticEvent& value) noexcept override {
+      if(events.size()<1024U)events.push_back(value);
+      return accept;
+    }
+  } sink;
+  sink.events.reserve(1024U);
+  LocalContext context;context.model=fixture::synthetic_weapon_presentation_studio();
+  context.root.write("valve","models/shared.mdl",context.model);
+  auto on=context.create(),off=context.create();REQUIRE(on.projection);REQUIRE(off.projection);
+  hlclient::game_api::GameClientHost host_on{std::make_unique<E10TestGameClientModule>()};
+  hlclient::game_api::GameClientHost host_off{std::make_unique<E10TestGameClientModule>()};
+  host_on.reset({1,7,1});host_off.reset({1,7,1});
+  client::ClientWorldState world_on,world_off;
+  auto first=e10_observation(1U,1.0,0,0,0,false);
+  auto npc=first.packet_entities[2]; // Entity40, the ordinary schema, not a player.
+  REQUIRE(npc.entity_number==40U);
+  npc.frame=64.0;npc.animation_time_seconds=1.0;npc.frame_rate=-1.0;npc.brush_move_type=5U;
+  npc.controllers={1U,2U,3U,4U};npc.blending={5U,6U};npc.effects=0U;
+  first.packet_entities={npc};auto twin=npc;twin.entity_number=41U;twin.origin.y=10.0;
+  first.packet_entities.push_back(twin);
+  first.canonical_state_hash=client::runtime_observation_canonical_hash(first);
+  REQUIRE(on.projection->reset_generation(first,world_on));REQUIRE(off.projection->reset_generation(first,world_off));
+  auto second=first;second.publication_revision=2U;second.server_time_seconds=1.1;
+  second.entity_metadata.source=client::RuntimeObservationSource{22U,2U,44U,0U,8U};
+  second.server_time_metadata=second.entity_metadata;
+  for(auto& row:second.packet_entities){row.frame=80.0;row.animation_time_seconds=1.1;}
+  second.canonical_state_hash=client::runtime_observation_canonical_hash(second);
+  REQUIRE(on.projection->project_entities(second,world_on));REQUIRE(off.projection->project_entities(second,world_off));
+  on.projection->set_diagnostic_sink(&sink,7U);
+  const auto present=[&](double now) {
+    REQUIRE(e10_present(*on.projection,host_on,now,1U,world_on,{320,240}));
+    REQUIRE(e10_present(*off.projection,host_off,now,1U,world_off,{320,240}));
+    CHECK(on.projection->summary().ordinary_pose_evaluations==off.projection->summary().ordinary_pose_evaluations);
+    CHECK(on.projection->summary().ordinary_pose_reuses==off.projection->summary().ordinary_pose_reuses);
+    REQUIRE(world_on.entity_frame());REQUIRE(world_off.entity_frame());
+    REQUIRE(world_on.entity_frame()->studio_poses().size()==world_off.entity_frame()->studio_poses().size());
+    for(std::size_t i=0;i<world_on.entity_frame()->studio_poses().size();++i)
+      CHECK(world_on.entity_frame()->studio_poses()[i].bone_matrices==world_off.entity_frame()->studio_poses()[i].bone_matrices);
+  };
+  present(100.0);REQUIRE(sink.events.size()==2U);
+  for(const auto& event:sink.events) {
+    CHECK(event.identity.producer==core::MultiplayerDiagnosticProducer::ordinary_studio);
+    CHECK(event.identity.network_generation==1U);CHECK(event.identity.map_generation==7U);
+    CHECK(event.identity.source_record==22U);CHECK(event.identity.source_record_ordinal==2U);
+    CHECK(event.identity.source_sequence==44U);CHECK(event.identity.actor_visual_lifetime.has_value());
+    CHECK_FALSE(event.identity.actor_model_revision);CHECK_FALSE(event.identity.render_frame);
+    const auto& p=std::get<core::MultiplayerPresentationPayload>(event.payload);
+    CHECK(p.raw_animation_sequence==0U);CHECK(p.raw_animation_frame==80.0);
+    CHECK(p.raw_animtime_seconds==1.1);CHECK(p.raw_framerate==-1.0);
+    CHECK((p.raw_controllers==std::array<std::uint8_t,4>{1,2,3,4}));
+    CHECK((p.raw_blending==std::array<std::uint8_t,2>{5,6}));
+    CHECK(p.pose_seconds.has_value());CHECK(p.current_source_seconds==1.1);
+    CHECK(p.sequence==0U);CHECK(p.animation_frame.has_value());
+    CHECK_FALSE(p.visible);CHECK_FALSE(p.held);CHECK_FALSE(p.clamped);
+  }
+  CHECK(std::get<core::MultiplayerPresentationPayload>(sink.events[0].payload).cache_hit==false);
+  CHECK(std::get<core::MultiplayerPresentationPayload>(sink.events[1].payload).cache_hit==true);
+  // Same input and sample retain exact cache decisions while suppressing diagnostic repetition.
+  present(100.0);CHECK(sink.events.size()<=4U);
+  for(std::size_t i=2U;i<sink.events.size();++i) {
+    const auto original=sink.events[i].identity.actor_entity==40U ? 0U : 1U;
+    CHECK(sink.events[i].local_steady_ns-sink.events[original].local_steady_ns>=125'000'000U);
+  }
+  const auto before_off=sink.events.size();
+  sink.active=false;present(100.04);CHECK(sink.events.size()==before_off);
+  sink.active=true;sink.accept=false;
+  // Changing the explicit map identity clears only diagnostic suppression state.
+  on.projection->set_diagnostic_sink(&sink,8U);present(100.08);REQUIRE(sink.events.size()==before_off+2U);
+  CHECK(sink.events.back().identity.map_generation==8U);
+  CHECK(second.packet_entities[0].frame==80.0);CHECK(second.packet_entities[0].frame_rate==-1.0);
+  on.projection->set_diagnostic_sink(nullptr);present(100.09);CHECK(sink.events.size()==before_off+2U);
+}
+
+TEST_CASE("Ordinary Studio diagnostics retain absent source fields as unknown with a bounded cache",
+          "[multiplayer-diagnostics][ordinary-studio-diagnostics][local-capture-assets][no-stock][bounds]") {
+  namespace core=hlclient::core;
+  struct Sink final : core::MultiplayerDiagnosticSink {
+    std::vector<core::MultiplayerDiagnosticEvent> events;
+    bool enabled() const noexcept override {return true;}
+    bool observe(const core::MultiplayerDiagnosticEvent& event) noexcept override {
+      if(events.size()<1024U)events.push_back(event);return true;
+    }
+  } sink;
+  sink.events.reserve(1024U);
+  LocalContext context;auto created=context.create();REQUIRE(created.projection);
+  client::ClientWorldState world;auto state=observation();auto row=state.packet_entities.front();
+  state.packet_entities.clear();
+  for(unsigned i=0;i<140U;++i){row.entity_number=40U+i;state.packet_entities.push_back(row);}
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  REQUIRE(created.projection->reset_generation(state,world));
+  created.projection->set_diagnostic_sink(&sink);
+  REQUIRE(created.projection->project_entities(state,world));REQUIRE(sink.events.size()==140U);
+  CHECK(std::get<core::MultiplayerPresentationPayload>(sink.events[127].payload).diagnostic_cache_evictions==0U);
+  CHECK(std::get<core::MultiplayerPresentationPayload>(sink.events.back().payload).diagnostic_cache_evictions==12U);
+  CHECK(created.projection->summary().ordinary_pose_evaluations==1U);
+  CHECK(created.projection->summary().ordinary_pose_reuses==139U);
+  for(const auto& event:sink.events) {
+    CHECK(event.identity.map_generation==0U);
+    const auto& p=std::get<core::MultiplayerPresentationPayload>(event.payload);
+    CHECK_FALSE(p.raw_animation_sequence);CHECK_FALSE(p.raw_animation_frame);
+    CHECK_FALSE(p.raw_animtime_seconds);CHECK_FALSE(p.raw_framerate);
+    CHECK_FALSE(p.raw_controllers);CHECK_FALSE(p.raw_blending);CHECK_FALSE(p.pose_seconds);
+    CHECK(p.sequence==0U);CHECK(p.animation_frame==0.0F);
+  }
+}
+
+TEST_CASE("B080 ordinary frame-local pose reuse preserves exact per-instance output and distinct inputs",
+          "[b080-ordinary-pose-cache][local-capture-assets][no-stock]") {
+  LocalContext context;context.model=fixture::synthetic_weapon_presentation_studio();
+  // Valid authored second skin family: one skin reference per family, both
+  // selecting texture0. Other absolute source offsets remain unchanged.
+  const auto skin_table=context.model.size();context.model.resize(skin_table+4U);
+  fixture::studio_write_i32le(context.model,72U,static_cast<std::int32_t>(context.model.size()));
+  fixture::studio_write_i32le(context.model,196U,2);
+  fixture::studio_write_i32le(context.model,200U,static_cast<std::int32_t>(skin_table));
+  fixture::studio_write_u16le(context.model,skin_table,0);fixture::studio_write_u16le(context.model,skin_table+2U,0);
+  context.root.write("valve","models/shared.mdl",context.model);
+  // Default LocalContext aliases slots7/15 to one virtual file, intentionally
+  // sharing one visual record. This control instead needs a genuinely distinct
+  // immutable model/revision, with observable pose data as well as a new name.
+  auto distinct=context.model;
+  fixture::studio_write_f32le(distinct,fixture::kSyntheticStudioBoneOffset+64U,.5F);
+  context.root.write("valve","models/b080_distinct.mdl",distinct);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/shared.mdl",7U,static_cast<std::uint32_t>(context.model.size()),0U},
+      {2U,"models/b080_distinct.mdl",15U,static_cast<std::uint32_t>(distinct.size()),0U}});
+  const auto make_assets=[&] {return app::RuntimeReplayLocalAssets::create(resources,
+      readiness::parse_server_info("maps/test_map.bsp"),context.root.path(),"valve");};
+  auto batched=make_assets(),single=make_assets();REQUIRE(batched.projection);REQUIRE(single.projection);
+  client::ClientWorldState batch_world,single_world;auto state=observation();
+  const auto base=state.packet_entities.front();state.packet_entities.clear();
+  for(unsigned i=0;i<18;++i) {
+    auto row=base;const auto variant=i%9;row.entity_number=i+1;row.model_index=7;
+    row.sequence=0;row.frame=0;row.body=0;row.skin=0;row.controllers.fill(0);row.blending.fill(0);
+    if(variant==1)row.frame=64;
+    if(variant==2)row.sequence=1;
+    if(variant==3)row.body=1;
+    if(variant==4)row.controllers[0]=127;
+    if(variant==5)row.blending[1]=211;
+    if(variant==6)row.model_index=15;
+    if(variant==7)row.frame=.000001; // Same quantized pose, distinct raw input.
+    if(variant==8)row.skin=1;
+    row.origin.x=double(i)*2;state.packet_entities.push_back(row);
+  }
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  REQUIRE(batched.projection->reset_generation(state,batch_world));
+  CHECK(batched.projection->summary().ordinary_pose_evaluations==9);
+  CHECK(batched.projection->summary().ordinary_pose_reuses==9);
+  const auto batch=batch_world.entity_frame();REQUIRE(batch);REQUIRE(batch->studio_instances().size()==18);
+  const auto& base_pose=batch->studio_poses()[batch->studio_instances()[0].pose_index];
+  const auto& distinct_pose=batch->studio_poses()[batch->studio_instances()[6].pose_index];
+  CHECK(base_pose.model_resource_identity!=distinct_pose.model_resource_identity);
+  CHECK(base_pose.bone_matrices!=distinct_pose.bone_matrices);
+  for(const auto& row:state.packet_entities) {
+    auto one=state;one.packet_entities={row};one.canonical_state_hash=client::runtime_observation_canonical_hash(one);
+    REQUIRE(single.projection->reset_generation(one,single_world));
+    CHECK(single.projection->summary().ordinary_pose_evaluations==1);CHECK(single.projection->summary().ordinary_pose_reuses==0);
+    REQUIRE(single_world.entity_frame());const auto& reference=*single_world.entity_frame();REQUIRE(reference.studio_instances().size()==1);
+    const auto actual=std::ranges::find(batch->studio_instances(),row.entity_number,&hlclient::entity_render::StudioEntityRenderInstance::entity_number);
+    REQUIRE(actual!=batch->studio_instances().end());const auto& expected=reference.studio_instances()[0];
+    CHECK(actual->studio_asset_index==expected.studio_asset_index);CHECK(actual->body_value==expected.body_value);
+    CHECK(actual->skin_family_index==expected.skin_family_index);CHECK(actual->visibility_status==expected.visibility_status);
+    CHECK(actual->material_support_status==expected.material_support_status);CHECK(actual->static_light_rgb==expected.static_light_rgb);
+    CHECK(actual->transform.origin.x==expected.transform.origin.x);CHECK(actual->transform.origin.y==expected.transform.origin.y);
+    CHECK(actual->transform.origin.z==expected.transform.origin.z);CHECK(actual->transform.rotation_degrees.x==expected.transform.rotation_degrees.x);
+    CHECK(actual->transform.rotation_degrees.y==expected.transform.rotation_degrees.y);CHECK(actual->transform.rotation_degrees.z==expected.transform.rotation_degrees.z);
+    CHECK(actual->transform.uniform_scale==expected.transform.uniform_scale);
+    CHECK(batch->studio_poses()[actual->pose_index].model_resource_identity==reference.studio_poses()[expected.pose_index].model_resource_identity);
+    CHECK(batch->studio_poses()[actual->pose_index].bone_matrices==reference.studio_poses()[expected.pose_index].bone_matrices);
+    CHECK(actual->interpolated_bounds.minimum.x==expected.interpolated_bounds.minimum.x);
+    CHECK(actual->interpolated_bounds.minimum.y==expected.interpolated_bounds.minimum.y);
+    CHECK(actual->interpolated_bounds.minimum.z==expected.interpolated_bounds.minimum.z);
+    CHECK(actual->interpolated_bounds.maximum.x==expected.interpolated_bounds.maximum.x);
+    CHECK(actual->interpolated_bounds.maximum.y==expected.interpolated_bounds.maximum.y);
+    CHECK(actual->interpolated_bounds.maximum.z==expected.interpolated_bounds.maximum.z);
+  }
+  // A new call starts empty even with identical immutable resources/inputs.
+  REQUIRE(batched.projection->project_entities(state,batch_world));
+  CHECK(batched.projection->summary().ordinary_pose_evaluations==9);CHECK(batched.projection->summary().ordinary_pose_reuses==9);
+  state.generation=state.server_time_metadata.generation=state.client_metadata.generation=state.entity_metadata.generation=2;
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  const auto prior=batch_world.entity_frame();CHECK_FALSE(batched.projection->reset_generation(state,batch_world));
+  CHECK(batch_world.entity_frame()==prior);
+  auto generation=make_assets();REQUIRE(generation.projection);
+  REQUIRE(generation.projection->reset_generation(state,batch_world));
+  CHECK(generation.projection->summary().ordinary_pose_evaluations==9);CHECK(generation.projection->summary().ordinary_pose_reuses==9);
+}
+TEST_CASE("B080 ordinary pose cache caps retention and does not retain failed evaluation",
+          "[b080-ordinary-pose-cache][local-capture-assets][no-stock][bounds]") {
+  LocalContext context;auto created=context.create();REQUIRE(created.projection);
+  client::ClientWorldState world;auto state=observation();const auto base=state.packet_entities.front();state.packet_entities.clear();
+  for(unsigned i=0;i<140;++i) {auto row=base;row.entity_number=i+1;row.model_index=7;row.body=i%70;state.packet_entities.push_back(row);}
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  REQUIRE(created.projection->reset_generation(state,world));REQUIRE(world.entity_frame());
+  CHECK(world.entity_frame()->studio_instances().size()==140);
+  CHECK(created.projection->summary().ordinary_pose_evaluations==76);CHECK(created.projection->summary().ordinary_pose_reuses==64);
+  // The imported model is valid; sampling its finite scale and quantized value
+  // overflows only inside the existing evaluator. Repeated failures must not
+  // become successful hits or suppress a later valid row.
+  fixture::studio_write_f32le(context.model,fixture::kSyntheticStudioBoneOffset+88U,std::numeric_limits<float>::max());
+  context.root.write("valve","models/shared.mdl",context.model);
+  const auto valid_model=fixture::literal_minimal_goldsrc_studio_v10();
+  context.root.write("valve","models/b080_valid.mdl",valid_model);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/shared.mdl",7U,static_cast<std::uint32_t>(context.model.size()),0U},
+      {2U,"models/b080_valid.mdl",15U,static_cast<std::uint32_t>(valid_model.size()),0U}});
+  auto failing=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),context.root.path(),"valve");
+  REQUIRE(failing.projection);state=observation();state.packet_entities.clear();
+  for(unsigned i=0;i<2;++i) {auto row=base;row.entity_number=i+1;row.model_index=7;state.packet_entities.push_back(row);}
+  for(unsigned i=2;i<4;++i) {auto row=base;row.entity_number=i+1;row.model_index=15;state.packet_entities.push_back(row);}
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  REQUIRE(failing.projection->reset_generation(state,world));REQUIRE(world.entity_frame());
+  REQUIRE(world.entity_frame()->studio_instances().size()==2);
+  CHECK(world.entity_frame()->studio_instances()[0].entity_number==3);CHECK(world.entity_frame()->studio_instances()[1].entity_number==4);
+  CHECK(failing.projection->summary().ordinary_pose_evaluations==3);CHECK(failing.projection->summary().ordinary_pose_reuses==1);
+}
+
 TEST_CASE("Local capture visual CLI stays explicitly offline",
           "[local-capture-assets][command-line]") {
   using namespace hlclient::core;
@@ -3023,7 +3751,8 @@ e16_materialized_mp5_action(app::RuntimeReplayLocalAssets& assets,
   CHECK(first->frame->studio_instances().front().body_value==2U);
   const auto& first_instance=first->frame->studio_instances().front();
   CHECK(first_instance.transform.origin.x==0.0F);CHECK(first_instance.transform.origin.y==0.0F);
-  CHECK(first_instance.transform.origin.z==0.0F);
+  CHECK(first_instance.transform.origin.z==-1.0F);
+  CHECK(first_instance.transform.uniform_scale==1.0F);
 
   const auto later=host.sample(.08);REQUIRE(later.visual);
   CHECK(later.visual->restart_identity==started.visual->restart_identity);
@@ -3593,6 +4322,98 @@ TEST_CASE("E31 normal approved materializer selects two userinfo models and free
   CHECK(fixture.state.packet_entities[2].model_index==7);
   CHECK(fixture.state.canonical_state_hash==client::runtime_observation_canonical_hash(fixture.state));
 }
+
+TEST_CASE("E31 retain-only removal ends frozen corpse appearance before entity-number reuse",
+    "[e31][appearance][corpse][runtime-presentation][b080-cpu-workload]") {
+  namespace api=hlclient::game_api;
+  E31AppearanceFixture fixture;
+  fixture.identity(2,"\\model\\fixture_red\\topcolor\\30",true);
+  fixture.ready(2,api::PlayerAppearanceStatus::selected_model_ready);
+  const auto red_index=e10_instance(fixture.world,2).studio_asset_index;
+
+  auto corpse=fixture.state.packet_entities[1];
+  corpse.entity_number=40;corpse.player_movement_schema=false;
+  corpse.render_effect=17;corpse.render_amount=2;corpse.model_index=999;
+  corpse.effects=32;corpse.sequence=4;corpse.frame=255;
+  corpse.weapon_model_index=0;corpse.frame_rate=0;corpse.origin={0,0,16};
+  fixture.state.packet_entities.push_back(corpse);
+  fixture.state.entity_metadata.source->record_ordinal=20;
+  fixture.state.entity_metadata.source->record_identity=20;
+  ++fixture.state.publication_revision;
+  fixture.state.canonical_state_hash=client::runtime_observation_canonical_hash(fixture.state);
+  REQUIRE(fixture.assets->project_entities(fixture.state,fixture.world));fixture.present();
+  REQUIRE(e10_instance(fixture.world,40).studio_asset_index==red_index);
+
+  // The live player changes after the first body has frozen. This must not
+  // repaint that body, but must apply to a new body after a remove/reuse gap.
+  fixture.identity(2,"\\model\\fixture_green\\topcolor\\120",true);
+  fixture.assets->player_slot_boundary(2);
+  fixture.state.entity_metadata.source->record_ordinal=21;
+  fixture.state.entity_metadata.source->record_identity=21;
+  ++fixture.state.publication_revision;
+  fixture.state.canonical_state_hash=client::runtime_observation_canonical_hash(fixture.state);
+  REQUIRE(fixture.assets->observe_entities(fixture.state));
+  fixture.ready(2,api::PlayerAppearanceStatus::selected_model_ready);
+  const auto green_index=e10_instance(fixture.world,2).studio_asset_index;
+  REQUIRE(green_index!=red_index);
+  CHECK(e10_instance(fixture.world,40).studio_asset_index==red_index);
+
+  const auto retained_frame=fixture.world.entity_frame();
+  fixture.state.packet_entities.pop_back();
+  fixture.state.entity_metadata.source->record_ordinal=22;
+  fixture.state.entity_metadata.source->record_identity=22;
+  ++fixture.state.publication_revision;
+  fixture.state.canonical_state_hash=client::runtime_observation_canonical_hash(fixture.state);
+  const auto removed=fixture.assets->observe_entities(fixture.state);
+  REQUIRE(removed);CHECK_FALSE(removed.frame_changed);
+  CHECK(fixture.world.entity_frame()==retained_frame);
+
+  fixture.state.packet_entities.push_back(corpse); // exact server metadata reuse
+  fixture.state.entity_metadata.source->record_ordinal=23;
+  fixture.state.entity_metadata.source->record_identity=23;
+  ++fixture.state.publication_revision;
+  fixture.state.canonical_state_hash=client::runtime_observation_canonical_hash(fixture.state);
+  REQUIRE(fixture.assets->observe_entities(fixture.state));fixture.present();
+  CHECK(e10_instance(fixture.world,40).studio_asset_index==green_index);
+  CHECK(fixture.state.canonical_state_hash==
+      client::runtime_observation_canonical_hash(fixture.state));
+}
+
+TEST_CASE("71b97 color-only appearance hits borrow the immutable base and preserve exact palette invalidation",
+    "[gauss-71b97][appearance][local-capture-assets]") {
+  E31AppearanceFixture fixture;
+  const auto base=e10_instance(fixture.world,2).studio_asset_index;
+  fixture.identity(2,"\\topcolor\\30\\bottomcolor\\240",true);
+  fixture.present();
+  const auto red=e10_instance(fixture.world,2).studio_asset_index;
+  REQUIRE(red!=base);
+  auto scene=client::build_render_scene(fixture.world);REQUIRE(scene.dynamic_entities);
+  const auto sources=scene.dynamic_entities->package->presentation_studio_sources();
+  REQUIRE(sources.size()==1U);
+  const auto owner=sources[0].model;
+  const auto palette=owner->skeletal_data->textures[0].rgba8_level_zero;
+  for(unsigned repeat=0;repeat<64;++repeat) {
+    fixture.present();
+    CHECK(e10_instance(fixture.world,2).studio_asset_index==red);
+    const auto& values=fixture.world.entity_scene()->presentation_studio_sources();
+    REQUIRE(values.size()==1U);CHECK(values[0].model==owner);
+    CHECK(values[0].model->skeletal_data->textures[0].rgba8_level_zero==palette);
+  }
+  fixture.identity(2,"\\topcolor\\120\\bottomcolor\\240",false);
+  fixture.present();
+  const auto green=e10_instance(fixture.world,2).studio_asset_index;
+  CHECK(green!=red);CHECK(green!=base);
+  REQUIRE(fixture.world.entity_scene()->presentation_studio_sources().size()==2U);
+  CHECK(fixture.world.entity_scene()->presentation_studio_sources()[1].model->skeletal_data->textures[0].rgba8_level_zero!=palette);
+  // Return to the exact old key reuses the old owner without repainting it.
+  fixture.identity(2,"\\topcolor\\30\\bottomcolor\\240",false);fixture.present();
+  CHECK(e10_instance(fixture.world,2).studio_asset_index==red);
+  CHECK(fixture.world.entity_scene()->presentation_studio_sources()[0].model==owner);
+  CHECK(owner->skeletal_data->textures[0].rgba8_level_zero==palette);
+  fixture.identity(2,"\\name\\Fixture",false);fixture.present();
+  CHECK(e10_instance(fixture.world,2).studio_asset_index==base);
+  CHECK(fixture.state.canonical_state_hash==client::runtime_observation_canonical_hash(fixture.state));
+}
 TEST_CASE("E31 approved player model cache attests distinct source content and bounds requests",
     "[e31][appearance][local-capture-assets]") {
   E31AppearanceFixture fixture;
@@ -4109,7 +4930,8 @@ TEST_CASE("First-person binding follows the exact sparse viewmodel and clears on
   CHECK(shown->frame->studio_instances().size() == 1U);
   CHECK(shown->frame->studio_instances()[0].transform.origin.x == 0.0F);
   CHECK(shown->frame->studio_instances()[0].transform.origin.y == 0.0F);
-  CHECK(shown->frame->studio_instances()[0].transform.origin.z == 0.0F);
+  CHECK(shown->frame->studio_instances()[0].transform.origin.z == -1.0F);
+  CHECK(shown->frame->studio_instances()[0].transform.uniform_scale == 1.0F);
   const auto turned = viewmodel(state, 1.01);
   REQUIRE(turned);
   CHECK(turned->frame->studio_instances()[0].transform.rotation_degrees.x == 0.0F);
@@ -4445,6 +5267,203 @@ TEST_CASE("Recorded positive model size mismatch cannot silently substitute a "
   REQUIRE(created.error);
   CHECK(created.error->context.find("size mismatch") != std::string::npos);
 }
+
+TEST_CASE("Studio render modes preserve amount and tint instead of hiding the model",
+          "[local-capture-assets][studio-translucency]") {
+  LocalContext context;auto created=context.create();REQUIRE(created.projection);
+  auto state=observation();state.packet_entities.resize(1U);client::ClientWorldState world;
+  for(const auto mode:{0U,1U,2U,3U,4U,5U}) {
+    auto& entity=state.packet_entities[0];entity.render_mode=mode;entity.render_amount=64U;entity.render_color={32U,128U,255U};
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    const auto projected=created.projection->reset_generation(state,world);
+    INFO((projected.error ? projected.error->context : "ready"));REQUIRE(projected);
+    REQUIRE(world.entity_frame());REQUIRE(world.entity_frame()->studio_instances().size()==1U);
+    const auto& instance=world.entity_frame()->studio_instances()[0];
+    CHECK(instance.blend_mode==(mode==0U ? hlclient::entity_render::StudioBlendMode::opaque :
+        mode==5U ? hlclient::entity_render::StudioBlendMode::additive : hlclient::entity_render::StudioBlendMode::alpha_blended));
+    CHECK(instance.opacity==Catch::Approx(mode==0U ? 1.0F : 64.0F/255.0F));
+    CHECK(instance.tint[0]==Catch::Approx(mode==1U ? 32.0F/255.0F : 1.0F));
+    CHECK(instance.tint[1]==Catch::Approx(mode==1U ? 128.0F/255.0F : 1.0F));
+  }
+}
+
+TEST_CASE("Live local map validation uses the raw BSP lump CRC and assigned slot",
+          "[local-capture-assets][live-resource-policy][map-crc][security]") {
+  LocalContext context;
+  context.map = fixture::literal_minimal_goldsrc_bsp_v30();
+  // Pinned independently from the literal bytes, not from the implementation.
+  constexpr std::uint32_t expected_crc = 0x6c71'e117U;
+  REQUIRE(fixture_map_crc(context.map) == expected_crc);
+  fixture_replace_map_entities(context.map,
+      "{\n\"classname\" \"worldspawn\"\n\"wad\" \"test.wad\"\n}\n");
+  REQUIRE(fixture_map_crc(context.map) == expected_crc);
+  context.root.write("valve", "maps/test_map.bsp", context.map);
+  for (const auto slot : {std::uint8_t{0}, std::uint8_t{3}, std::uint8_t{7}}) {
+    INFO(static_cast<unsigned>(slot));
+    const auto created = create_live_resource_fixture(
+        context, context.resources(), fixture_server_map_crc(expected_crc, slot));
+    INFO((created.error ? created.error->context : "ready"));
+    REQUIRE(created.projection);
+    CHECK(created.projection->summary().world_crc_verified);
+    CHECK(created.projection->summary().size_mismatches == 0U);
+  }
+}
+
+TEST_CASE("Live download sizes are diagnostic for valid local BSP Studio and sprite assets",
+          "[local-capture-assets][live-resource-policy][map-crc][security]") {
+  LocalContext context;
+  const auto sprite = muzzle_fixture_sprite();
+  context.root.write("valve", "sprites/local.spr", sprite);
+  const auto server = fixture_server_map_crc(fixture_map_crc(context.map));
+  for (const unsigned mismatch_mask : {1U, 2U, 4U, 7U}) {
+    INFO(mismatch_mask);
+    const auto resources = readiness::parse_resource_list({
+        {2U, "maps/test_map.bsp", 9U,
+         static_cast<std::uint32_t>(context.map.size()) + ((mismatch_mask & 1U) ? 17U : 0U), 0U},
+        {2U, "models/shared.mdl", 7U,
+         static_cast<std::uint32_t>(context.model.size()) + ((mismatch_mask & 2U) ? 1U : 0U), 0U},
+        {2U, "sprites/local.spr", 16U,
+         static_cast<std::uint32_t>(sprite.size()) - ((mismatch_mask & 4U) ? 1U : 0U), 0U},
+    });
+    const auto created = create_live_resource_fixture(context, resources, server);
+    INFO((created.error ? created.error->context : "ready"));
+    REQUIRE(created.projection);
+    const auto& summary = created.projection->summary();
+    CHECK(summary.world_crc_verified);
+    CHECK(summary.imported_studio == 1U);
+    CHECK(summary.imported_sprites == 1U);
+    CHECK(summary.size_mismatches == static_cast<std::size_t>(std::popcount(mismatch_mask)));
+    CHECK(summary.size_matches + summary.size_mismatches == 3U);
+
+    // Selecting the live camera is not authorization to weaken a capture's
+    // default exact-size contract; the new resource policy must be explicit.
+    const auto recorded = app::RuntimeReplayLocalAssets::create(resources, server,
+        context.root.path(), "valve",
+        app::ReplayLocalCameraPolicy::external_live_receiving_client);
+    CHECK_FALSE(recorded.projection);
+    REQUIRE(recorded.error);
+    CHECK(recorded.error->context.find("size mismatch") != std::string::npos);
+  }
+}
+
+TEST_CASE("Live local map entity-only edits and unreferenced padding retain the server CRC",
+          "[local-capture-assets][live-resource-policy][map-crc][security]") {
+  LocalContext context;
+  const auto original_crc = fixture_map_crc(context.map);
+  const auto resources = context.resources(); // Original server download size.
+  context.map.insert(context.map.end(), 31U, std::byte{0x5a});
+  fixture_replace_map_entities(context.map,
+      "{\n\"classname\" \"worldspawn\"\n\"wad\" \"test.wad\"\n"
+      "\"message\" \"A local entity-only edit is not a geometry mismatch\"\n}\n");
+  REQUIRE(fixture_map_crc(context.map) == original_crc);
+  context.root.write("valve", "maps/test_map.bsp", context.map);
+  const auto created = create_live_resource_fixture(
+      context, resources, fixture_server_map_crc(original_crc));
+  INFO((created.error ? created.error->context : "ready"));
+  REQUIRE(created.projection);
+  CHECK(created.projection->summary().world_crc_verified);
+  CHECK(created.projection->summary().size_mismatches == 1U);
+}
+
+TEST_CASE("Live local map geometry mismatch and multiplayer zero checksum fail closed",
+          "[local-capture-assets][live-resource-policy][map-crc][security]") {
+  LocalContext context;
+  const auto original_crc = fixture_map_crc(context.map);
+  REQUIRE(original_crc != 0U);
+  std::uint32_t advertised_crc = original_crc;
+  SECTION("same-size nonentity edit cannot pass the former size-only check") {
+    const auto offset = fixture::synthetic_read_u32le(context.map,
+        fixture::synthetic_lump_descriptor_offset(fixture::SyntheticBspLumpId::vertices));
+    fixture::synthetic_write_f32le(context.map, offset, 1.0F);
+    REQUIRE(fixture_map_crc(context.map) != original_crc);
+    context.root.write("valve", "maps/test_map.bsp", context.map);
+  }
+  SECTION("zero is not an unavailable multiplayer CRC") {
+    advertised_crc = 0U;
+  }
+  SECTION("finalized CRC32 is not the raw map CRC") {
+    advertised_crc = original_crc ^ 0xffff'ffffU;
+  }
+  const auto created = create_live_resource_fixture(
+      context, context.resources(), fixture_server_map_crc(advertised_crc));
+  CHECK_FALSE(created.projection);
+  REQUIRE(created.error);
+  CHECK(created.error->context.starts_with("map_crc_mismatch"));
+}
+
+TEST_CASE("Live singleplayer uses its explicit zero map checksum convention",
+          "[local-capture-assets][live-resource-policy][map-crc][security]") {
+  LocalContext context;
+  const auto created = create_live_resource_fixture(
+      context, context.resources(), fixture_server_map_crc(0U, 0U, 1U));
+  INFO((created.error ? created.error->context : "ready"));
+  REQUIRE(created.projection);
+  CHECK_FALSE(created.projection->summary().world_crc_verified);
+  const auto unexpected_crc = create_live_resource_fixture(
+      context, context.resources(), fixture_server_map_crc(fixture_map_crc(context.map), 0U, 1U));
+  CHECK_FALSE(unexpected_crc.projection);
+  REQUIRE(unexpected_crc.error);
+  CHECK(unexpected_crc.error->context.starts_with("map_crc_mismatch"));
+}
+
+TEST_CASE("Live size tolerance cannot bypass malformed local BSP validation",
+          "[local-capture-assets][live-resource-policy][map-crc][security]") {
+  LocalContext context;
+  const auto original_crc = fixture_map_crc(context.map);
+  const auto resources = context.resources();
+  const auto descriptor = fixture::synthetic_lump_descriptor_offset(
+      fixture::SyntheticBspLumpId::planes);
+  SECTION("truncated header") { context.map.resize(100U); }
+  SECTION("unsupported version") {
+    fixture::synthetic_write_u32le(context.map, 0U, 29U);
+  }
+  SECTION("negative lump length") {
+    fixture::synthetic_write_u32le(context.map, descriptor + 4U, 0xffff'ffffU);
+  }
+  SECTION("out-of-bounds lump offset") {
+    fixture::synthetic_write_u32le(context.map, descriptor,
+        static_cast<std::uint32_t>(context.map.size()));
+  }
+  SECTION("nonempty lump overlapping the header") {
+    fixture::synthetic_write_u32le(context.map, descriptor, 4U);
+  }
+  SECTION("overlapping nonempty lumps") {
+    const auto vertices_descriptor = fixture::synthetic_lump_descriptor_offset(
+        fixture::SyntheticBspLumpId::vertices);
+    fixture::synthetic_write_u32le(context.map, vertices_descriptor,
+        fixture::synthetic_read_u32le(context.map, descriptor));
+  }
+  context.root.write("valve", "maps/test_map.bsp", context.map);
+  const auto created = create_live_resource_fixture(
+      context, resources, fixture_server_map_crc(original_crc));
+  CHECK_FALSE(created.projection);
+  REQUIRE(created.error);
+  CHECK(created.error->context.starts_with("map_crc_invalid_bsp"));
+}
+
+TEST_CASE("Nonbindable checker rows cannot consume genuine missing-resource diagnostics",
+          "[local-capture-assets][live-resource-policy][map-crc][security]") {
+  LocalContext context;
+  std::vector<resource_list_test_fixture::EntrySpec> rows;
+  for (unsigned index = 0U; index < 40U; ++index)
+    rows.push_back({3U, "checker_" + std::to_string(index) + ".dll", 4095U, 1U, 0U});
+  rows.push_back({2U, "maps/test_map.bsp", 9U,
+      static_cast<std::uint32_t>(context.map.size()), 0U});
+  rows.push_back({2U, "models/genuinely_missing.mdl", 7U, 64U, 0U});
+  const auto created = create_live_resource_fixture(context,
+      readiness::parse_resource_list(rows), fixture_server_map_crc(fixture_map_crc(context.map)));
+  INFO((created.error ? created.error->context : "ready"));
+  REQUIRE(created.projection);
+  const auto& summary = created.projection->summary();
+  CHECK(summary.captured_resources == rows.size());
+  CHECK(summary.world_crc_verified);
+  CHECK(summary.resource_issues_omitted == 0U);
+  REQUIRE(summary.resource_issues.size() == 1U);
+  CHECK(summary.resource_issues.front().virtual_name == "models/genuinely_missing.mdl");
+  CHECK(summary.resource_issues.front().resource_index == 7U);
+  CHECK(summary.resource_issues.front().resource_type == 2U);
+}
+
 TEST_CASE("Live brush references reject world zero syntax range and overflow without fallback",
           "[live-brush][local-capture-assets][binding]") {
   LocalContext context(true);

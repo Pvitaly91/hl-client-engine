@@ -4,6 +4,7 @@
 #include <hlclient/goldsrc/usercmd_input_adapter.hpp>
 #include <hlclient/goldsrc/usercmd_packet_planner.hpp>
 #include <hlclient/goldsrc/usercmd_scheduler.hpp>
+#include <hlclient/core/multiplayer_diagnostics.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -112,6 +113,8 @@ struct GoldSrcUserCmdTransmissionConfig {
     // drains every RX event. This stage only binds a prepared unreliable
     // suffix before that update and accounts its exact send receipt after it.
     bool externally_owned_driver_update{false};
+    core::MultiplayerDiagnosticSink* multiplayer_diagnostics{nullptr};
+    std::uint64_t diagnostic_network_generation{}, diagnostic_map_generation{};
 };
 
 enum class GoldSrcUserCmdTransmissionErrorCode : std::uint8_t {
@@ -237,6 +240,8 @@ private:
     [[nodiscard]] GoldSrcUserCmdTransmissionOperationResult commit_prepared_move(
         NetchanDriverTimePoint now);
     void abandon_prepared_move() noexcept;
+    void observe_multiplayer_packet(core::MultiplayerNetworkPhase phase,
+        const GoldSrcUserCmdPacketPlan& packet, std::uint32_t carrier) noexcept;
     [[nodiscard]] GoldSrcUserCmdTransmissionOperationResult fail(
         GoldSrcUserCmdTransmissionState state,
         GoldSrcUserCmdTransmissionError error,
@@ -267,6 +272,7 @@ private:
     std::size_t transmitted_packet_count_{0U};
     std::size_t new_command_submission_count_{0U};
     std::size_t backup_command_submission_count_{0U};
+    std::uint64_t multiplayer_event_id_{};
 };
 
 } // namespace hlclient::goldsrc

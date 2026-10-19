@@ -14,6 +14,7 @@
 #include <bzlib.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -914,5 +915,318 @@ TEST_CASE("Fake HLDS fragmented BZ2 service boundary repeats 20 of 20",
 {
     for (std::size_t run = 0U; run < 20U; ++run) {
         run_fragmented(run, false);
+    }
+}
+
+TEST_CASE("Fake custom HLDS early command cvar and nop packets retain the signon channel",
+          "[goldsrc][signon][udp][custom-server][early-controls]")
+{
+    for (const bool compressed : {false, true}) {
+        INFO("compressed=" << compressed);
+        with_accepted_loopback_pair(
+            compressed ? 401U : 400U,
+            [&](network::UdpSocket& server,
+                network::UdpDatagramTransport& transport,
+                const AcceptedPair& pair,
+                std::string& error) {
+                auto config = integration_config();
+                config.service_payload_envelope.compression_policy =
+                    goldsrc::ServicePayloadCompressionPolicy::accept_bzip2_or_uncompressed;
+                goldsrc::InitialSignonStage stage{
+                    transport,
+                    pair.server_endpoint,
+                    config};
+                const auto request = start_and_receive_request(stage, server, pair);
+                const auto* const original_driver = stage.driver();
+                REQUIRE(original_driver != nullptr);
+
+                // A customized server can send an independent command packet
+                // before serverinfo. A literal opcode-11 byte inside its
+                // NUL-terminated body must not become a false signon boundary.
+                std::string command{"echo ignored; connect 127.0.0.1:1; "};
+                command.push_back('\x0b');
+                command += "still inside the command";
+                auto early = bytes({1U, 9U});
+                const auto command_bytes = bytes(command);
+                early.insert(early.end(), command_bytes.begin(), command_bytes.end());
+                early.push_back(std::byte{0U});
+                early.push_back(std::byte{1U});
+                constexpr std::string_view query_name{"cl_minmodels"};
+                const auto query_bytes = bytes(query_name);
+                early.push_back(std::byte{57U});
+                early.insert(early.end(), query_bytes.begin(), query_bytes.end());
+                early.push_back(std::byte{0U});
+                early.push_back(std::byte{58U});
+                // Embedded NUL and opcode 11 in the request ID are fixed-size
+                // integer bytes, not string or message boundaries.
+                constexpr std::uint32_t request_id = 0x0100'0b02U;
+                append_u32_le(early, request_id);
+                early.insert(early.end(), query_bytes.begin(), query_bytes.end());
+                early.push_back(std::byte{0U});
+                send_server_datagram(
+                    server,
+                    pair.client_endpoint,
+                    encode_server_packet(
+                        1U,
+                        true,
+                        request.header.sequence.sequence.value(),
+                        true,
+                        compressed ? service_envelope(early) : early),
+                    error);
+                stage.update(pair.accepted_at + 2ms);
+                INFO("early stage error: " <<
+                     (stage.error() ? stage.error()->context : std::string{"none"}));
+                REQUIRE_FALSE(stage.terminal());
+                REQUIRE_FALSE(stage.error());
+                CHECK_FALSE(stage.result());
+                CHECK(stage.state() ==
+                      goldsrc::InitialSignonState::waiting_for_server_payload);
+                CHECK(stage.driver() == original_driver);
+                CHECK(stage.local_endpoint() == pair.client_endpoint);
+                CHECK(stage.request_queue_count() == 1U);
+                CHECK(stage.cleanup_count() == 0U);
+
+                const auto early_ack = receive_bounded(
+                    server,
+                    goldsrc::kMaximumNetchanDatagramSize);
+                CHECK(early_ack.source == pair.client_endpoint);
+                const auto decoded_ack =
+                    goldsrc::decode_client_to_server_netchan_packet(early_ack.payload);
+                REQUIRE(decoded_ack);
+                REQUIRE(decoded_ack.packet);
+                CHECK(decoded_ack.packet->header.sequence.sequence == sequence(2U));
+                CHECK_FALSE(decoded_ack.packet->header.sequence.flags.reliable);
+                CHECK(decoded_ack.packet->header.acknowledgement.sequence == sequence(1U));
+                CHECK(decoded_ack.packet->header.acknowledgement.reliable);
+                CHECK(std::ranges::all_of(
+                    decoded_ack.packet->payload,
+                    [](const std::byte value) {
+                        return value == goldsrc::kStockProtocol48NetchanPaddingByte;
+                    }));
+                require_no_datagram(server);
+
+                const auto semantic = semantic_service_payload(32U);
+                send_server_datagram(
+                    server,
+                    pair.client_endpoint,
+                    encode_server_packet(
+                        2U,
+                        true,
+                        decoded_ack.packet->header.sequence.sequence.value(),
+                        true,
+                        compressed ? service_envelope(semantic) : semantic),
+                    error);
+                stage.update(pair.accepted_at + 3ms);
+                INFO("boundary stage error: " <<
+                     (stage.error() ? stage.error()->context : std::string{"none"}));
+                REQUIRE(stage.state() ==
+                        goldsrc::InitialSignonState::signon_boundary_reached);
+                REQUIRE(stage.result());
+                const auto& result = *stage.result();
+                CHECK(result.service_payload_count == 2U);
+                CHECK(result.boundary_payload.source_sequence == 2U);
+                CHECK(result.boundary_payload.bytes == semantic);
+                CHECK(result.boundary.byte_offset ==
+                      1U + kSyntheticEarlyText.size() + 1U);
+                REQUIRE(result.messages.size() == 6U);
+                CHECK(result.messages[0U].opcode ==
+                      goldsrc::ServiceMessageOpcode::no_operation);
+                CHECK(result.messages[1U].opcode ==
+                      goldsrc::ServiceMessageOpcode::command_text);
+                REQUIRE(std::holds_alternative<goldsrc::ServiceIgnoredCommandText>(
+                    result.messages[1U].body));
+                CHECK(std::get<goldsrc::ServiceIgnoredCommandText>(
+                          result.messages[1U].body).string_length == command.size());
+                CHECK(result.messages[2U].opcode ==
+                      goldsrc::ServiceMessageOpcode::no_operation);
+                CHECK(result.messages[3U].opcode ==
+                      goldsrc::ServiceMessageOpcode::cvar_query);
+                CHECK(result.messages[4U].opcode ==
+                      goldsrc::ServiceMessageOpcode::cvar_query_with_id);
+                for (const auto index : {3U, 4U}) {
+                    REQUIRE(std::holds_alternative<goldsrc::ServiceIgnoredCvarQuery>(
+                        result.messages[index].body));
+                    const auto& query = std::get<goldsrc::ServiceIgnoredCvarQuery>(
+                        result.messages[index].body);
+                    CHECK(query.string_length == query_name.size());
+                    if (index == 3U) {
+                        CHECK_FALSE(query.request_id);
+                    } else {
+                        REQUIRE(query.request_id);
+                        CHECK(*query.request_id == static_cast<std::int32_t>(request_id));
+                    }
+                }
+                CHECK(result.messages[5U].opcode ==
+                      goldsrc::ServiceMessageOpcode::text_control);
+                CHECK(stage.request_queue_count() == 1U);
+                CHECK(stage.cleanup_count() == 1U);
+                const auto final_ack = receive_bounded(
+                    server,
+                    goldsrc::kMaximumNetchanDatagramSize);
+                CHECK(final_ack.source == pair.client_endpoint);
+                const auto decoded_final_ack =
+                    goldsrc::decode_client_to_server_netchan_packet(final_ack.payload);
+                REQUIRE(decoded_final_ack);
+                REQUIRE(decoded_final_ack.packet);
+                CHECK(decoded_final_ack.packet->header.acknowledgement.sequence ==
+                      sequence(2U));
+                CHECK_FALSE(decoded_final_ack.packet->header.sequence.flags.reliable);
+                CHECK(std::ranges::all_of(
+                    decoded_final_ack.packet->payload,
+                    [](const std::byte value) {
+                        return value == goldsrc::kStockProtocol48NetchanPaddingByte;
+                    }));
+                require_no_datagram(server);
+            });
+    }
+}
+
+TEST_CASE("Fake custom HLDS unterminated command cannot resync at serverinfo bytes",
+          "[goldsrc][signon][udp][custom-server][early-controls][malformed]")
+{
+    with_accepted_loopback_pair(
+        402U,
+        [&](network::UdpSocket& server,
+            network::UdpDatagramTransport& transport,
+            const AcceptedPair& pair,
+            std::string& error) {
+            goldsrc::InitialSignonStage stage{
+                transport,
+                pair.server_endpoint,
+                integration_config()};
+            const auto request = start_and_receive_request(stage, server, pair);
+            const auto malformed = bytes({9U, 65U, 11U, 48U, 11U, 42U});
+            send_server_datagram(
+                server,
+                pair.client_endpoint,
+                encode_server_packet(
+                    1U,
+                    true,
+                    request.header.sequence.sequence.value(),
+                    true,
+                    service_envelope(malformed)),
+                error);
+            stage.update(pair.accepted_at + 2ms);
+            REQUIRE(stage.terminal());
+            CHECK(stage.state() == goldsrc::InitialSignonState::protocol_error);
+            CHECK_FALSE(stage.result());
+            REQUIRE(stage.error());
+            CHECK(stage.error()->code ==
+                  goldsrc::InitialSignonErrorCode::service_message_decode_failed);
+            CHECK(stage.error()->service_message_code ==
+                  goldsrc::ServiceMessageErrorCode::unterminated_string);
+            CHECK(stage.request_queue_count() == 1U);
+            CHECK(stage.cleanup_count() == 1U);
+        });
+}
+
+TEST_CASE("Fake custom HLDS preserves multiple service packets before initial request ACK",
+          "[goldsrc][signon][udp][custom-server][early-controls][pre-ack]")
+{
+    for (const bool compressed : {false, true}) {
+        INFO("compressed=" << compressed);
+        with_accepted_loopback_pair(
+            compressed ? 404U : 403U,
+            [&](network::UdpSocket& server,
+                network::UdpDatagramTransport& transport,
+                const AcceptedPair& pair,
+                std::string& error) {
+                auto config = integration_config();
+                config.service_payload_envelope.compression_policy =
+                    goldsrc::ServicePayloadCompressionPolicy::accept_bzip2_or_uncompressed;
+                goldsrc::InitialSignonStage stage{transport, pair.server_endpoint, config};
+                const auto request = start_and_receive_request(stage, server, pair);
+                const auto* const original_driver = stage.driver();
+                REQUIRE(original_driver != nullptr);
+
+                auto queries = bytes({57U});
+                const auto query_name = bytes("sensitivity");
+                queries.insert(queries.end(), query_name.begin(), query_name.end());
+                queries.push_back(std::byte{0U});
+                queries.push_back(std::byte{58U});
+                append_u32_le(queries, 0x8000'000bU);
+                queries.insert(queries.end(), query_name.begin(), query_name.end());
+                queries.push_back(std::byte{0U});
+                auto notice = bytes({8U});
+                constexpr std::string_view pending_text{"queued before request ACK"};
+                const auto pending_bytes = bytes(pending_text);
+                notice.insert(notice.end(), pending_bytes.begin(), pending_bytes.end());
+                notice.push_back(std::byte{0U});
+                const auto semantic = semantic_service_payload(32U);
+                const std::array payloads{queries, notice, semantic};
+
+                std::uint32_t server_sequence = 0U;
+                for (const auto& payload : payloads) {
+                    ++server_sequence;
+                    INFO("pre-ACK service sequence=" << server_sequence);
+                    // Reliable server payloads do not acknowledge the client's
+                    // initial reliable generation. These must queue rather than
+                    // decode early, discard an older payload or replace driver.
+                    send_server_datagram(
+                        server,
+                        pair.client_endpoint,
+                        encode_server_packet(
+                            server_sequence, true, 0U, false,
+                            compressed ? service_envelope(payload) : payload),
+                        error);
+                    stage.update(pair.accepted_at +
+                                 std::chrono::milliseconds{
+                                     static_cast<std::int64_t>(server_sequence + 1U)});
+                    INFO("pre-ACK stage error: " <<
+                         (stage.error() ? stage.error()->context : std::string{"none"}));
+                    REQUIRE_FALSE(stage.terminal());
+                    REQUIRE_FALSE(stage.error());
+                    CHECK_FALSE(stage.result());
+                    CHECK(stage.state() == goldsrc::InitialSignonState::waiting_for_request_ack);
+                    CHECK(stage.driver() == original_driver);
+                    CHECK(stage.request_queue_count() == 1U);
+                    CHECK(stage.cleanup_count() == 0U);
+                    REQUIRE(stage.driver()->session().in_flight_reliable_payload());
+                    CHECK(stage.driver()->session().in_flight_reliable_payload()->send_count == 1U);
+
+                    const auto ack = receive_bounded(server, goldsrc::kMaximumNetchanDatagramSize);
+                    CHECK(ack.source == pair.client_endpoint);
+                    const auto decoded = goldsrc::decode_client_to_server_netchan_packet(ack.payload);
+                    REQUIRE(decoded);
+                    REQUIRE(decoded.packet);
+                    CHECK(decoded.packet->header.acknowledgement.sequence == sequence(server_sequence));
+                    CHECK_FALSE(decoded.packet->header.sequence.flags.reliable);
+                    CHECK(std::ranges::all_of(decoded.packet->payload, [](const std::byte value) {
+                        return value == goldsrc::kStockProtocol48NetchanPaddingByte;
+                    }));
+                    require_no_datagram(server);
+                }
+
+                // Only the matching acknowledgement releases all queued service
+                // payloads. The later nop body must not overtake those payloads.
+                send_server_datagram(
+                    server,
+                    pair.client_endpoint,
+                    encode_server_packet(
+                        server_sequence + 1U, false,
+                        request.header.sequence.sequence.value(), true,
+                        service_envelope(bytes({1U}))),
+                    error);
+                stage.update(pair.accepted_at + 5ms);
+                INFO("released stage error: " <<
+                     (stage.error() ? stage.error()->context : std::string{"none"}));
+                REQUIRE(stage.state() == goldsrc::InitialSignonState::signon_boundary_reached);
+                REQUIRE(stage.result());
+                CHECK_FALSE(stage.error());
+                const auto& result = *stage.result();
+                CHECK(result.service_payload_count == payloads.size());
+                CHECK(result.boundary_payload.source_sequence == 3U);
+                CHECK(result.boundary_payload.bytes == semantic);
+                REQUIRE(result.messages.size() == 4U);
+                CHECK(result.messages[0U].opcode == goldsrc::ServiceMessageOpcode::cvar_query);
+                CHECK(result.messages[1U].opcode == goldsrc::ServiceMessageOpcode::cvar_query_with_id);
+                REQUIRE(std::holds_alternative<goldsrc::ServiceTextControl>(result.messages[2U].body));
+                CHECK(std::get<goldsrc::ServiceTextControl>(result.messages[2U].body).text == pending_text);
+                REQUIRE(std::holds_alternative<goldsrc::ServiceTextControl>(result.messages[3U].body));
+                CHECK(std::get<goldsrc::ServiceTextControl>(result.messages[3U].body).text == kSyntheticEarlyText);
+                CHECK(stage.request_queue_count() == 1U);
+                CHECK(stage.cleanup_count() == 1U);
+                CHECK(stage.local_endpoint() == pair.client_endpoint);
+            });
     }
 }

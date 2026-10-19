@@ -62,3 +62,19 @@ TEST_CASE("E28.1 application intentional close requests transport before cancell
     CHECK(session.requests==1);CHECK(session.updates==1);CHECK(session.cancels==0);
     CHECK(session.gameplay_actions==0);CHECK(session.done);
 }
+TEST_CASE("E33 console disconnect is intentional but never disguises cancellation or failed sends",
+    "[e33][application-close][session-receipt][no-stock]") {
+    using namespace hlclient::app;
+    SessionCloseReceipt close;close.reason=SessionCloseReason::console_disconnect;
+    close.requested=true;close.eligible=true;
+    for(const auto outcome:{SessionCloseOutcome::pending,SessionCloseOutcome::cancelled,
+             SessionCloseOutcome::not_requested,SessionCloseOutcome::send_failed,
+             SessionCloseOutcome::fatal_failure}) {
+        close.outcome=outcome;CHECK(session_close_failed(close));
+    }
+    close.outcome=SessionCloseOutcome::sent_but_unconfirmed;CHECK(session_close_failed(close));
+    close.successful_send_count=1U;CHECK_FALSE(session_close_failed(close));
+    close={};close.reason=SessionCloseReason::console_disconnect;
+    close.outcome=SessionCloseOutcome::cancel_without_protocol_disconnect;
+    CHECK_FALSE(session_close_failed(close));
+}

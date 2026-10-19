@@ -376,6 +376,7 @@ TEST_CASE("E28.1 early sign-on close uses the existing driver and suppresses new
     CHECK_FALSE(fixture.stage->submit_live_visual_input(input,epoch));
     CHECK_FALSE(fixture.stage->activate_live_visual_control(epoch));
     CHECK_FALSE(fixture.stage->request_weapon_selection(2));
+    CHECK_FALSE(fixture.stage->request_console_command({g::ConsoleServerCommandKind::status,{}}));
     for(int i=0;i<=30;++i) {fixture.stage->update(epoch+i*50ms);while(fixture.stage->poll_event()) {}}
     CHECK(fixture.stage->terminal()); CHECK_FALSE(fixture.stage->error());
     CHECK(fixture.stage->graceful_close_snapshot().successful_send_count>0);

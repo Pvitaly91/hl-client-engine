@@ -457,6 +457,177 @@ TEST_CASE("Reference seed categorizes literal world ground without moving server
         goldsrc::ReferencePredictionGroundStatus::ground_flag_disagreement);
 }
 
+TEST_CASE("Native grounded server upward impulse remains a witnessed endpoint before next PM categorization",
+    "[goldsrc][movement][prediction][reference-ground][de731-ground-impulse]")
+{
+    const auto parsed = goldsrc_bsp::GoldSrcBspParser::parse(literal::make_slope_bsp_v30(0.0F));
+    REQUIRE(parsed);
+    const auto built = goldsrc_collision::GoldSrcCollisionWorldBuilder::build(parsed.document->collision_source);
+    REQUIRE(built);
+    const movement::WorldOnlyMovementCollision collision{built.package};
+    const auto environment = fixture::make_environment();
+    constexpr auto profile = player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2;
+    // The second value is the actual de731 authoritative endpoint. This is
+    // not a locally predicted weapon impulse: no post-boundary command or
+    // diagnostic observer is supplied to the production seed adapter.
+    for (const float upward : {181.0F, 547.375F}) {
+        for (const bool ducked : {false, true}) {
+            DYNAMIC_SECTION("upward=" << upward << " ducked=" << ducked) {
+                auto seed = reference_floor_seed((ducked ? 18.0 : 36.0) + 1.0 / 32.0, upward);
+                seed.velocity.x = -702.625;
+                seed.velocity.y = -454.375;
+                if (ducked) {
+                    seed.use_hull = 1U;
+                    seed.flags |= 1U << 14U;
+                    seed.view_offset.z = 12.0;
+                }
+                const auto canonical_origin = seed.origin;
+                const auto canonical_velocity = seed.velocity;
+                goldsrc::GoldSrcWireUserCmd wire;
+                wire.msec = 20U;
+                wire.buttons = ducked ? goldsrc::kReferenceGoldSrcButtonDuck : 0U;
+                movement::GoldSrcLocalMovementScratch scratch;
+                const auto initial = goldsrc::derive_reference_prediction_ground(seed, wire,
+                    collision, scratch, {}, profile);
+                INFO("ground status=" << goldsrc::to_string(initial.status));
+                REQUIRE(initial.state);
+                REQUIRE(initial.ground_evidence);
+                REQUIRE(initial.ground_evidence->hit);
+                REQUIRE(initial.trace_evidence);
+                CHECK(initial.ground_evidence->hit->kind == player::PlayerMovementHitKind::world);
+                CHECK(initial.ground_evidence->plane.normal.z == 1.0F);
+                CHECK(initial.trace_evidence->fraction < 1.0);
+                CHECK(initial.state->ground_state().grounded());
+                CHECK(initial.state->velocity().z == upward);
+                CHECK(initial.state->origin().z == static_cast<float>(*canonical_origin.z));
+                CHECK(seed.origin.x == canonical_origin.x);
+                CHECK(seed.origin.y == canonical_origin.y);
+                CHECK(seed.origin.z == canonical_origin.z);
+                CHECK(seed.velocity.x == canonical_velocity.x);
+                CHECK(seed.velocity.y == canonical_velocity.y);
+                CHECK(seed.velocity.z == canonical_velocity.z);
+
+                auto airborne_seed = seed;
+                airborne_seed.flags &= ~(1U << 9U);
+                const auto airborne = goldsrc::derive_reference_prediction_ground(airborne_seed,
+                    wire, collision, scratch, {}, profile);
+                REQUIRE(airborne.state);
+                REQUIRE_FALSE(airborne.state->ground_state().grounded());
+                const auto command = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(
+                    *goldsrc::GoldSrcUserCmdSequence::create(8U), wire);
+                REQUIRE(command.state);
+                const auto moved = movement::GoldSrcLocalMovementKernel::simulate(*initial.state,
+                    *command.state, environment, collision, scratch);
+                const auto control = movement::GoldSrcLocalMovementKernel::simulate(*airborne.state,
+                    *command.state, environment, collision, scratch);
+                REQUIRE(moved.state);
+                REQUIRE(control.state);
+                CHECK_FALSE(moved.state->ground_state().grounded());
+                CHECK(moved.statistics.grounded_command_count == 0U);
+                CHECK(moved.statistics.jump_count == 0U);
+                CHECK(moved.state->origin().x == control.state->origin().x);
+                CHECK(moved.state->origin().y == control.state->origin().y);
+                CHECK(moved.state->origin().z == control.state->origin().z);
+                CHECK(moved.state->velocity().z == control.state->velocity().z);
+                CHECK(moved.state->origin().x == Catch::Approx(-702.625 * 0.020).margin(0.001));
+                CHECK(moved.state->origin().y == Catch::Approx(-454.375 * 0.020).margin(0.001));
+                CHECK(moved.state->origin().z == Catch::Approx(*canonical_origin.z +
+                    (upward - 8.0) * 0.020).margin(0.001));
+                CHECK(moved.state->velocity().z == Catch::Approx(upward - 16.0).margin(0.001));
+            }
+        }
+    }
+}
+
+TEST_CASE("Native upward endpoint still requires free current hull and real walkable support",
+    "[goldsrc][movement][prediction][reference-ground][de731-ground-impulse]")
+{
+    const movement::WorldOnlyMovementCollision collision{literal_world_package()};
+    movement::GoldSrcLocalMovementScratch scratch;
+    auto seed = reference_floor_seed(36.03125, 547.375);
+    auto profile = player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2;
+    auto expected = goldsrc::ReferencePredictionGroundStatus::ground_flag_disagreement;
+    SECTION("legacy dry profile retains strict mismatch") {
+        profile = player::GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1;
+    }
+    SECTION("server ground flag cannot fabricate distant floor") { seed.origin.z = 60.0; }
+    SECTION("zero vertical speed cannot fabricate distant floor") {
+        seed.origin.z = 60.0; seed.velocity.z = 0.0;
+    }
+    SECTION("descending velocity cannot fabricate distant floor") {
+        seed.origin.z = 60.0; seed.velocity.z = -547.375;
+    }
+    SECTION("current hull penetrating world floor remains blocked") {
+        seed.origin.z = 35.875;
+        expected = goldsrc::ReferencePredictionGroundStatus::solid_start;
+    }
+    SECTION("current hull penetrating world wall remains blocked") {
+        seed.origin.x = 177.0; seed.origin.y = -40.0;
+        expected = goldsrc::ReferencePredictionGroundStatus::solid_start;
+    }
+    SECTION("current hull penetrating ceiling remains blocked") {
+        seed.origin.z = 93.0;
+        expected = goldsrc::ReferencePredictionGroundStatus::solid_start;
+    }
+    SECTION("duck hull requires matching canonical duck flag") {
+        seed.use_hull = 1U;
+        expected = goldsrc::ReferencePredictionGroundStatus::unsupported_hull;
+    }
+    SECTION("liquid context is not authorized by upward velocity") {
+        seed.origin = {-112.0, 80.0, 36.03125};
+        expected = goldsrc::ReferencePredictionGroundStatus::unsupported_contents;
+    }
+    const auto canonical_origin = seed.origin;
+    const auto canonical_velocity = seed.velocity;
+    const auto result = goldsrc::derive_reference_prediction_ground(seed, {}, collision,
+        scratch, {}, profile);
+    INFO("actual=" << goldsrc::to_string(result.status) << " expected=" << goldsrc::to_string(expected));
+    CHECK(result.status == expected);
+    CHECK_FALSE(result.state);
+    CHECK(seed.origin.x == canonical_origin.x);
+    CHECK(seed.origin.y == canonical_origin.y);
+    CHECK(seed.origin.z == canonical_origin.z);
+    CHECK(seed.velocity.z == canonical_velocity.z);
+}
+
+TEST_CASE("Native upward server endpoint never bypasses the next command ceiling collision",
+    "[goldsrc][movement][prediction][reference-ground][de731-ground-impulse]")
+{
+    const movement::WorldOnlyMovementCollision collision{literal_world_package()};
+    const auto environment = fixture::make_environment();
+    movement::GoldSrcLocalMovementScratch scratch;
+    const auto seed = reference_floor_seed(36.03125, 547.375);
+    const auto initial = goldsrc::derive_reference_prediction_ground(seed, {}, collision,
+        scratch, {}, player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);
+    INFO("ground status=" << goldsrc::to_string(initial.status));
+    REQUIRE(initial.state);
+    auto state = std::make_shared<const player::LocalPlayerMovementState>(*initial.state);
+    bool ceiling_clipped = false;
+    for (std::uint32_t id = 8U; id != 16U; ++id) {
+        goldsrc::GoldSrcWireUserCmd wire;
+        wire.msec = 20U;
+        const auto command = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(
+            *goldsrc::GoldSrcUserCmdSequence::create(id), wire);
+        REQUIRE(command.state);
+        const auto moved = movement::GoldSrcLocalMovementKernel::simulate(*state,
+            *command.state, environment, collision, scratch);
+        INFO((moved.error ? moved.error->context : std::string{}));
+        REQUIRE(moved.state);
+        CHECK(std::isfinite(moved.state->origin().z));
+        CHECK(moved.state->origin().z <= 92.001F); // literal ceiling128 minus standing half-height36
+        CHECK(moved.statistics.jump_count == 0U);
+        const auto occupancy = collision.test_position(moved.state->origin(),
+            moved.state->hull(), scratch.collision, {});
+        REQUIRE(occupancy.result);
+        CHECK(occupancy.result->status == movement::LocalMovementPositionStatus::free);
+        ceiling_clipped = ceiling_clipped || moved.state->velocity().z <= 0.0F;
+        state = std::make_shared<const player::LocalPlayerMovementState>(*moved.state);
+    }
+    CHECK(ceiling_clipped);
+    CHECK(seed.velocity.z == 547.375);
+    CHECK(seed.origin.z == 36.03125);
+}
+
 TEST_CASE("D4 reference uphill walk keeps horizontal wish speed and clears grounded vertical velocity",
     "[d4][movement][prediction][reference-ground]")
 {

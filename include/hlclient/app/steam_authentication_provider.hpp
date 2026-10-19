@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -23,6 +24,7 @@ enum class SteamAuthenticationTraceStatus {
     operation_started,
     api_initializing,
     api_initialized,
+    context_checked,
     material_pending,
     material_acquired,
     session_terminated,
@@ -36,6 +38,19 @@ enum class SteamAuthenticationPhase {
     material_acquisition,
 };
 
+// Deliberately excludes the server account ID, full Steam ID, challenge and
+// authentication bytes. The Steam ID fields below describe only its class.
+struct SteamAuthenticationRequestSummary {
+    network::NetworkAddress remote_endpoint;
+    goldsrc::ProtocolVersion protocol{goldsrc::ProtocolVersion::goldsrc_48};
+    bool server_id_present{false};
+    bool server_id_nonzero{false};
+    std::optional<std::uint32_t> server_id_universe;
+    std::optional<std::uint32_t> server_id_account_type;
+    std::optional<std::uint32_t> server_id_instance;
+    std::optional<bool> secure;
+};
+
 struct SteamAuthenticationTraceEvent {
     SteamAuthenticationTraceStatus status{
         SteamAuthenticationTraceStatus::api_initializing};
@@ -43,6 +58,11 @@ struct SteamAuthenticationTraceEvent {
     std::size_t material_size{0U};
     std::optional<SteamAuthenticationPhase> phase;
     std::chrono::milliseconds elapsed{0};
+    std::optional<SteamAuthenticationRequestSummary> request_context;
+    std::optional<std::uint32_t> actual_app_id;
+    std::optional<bool> logged_on;
+    std::size_t callback_pump_count{0U};
+    std::optional<int> initiate_returned_length;
 };
 
 using SteamAuthenticationTraceCallback =
@@ -129,6 +149,8 @@ private:
         return "api_initializing";
     case SteamAuthenticationTraceStatus::api_initialized:
         return "api_initialized";
+    case SteamAuthenticationTraceStatus::context_checked:
+        return "context_checked";
     case SteamAuthenticationTraceStatus::material_pending:
         return "material_pending";
     case SteamAuthenticationTraceStatus::material_acquired:

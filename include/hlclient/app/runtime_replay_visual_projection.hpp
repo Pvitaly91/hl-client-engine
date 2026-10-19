@@ -42,6 +42,7 @@ enum class RuntimeReplayVisualProjectionErrorCode : std::uint8_t {
     frame_build_failed,
     publication_failed,
     unable_to_retain_candidate,
+    asset_preparation_cancelled,
 };
 
 struct RuntimeReplayVisualProjectionError final {

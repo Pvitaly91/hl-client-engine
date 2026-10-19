@@ -15,6 +15,41 @@ constexpr std::array<std::string_view,8U> damage_roles{
 constexpr std::array<std::uint32_t,8U> damage_bits{
     1U<<17U,1U<<20U,(1U<<4U)|(1U<<22U),1U<<14U,
     (1U<<3U)|(1U<<21U),1U<<16U,1U<<18U,1U<<8U};
+constexpr std::array<std::string_view,4U> pain_roles{
+    "pain_front","pain_right","pain_rear","pain_left"};
+bool valid_pain_view(const HudViewContext& view) noexcept {
+    double forward_length{},right_length{},dot{};
+    for(std::size_t i=0;i<3U;++i) {
+        if(!std::isfinite(view.player_origin[i]) || !std::isfinite(view.forward[i]) ||
+            !std::isfinite(view.right[i]))return false;
+        forward_length+=view.forward[i]*view.forward[i];
+        right_length+=view.right[i]*view.right[i];
+        dot+=view.forward[i]*view.right[i];
+    }
+    return std::abs(forward_length-1.0)<.01 &&
+        std::abs(right_length-1.0)<.01 && std::abs(dot)<.01;
+}
+void pain_direction(std::array<float,4U>& intensity,const std::array<double,3U>& origin,
+    const std::optional<HudViewContext>& view) noexcept {
+    // Original Damage uses zero inflictor coordinates to clear the compass.
+    if(origin==std::array<double,3U>{}){intensity={};return;}
+    if(!view || !valid_pain_view(*view))return;
+    std::array<double,3U> direction{};double length{};
+    for(std::size_t i=0;i<3U;++i) {
+        direction[i]=origin[i]-view->player_origin[i];length+=direction[i]*direction[i];
+    }
+    if(!std::isfinite(length))return;
+    length=std::sqrt(length);
+    if(length<=50.0){intensity.fill(1.0F);return;}
+    double front{},right{};
+    for(std::size_t i=0;i<3U;++i) {
+        front+=direction[i]/length*view->forward[i];
+        right+=direction[i]/length*view->right[i];
+    }
+    const std::array<double,4U> strengths{front,right,-front,-right};
+    for(std::size_t i=0;i<intensity.size();++i)if(strengths[i]>.3)
+        intensity[i]=std::max(intensity[i],static_cast<float>(std::min(strengths[i],1.0)));
+}
 bool usable(const HudResourceEntry* entry) noexcept {
     return entry && entry->status==HudResourceStatus::ready && entry->resource_id &&
         entry->resource_revision && entry->source.width && entry->source.height &&
@@ -250,7 +285,7 @@ void HalfLifeSpriteHud::observe_boundary(const client::RuntimeClientObservationS
         menu_open_=false;candidate_.reset();pending_.reset();pending_started_.reset();pending_source_.reset();pending_pre_active_.reset();menu_group_.reset();
         pending_queued_=false;selection_status_.clear();
         confirmed_weapon_.reset();previous_weapon_.reset();confirmed_weapon_source_.reset();
-        history_={};damage_expiry_={};cue_count_=0;
+        history_={};damage_expiry_={};pain_intensity_={};pending_pain_count_=0;cue_count_=0;
         last_health_.reset();last_armor_.reset();last_clip_.reset();last_reserve_.reset();last_weapon_.reset();
     }
     generation_=state.generation;life_=state.lifecycle.life_epoch;deaths_=state.lifecycle.deaths;
@@ -284,7 +319,8 @@ void HalfLifeSpriteHud::committed(const GameRecordState& state) noexcept {
     if(life_!=state.lifecycle.life_epoch || deaths_!=state.lifecycle.deaths || state.lifecycle.dead() ||
         (state.weapon_hud.hud_reset_source && reset_source_!=state.weapon_hud.hud_reset_source)) {
         primary_confirmation_held_=false;
-        history_={};damage_expiry_={};damage_high_water_.reset();menu_open_=false;candidate_.reset();pending_.reset();
+        history_={};damage_expiry_={};pain_intensity_={};pending_pain_count_=0;
+        damage_high_water_.reset();menu_open_=false;candidate_.reset();pending_.reset();
         pending_started_.reset();pending_source_.reset();pending_pre_active_.reset();menu_group_.reset();
         pending_queued_=false;selection_status_.clear();
         confirmed_weapon_.reset();previous_weapon_.reset();confirmed_weapon_source_.reset();
@@ -307,7 +343,20 @@ void HalfLifeSpriteHud::committed(const GameRecordState& state) noexcept {
         (!damage_high_water_ || event.source.record_ordinal>damage_high_water_->record_ordinal ||
         (event.source.record_ordinal==damage_high_water_->record_ordinal && event.source.end_bit_offset>damage_high_water_->end_bit_offset))) {
         damage_high_water_=event.source;
+        const auto& reset_floor=state.weapon_hud.hud_reset_source;
+        if(reset_floor && (event.source.record_ordinal<reset_floor->record_ordinal ||
+            (event.source.record_ordinal==reset_floor->record_ordinal &&
+             event.source.start_bit_offset<reset_floor->end_bit_offset)))continue;
         for(std::size_t i=0;i<damage_bits.size();++i)if((event.damage_bits&damage_bits[i])!=0U)damage_expiry_[i]=-1.0;
+        if(event.source.record_identity && (event.armor_saved || event.damage_taken) &&
+            std::all_of(event.damage_origin.begin(),event.damage_origin.end(),
+                [](double value){return std::isfinite(value);})) {
+            if(pending_pain_count_==pending_pain_.size()) {
+                std::move(pending_pain_.begin()+1,pending_pain_.end(),pending_pain_.begin());
+                --pending_pain_count_;
+            }
+            pending_pain_[pending_pain_count_++]=event.damage_origin;
+        }
     }
 }
 HudMenuResult HalfLifeSpriteHud::input(const client::RuntimeClientObservationState& state,
@@ -395,7 +444,13 @@ void HalfLifeSpriteHud::compose(const client::RuntimeClientObservationState& sta
     hud.weapon_selection_status=selection_status_;
     hud.crosshair_status=std::string(to_string(HudResourceStatus::hidden_by_policy));
     if(!std::isfinite(now) || now<0 || (last_time_ && now<*last_time_))return;
+    const double pain_delta=last_time_ ? now-*last_time_ : 0.0;
     last_time_=now;
+    // Resolve each committed hit once with this frame's local presentation
+    // basis. Turning afterwards never moves an already activated indicator.
+    for(std::size_t i=0;i<pending_pain_count_;++i)
+        pain_direction(pain_intensity_,pending_pain_[i],context.view);
+    pending_pain_count_=0;
     if(hud.health!=last_health_){last_health_=hud.health;health_fade_started_=now;}
     if(hud.armor!=last_armor_){last_armor_=hud.armor;armor_fade_started_=now;}
     if(hud.clip!=last_clip_ || hud.primary_reserve!=last_reserve_ || state.weapon_hud.active_weapon_id!=last_weapon_) {
@@ -427,11 +482,35 @@ void HalfLifeSpriteHud::compose(const client::RuntimeClientObservationState& sta
     hud.hud_effective_scale=hud.hud_automatic_scale*hud.hud_user_scale;
     const float width=static_cast<float>(context.viewport_width)/hud.hud_effective_scale;
     const float height=static_cast<float>(context.viewport_height)/hud.hud_effective_scale;
-    // All layout is in source units; one final transform produces native
-    // framebuffer pixels. The guard also covers hidden-HUD early returns.
+    const auto base_role=[&](std::string_view name){return role(base,name,base_tier);};
+    if(alive(state) && (hidden&12U)==0U) {
+        // SDK DrawPain uses physical ScreenWidth/Height and native SPR_Width/
+        // Height. Its independent LoadSprite tier is not scaled with HUD digits.
+        const auto pain_tier=preferred_tier(context);
+        const float pain_width=static_cast<float>(context.viewport_width);
+        const float pain_height=static_cast<float>(context.viewport_height);
+        for(std::size_t i=0;i<pain_intensity_.size();++i) {
+            auto& intensity=pain_intensity_[i];
+            if(intensity<=.4F){intensity=0;continue;}
+            const auto* entry=role(base,pain_roles[i],pain_tier);
+            if(usable(entry)) {
+                const float w=static_cast<float>(entry->source.width);
+                const float h=static_cast<float>(entry->source.height);
+                const float x=i==1U ? pain_width*.5F+w*2 : i==3U ? pain_width*.5F-w*3 : (pain_width-w)*.5F;
+                const float y=i==0U ? pain_height*.5F-h*3 : i==2U ? pain_height*.5F+h*2 : (pain_height-h)*.5F;
+                // The approved sprite palette supplies the original red. SDK
+                // health tint modulates its brightness without replacing it.
+                const float shade=std::floor(255.0F*std::max(intensity,.5F))/255.0F;
+                if(x>=0 && y>=0)image(hud,entry,x,y,
+                    brightness(hud.health.value_or(100)>25 ? yellow : red,shade),30U);
+            }
+            intensity=static_cast<float>(std::max(0.0,static_cast<double>(intensity)-pain_delta*2.0));
+        }
+    }
+    // The remaining HUD uses source units and exactly one scale transform.
+    // Capture after native-pixel pain sprites so the guard leaves them intact.
     const PixelLayout layout{hud.draw,hud.draw.sprites.size(),hud.draw.rectangles.size(),hud.draw.texts.size(),
         hud.hud_effective_scale,static_cast<float>(context.viewport_width),static_cast<float>(context.viewport_height)};
-    const auto base_role=[&](std::string_view name){return role(base,name,base_tier);};
     const auto weapon_data=[&](const auto* type){return type ? descriptor(halflife_hud_descriptor_name(type->command_name)) : nullptr;};
     const auto* active=state.weapon_hud.active_weapon_id ? weapon(state,*state.weapon_hud.active_weapon_id) : nullptr;
     const auto* active_data=weapon_data(active);const auto active_tier=tier(active_data,context);

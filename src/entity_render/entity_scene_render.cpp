@@ -687,6 +687,11 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             auto& instance = input.studio_instances[index];
             if (!finite_entity_render_transform(instance.transform) ||
                 !finite_entity_render_bounds(instance.interpolated_bounds) ||
+                instance.blend_mode > StudioBlendMode::additive ||
+                !std::isfinite(instance.opacity) || instance.opacity < 0.0F || instance.opacity > 1.0F ||
+                !std::ranges::all_of(instance.tint, [](const float value) {
+                    return std::isfinite(value) && value >= 0.0F && value <= 1.0F;
+                }) ||
                 (instance.static_light_rgb && !std::ranges::all_of(*instance.static_light_rgb,
                     [](const float value) { return std::isfinite(value) && value >= 0.0F && value <= 1.0F; }))) {
                 return frame_fail(EntityRenderFrameErrorCode::invalid_instance,
@@ -954,6 +959,13 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             if (instance.static_light_rgb) {
                 signature.add(std::uint32_t{0x4C495445U});
                 for (const auto value : *instance.static_light_rgb) signature.add(value);
+            }
+            if (instance.blend_mode != StudioBlendMode::opaque || instance.opacity != 1.0F ||
+                instance.tint != std::array<float, 3U>{1.0F, 1.0F, 1.0F}) {
+                signature.add(std::uint32_t{0x5354424cU});
+                signature.add(static_cast<std::uint32_t>(instance.blend_mode));
+                signature.add(instance.opacity);
+                for (const auto value : instance.tint) signature.add(value);
             }
         }
         for (const auto& instance : input.sprite_instances) {

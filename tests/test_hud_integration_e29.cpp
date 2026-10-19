@@ -98,9 +98,27 @@ OwnedPrepared owned_prepared(bool original_ammo_geometry=false) {
     };
     result.source->files["sprites/hud_sheet_fixture.spr"]=sprite(std::move(additive),1);
     result.source->files["sprites/hud_mask_fixture.spr"]=sprite(std::move(masked),3);
+    for(const unsigned tier:{320U,640U,1280U,2560U}) {
+        const unsigned long_side=tier==320U ? 64U : 128U,short_side=tier==320U ? 24U : 48U;
+        auto pain=wire::literal_header_and_palette(4,1,2,0,long_side,long_side);
+        for(unsigned index=0;index<256U;++index) {
+            pain[wire::kPaletteOffset+index*3U]=std::byte{static_cast<std::uint8_t>(index)};
+            pain[wire::kPaletteOffset+index*3U+1U]=std::byte{0};
+            pain[wire::kPaletteOffset+index*3U+2U]=std::byte{0};
+        }
+        for(unsigned frame=0;frame<4U;++frame) {
+            const unsigned width=frame%2U ? short_side : long_side,height=frame%2U ? long_side : short_side;
+            std::vector<std::byte> pixels(width*height,std::byte{0});
+            for(unsigned y=1U;y+1U<height;++y)for(unsigned x=1U;x+1U<width;++x)
+                if((x+y+frame)%3U==0U)pixels[y*width+x]=std::byte{200};
+            wire::append_single_entry(pain,{-static_cast<int>(width/2U),static_cast<int>(height/2U),
+                static_cast<int>(width),static_cast<int>(height),std::move(pixels)});
+        }
+        result.source->files["sprites/"+std::to_string(tier)+"_pain.spr"]=std::move(pain);
+    }
     result.prepared=g::prepare_hud_assets(*result.source,hf::halflife_hud_resource_preparation());
     REQUIRE(result.prepared.resources.descriptors.size()==15);
-    REQUIRE(result.prepared.sprites.size()==2);
+    REQUIRE(result.prepared.sprites.size()==2U+4U);
     REQUIRE(result.prepared.rejected_entries==0);
     return result;
 }
@@ -175,7 +193,7 @@ const api::HudResourceEntry& role(const g::HudPreparedAssets& prepared,std::stri
 }
 bool matches(const api::HudSprite& command,const api::HudResourceEntry& entry) {
     return command.resource_id==entry.resource_id && command.resource_revision==entry.resource_revision &&
-        command.source==entry.source;
+        command.frame==entry.frame && command.source==entry.source;
 }
 const api::HudSprite& crosshair(const api::HudState& hud,const g::HudPreparedAssets& prepared,
         const Module& module) {
@@ -304,6 +322,62 @@ void prove_sprite(glf::HiddenContext& context,const api::HudSprite& command,
     if(require_neutral_background)CHECK(neutral_inside>0);
 }
 
+void exercise_pain(glf::HiddenContext& context,const g::HudPreparedAssets& prepared,
+        r::RenderExtent extent) {
+    Module module{prepared};module.viewport(extent);
+    module.context.view=api::HudViewContext{{10.,20.,30.},{1.,0.,0.},{0.,-1.,0.}};
+    module.host.set_hud_context(module.context);
+    const auto baseline=module.draw();
+    REQUIRE(std::none_of(baseline.draw.sprites.begin(),baseline.draw.sprites.end(),
+        [](const auto& sprite){return sprite.draw_order==30U;}));
+    const auto before=capture(context,materialize(baseline.draw,prepared),extent);
+
+    api::GameRecordState committed;
+    committed.weapon_hud=module.state.weapon_hud;committed.lifecycle=module.state.lifecycle;
+    hlclient::client::RuntimeLifeEvent damage;
+    damage.kind=hlclient::client::RuntimeLifeEventKind::damage;
+    damage.source=weapons::source(++module.record);damage.damage_taken=10U;
+    // A real committed positive Damage origin within50 units lights all four
+    // directions. Nonzero coordinates avoid the original compass-clear signal.
+    damage.damage_origin={11.,20.,30.};committed.life_events.push_back(damage);
+    module.host.commit_record(std::move(committed));
+    const auto hud=module.draw();REQUIRE(api::valid_hud_draw_commands(hud.draw));
+    REQUIRE(std::count_if(hud.draw.sprites.begin(),hud.draw.sprites.end(),
+        [](const auto& sprite){return sprite.draw_order==30U;})==4);
+    const auto after=capture(context,materialize(hud.draw,prepared),extent);
+    const unsigned pain_tier=extent.width>2560 && extent.height>1600 ? 2560U :
+        extent.width>=1280 && extent.height>720 ? 1280U : extent.width>=640 ? 640U : 320U;
+    constexpr std::array<std::string_view,4U> roles{"pain_front","pain_right","pain_rear","pain_left"};
+    for(std::size_t frame=0U;frame<roles.size();++frame) {
+        CAPTURE(frame,pain_tier,extent.width,extent.height);
+        const auto& entry=role(prepared,"sprites/hud.txt",roles[frame],pain_tier);
+        REQUIRE(entry.frame==frame);
+        const auto arrow=std::find_if(hud.draw.sprites.begin(),hud.draw.sprites.end(),
+            [&](const auto& sprite){return sprite.draw_order==30U && matches(sprite,entry);});
+        REQUIRE(arrow!=hud.draw.sprites.end());CHECK(arrow->blend==api::HudSpriteBlend::additive);
+        const unsigned long_side=pain_tier==320U ? 64U : 128U,short_side=pain_tier==320U ? 24U : 48U;
+        const unsigned width=frame%2U ? short_side : long_side,height=frame%2U ? long_side : short_side;
+        CHECK(entry.source==api::HudSourceRectangle{0U,0U,width,height});
+        CHECK(entry.frame_width==width);CHECK(entry.frame_height==height);
+        // Original DrawPain uses native SPR frame pixels independently of
+        // health/ammo HUD scale, including the high-resolution sprite tiers.
+        CHECK(arrow->width==width);CHECK(arrow->height==height);
+        REQUIRE(arrow->x>=0);REQUIRE(arrow->y>=0);
+        REQUIRE(arrow->x+arrow->width<=extent.width);REQUIRE(arrow->y+arrow->height<=extent.height);
+        const int x0=static_cast<int>(std::floor(arrow->x)),y0=static_cast<int>(std::floor(arrow->y));
+        const int x1=static_cast<int>(std::ceil(arrow->x+arrow->width)),y1=static_cast<int>(std::ceil(arrow->y+arrow->height));
+        std::size_t red_increased{};bool other_channels_unchanged=true;
+        for(int y=y0;y<y1;++y)for(int x=x0;x<x1;++x) {
+            const auto previous=rgb(before,extent,x,y),current=rgb(after,extent,x,y);
+            if(current[0]>previous[0])++red_increased;
+            other_channels_unchanged=other_channels_unchanged &&
+                current[1]==previous[1] && current[2]==previous[2];
+        }
+        CHECK(red_increased>0U);CHECK(other_channels_unchanged);
+    }
+    CHECK(context.renderer().hud_statistics().last_invalid_commands==0);
+}
+
 void exercise(glf::HiddenContext& context,const g::HudPreparedAssets& prepared,
         r::RenderExtent extent,std::string_view prefix) {
     Module module{prepared};module.viewport(extent);
@@ -404,6 +478,7 @@ TEST_CASE("E29 project-owned manifests execute the normal module materializer an
     auto context=glf::try_context(640,480);
     if(!context || !glf::capable_context())SKIP("OpenGL 3.3 Core context unavailable");
     context->initialize_renderer();exercise(*context,owned.prepared,{640,480},"owned");
+    exercise_pain(*context,owned.prepared,{640,480});
     CHECK(owned.source->reads==reads); // no manifest or SPR reads in any HUD frame
 }
 
@@ -524,11 +599,12 @@ TEST_CASE("E29 approved original SPR HUD integrates pixels state transitions and
     std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment> environment{std::move(made.environment)};
     g::ApprovedHudAssets worker{resources::resources_for(environment,"maps/crossfire.bsp"),hf::halflife_hud_resource_preparation()};
     const auto prepared=resources::wait_prepared(worker);REQUIRE(prepared);
-    REQUIRE(prepared->sprites.size()==224);REQUIRE(prepared->resources.descriptors.size()==15);
+    REQUIRE(prepared->sprites.size()==224U+4U);REQUIRE(prepared->resources.descriptors.size()==15);
     for(const r::RenderExtent extent:{r::RenderExtent{640,480},{1280,720},{1920,1080},{3440,1440},{3440,1800}}) {
         INFO(extent.width);INFO(extent.height);
         auto context=glf::try_context(extent.width,extent.height);
         if(!context || !glf::capable_context())SKIP("OpenGL 3.3 Core context unavailable");
         context->initialize_renderer();exercise(*context,*prepared,extent,"original");
+        exercise_pain(*context,*prepared,extent);
     }
 }

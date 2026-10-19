@@ -72,6 +72,23 @@ void check_error(
     CHECK(result.next_byte_offset == 0U);
 }
 
+[[nodiscard]] std::vector<std::byte> resource_location_fixture(
+    const std::span<const std::byte> location,
+    const std::size_t prefix_size = 0U)
+{
+    std::vector<std::byte> payload(prefix_size, std::byte{0x5aU});
+    payload.insert(
+        payload.end(),
+        kIndependentControlFixture.begin(),
+        kIndependentControlFixture.begin() + 9);
+    payload.push_back(std::byte{56U});
+    payload.insert(payload.end(), location.begin(), location.end());
+    payload.push_back(std::byte{0U});
+    payload.push_back(std::byte{43U});
+    payload.push_back(std::byte{0xa5U});
+    return payload;
+}
+
 TEST_CASE(
     "Transition-control parser consumes the exact eight-byte body and stops before opcode 43",
     "[goldsrc][resource-transition][control][fixture][cursor]")
@@ -300,6 +317,147 @@ TEST_CASE(
     CHECK(result.state->source_message_offset() == 2U);
     CHECK(result.boundary->byte_offset() == 11U);
     CHECK(result.boundary->remaining_byte_count() == 2U);
+}
+
+TEST_CASE(
+    "Transition-control consumes one optional bounded resource location before opcode 43",
+    "[goldsrc][resource-transition][control][resource-location][cursor]")
+{
+    // Independent numeric fixture: URL bytes contain the values of both
+    // relevant opcodes, which must remain ordinary string data until NUL.
+    const std::array location{
+        std::byte{'h'}, std::byte{'t'}, std::byte{'t'}, std::byte{'p'},
+        std::byte{':'}, std::byte{'/'}, std::byte{'/'}, std::byte{'a'},
+        std::byte{43U}, std::byte{56U}, std::byte{'/'},
+    };
+    for (const std::size_t prefix_size : {0U, 3U}) {
+        INFO("prefix size " << prefix_size);
+        auto payload = resource_location_fixture(location, prefix_size);
+        payload.push_back(std::byte{0x7eU});
+        const auto original = payload;
+        const auto result = goldsrc::ResourceTransitionControlParser{}.parse(
+            payload, prefix_size);
+        REQUIRE(result);
+        REQUIRE(result.state);
+        REQUIRE(result.boundary);
+        CHECK(result.state->message_bytes() == 9U);
+        CHECK(result.state->body_bytes() == 8U);
+        CHECK(result.state->source_message_offset() == prefix_size);
+        CHECK(result.bytes_consumed == 9U + 1U + location.size() + 1U);
+        CHECK(result.next_byte_offset == prefix_size + result.bytes_consumed);
+        CHECK(result.boundary->byte_offset() == result.next_byte_offset);
+        CHECK(result.boundary->remaining_byte_count() == 2U);
+        CHECK(result.boundary->source_payload_size() == payload.size());
+        CHECK(payload[result.next_byte_offset] == std::byte{43U});
+        CHECK(payload == original);
+        std::ranges::fill(payload, std::byte{0U});
+        CHECK(result.boundary->byte_offset() == prefix_size + 22U);
+        CHECK(result.boundary->remaining_byte_count() == 2U);
+    }
+}
+
+TEST_CASE(
+    "Transition-control resource location accepts zero and 128 bytes but rejects 129",
+    "[goldsrc][resource-transition][control][resource-location][limits]")
+{
+    STATIC_CHECK(goldsrc::kResourceLocationOpcode == 56U);
+    STATIC_CHECK(goldsrc::kMaximumResourceLocationStringBytes == 128U);
+    const goldsrc::ResourceTransitionControlParser parser;
+    for (const std::size_t length : {0U, 128U}) {
+        INFO("location length " << length);
+        const std::vector<std::byte> location(length, std::byte{'x'});
+        const auto payload = resource_location_fixture(location);
+        const auto result = parser.parse(payload);
+        REQUIRE(result);
+        CHECK(result.state->message_bytes() == 9U);
+        CHECK(result.bytes_consumed == 11U + length);
+        CHECK(result.next_byte_offset == 11U + length);
+        CHECK(result.boundary->remaining_byte_count() == 1U);
+    }
+
+    const std::vector<std::byte> too_long(129U, std::byte{'x'});
+    const auto payload = resource_location_fixture(too_long, 3U);
+    const auto result = parser.parse(payload, 3U);
+    check_error(
+        result,
+        goldsrc::ResourceTransitionControlErrorCode::resource_location_too_long,
+        payload.size());
+    CHECK(result.error->byte_offset == 3U + 10U + 128U);
+    CHECK(result.error->context.find("xxx") == std::string::npos);
+}
+
+TEST_CASE(
+    "Transition-control resource location requires its terminator and exact next boundary",
+    "[goldsrc][resource-transition][control][resource-location][truncation][no-scan]")
+{
+    const goldsrc::ResourceTransitionControlParser parser;
+    const std::array location{std::byte{'x'}, std::byte{43U}, std::byte{'y'}};
+    const auto complete = resource_location_fixture(location, 2U);
+    for (std::size_t length = 12U; length <= 15U; ++length) {
+        INFO("prefix length " << length);
+        const auto result = parser.parse(std::span{complete}.first(length), 2U);
+        check_error(
+            result,
+            goldsrc::ResourceTransitionControlErrorCode::
+                truncated_resource_location,
+            length);
+        CHECK(result.error->byte_offset == length);
+    }
+
+    SECTION("NUL followed by EOF is a missing opcode boundary") {
+        const auto result = parser.parse(std::span{complete}.first(16U), 2U);
+        check_error(
+            result,
+            goldsrc::ResourceTransitionControlErrorCode::missing_next_boundary,
+            16U);
+        CHECK(result.error->byte_offset == 16U);
+    }
+    SECTION("opcode 43 still requires its unconsumed body") {
+        const auto result = parser.parse(std::span{complete}.first(17U), 2U);
+        check_error(
+            result,
+            goldsrc::ResourceTransitionControlErrorCode::
+                truncated_next_boundary_body,
+            17U);
+        CHECK(result.error->byte_offset == 16U);
+    }
+    SECTION("unterminated field cannot find an opcode 43 inside string data") {
+        auto payload = complete;
+        payload[15U] = std::byte{'z'};
+        const auto result = parser.parse(payload, 2U);
+        check_error(
+            result,
+            goldsrc::ResourceTransitionControlErrorCode::
+                truncated_resource_location,
+            payload.size());
+        CHECK(result.error->byte_offset == payload.size());
+    }
+    SECTION("unknown opcode after NUL is not skipped to a later opcode 43") {
+        auto payload = complete;
+        payload[16U] = std::byte{99U};
+        payload[17U] = std::byte{43U};
+        const auto result = parser.parse(payload, 2U);
+        check_error(
+            result,
+            goldsrc::ResourceTransitionControlErrorCode::
+                wrong_next_boundary_opcode,
+            payload.size());
+        CHECK(result.error->byte_offset == 16U);
+    }
+    SECTION("a second resource-location message is not accepted") {
+        auto payload = complete;
+        payload[16U] = std::byte{56U};
+        payload.insert(payload.begin() + 17, std::byte{0U});
+        payload[18U] = std::byte{43U};
+        payload.push_back(std::byte{0xa5U});
+        const auto result = parser.parse(payload, 2U);
+        check_error(
+            result,
+            goldsrc::ResourceTransitionControlErrorCode::
+                wrong_next_boundary_opcode,
+            payload.size());
+        CHECK(result.error->byte_offset == 16U);
+    }
 }
 
 TEST_CASE(

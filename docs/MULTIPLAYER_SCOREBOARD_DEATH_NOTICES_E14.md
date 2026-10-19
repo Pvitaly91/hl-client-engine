@@ -7,6 +7,13 @@ not_run; the report does not establish MP5 acceptance.
 
 ## Scope, audit and prior acceptance
 
+E33.2 adds a console sentence from the same event-time notice construction,
+before HUD capacity/expiry can discard its visual copy. Console publication is
+owned by record/payload acceptance, independently of HUD draw, life or focus.
+Scores, names, notice lifetime and death/respawn authority remain as documented
+here. See [E33.2 routing and verification](CONSOLE_GAMEPLAY_SERVER_MESSAGES_E33_2.md)
+for the pinned death.cpp wording, source ordering and new-build manual status.
+
 Authoritative checkout: `D:\DEV\CPP\HLC-steamcfg-5e48b7c1`, branch
 `codex/stock-runtime-campaign-5e48b7c1`, starting HEAD
 `00505f71ff2547a9a6b083e53edf69ec45d48213`. Local E11–E13 changes were preserved;
@@ -306,3 +313,23 @@ several kills and wait >6 seconds: FIFO stays bounded and expires. Hold TAB
 while moving/looking/reloading. Where practical, disconnect/reconnect/name change
 should update rows without changing old notices. Close both windows and wait
 for the unchanged launcher's cleanup; no new manual option is required.
+
+## Server-reported ping column — 2026-10-18
+
+The normal scoreboard now adds `PING MS` for both the receiving player and
+other players. Values come from exact `svc_pings` 5/12/7-bit records, not from
+frame rate or prediction-state age. Unknown values display `-`; measured
+zero displays `0`. Existing kills/deaths sorting and the local highlight stay
+unchanged. Team headers do not invent a team connection ping.
+
+Holding Tab sends the standard `IN_SCORE` user-command bit in the full
+Half-Life input profile. The bit survives immutable command history and
+prediction validation without affecting physical movement. Other strict
+reference profiles and synthetic input behavior remain unchanged. Player
+replacement, disconnect and session reset clear prior measurements.
+
+The Release/Debug runtime, scoreboard and input suite passed 183 cases /
+71001 assertions per configuration, including actual OpenGL pixel checks
+for both ping rows. Normal Release client updated; launcher unchanged.
+See [public-server session audit and verification](STEAM_PUBLIC_SERVER_DIAGNOSTICS.md)
+for the successful preceding live session and this build's evidence/hash.

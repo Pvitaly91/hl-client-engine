@@ -245,6 +245,376 @@ TEST_CASE("E15 first pickup binds before command and publishes first muzzle effe
     REQUIRE(frame.world_impact->tracer);CHECK(frame.world_impact->tracer->follow_local_muzzle);
     CHECK_FALSE(host.local_visuals(context).world_impact);
 }
+TEST_CASE("MP5 R immediately after firing owns reload presentation without waiting for fire acknowledgement",
+          "[e15][reload-sync][weapon-presentation]") {
+    for(const bool acknowledge:{false,true}) {
+        CAPTURE(acknowledge);
+        hl::LocalWeaponPresentationController controller;controller.bind_model(model());
+        const auto initial=state(25);controller.observe(initial,0);
+        controller.submit(command(1,.02),.02);const auto fired=controller.sample(.02);
+        REQUIRE(fired.identity);CHECK(fired.primary_fire_starts==1);
+        (void)controller.drain_audio();
+        auto authoritative=state(24,2);
+        authoritative.weapon_slots[0].next_primary_attack=.08;
+        authoritative.receiving_client->next_weapon_attack=0;
+        if(acknowledge) {
+            controller.observe(authoritative,.04);
+            CHECK(controller.sample(.04).primary_fire_confirmed==1);
+        }
+        auto reload=command(2,.06,false);reload.buttons=g::kReferenceGoldSrcButtonReload;
+        controller.submit(reload,.06);const auto started=controller.sample(.06);
+        REQUIRE(started.identity);REQUIRE(started.visual);
+        CHECK(started.identity->kind==api::LocalWeaponAction::reload);
+        CHECK(started.identity->command_sequence==2);
+        CHECK(started.reload_starts==1);CHECK(started.primary_fire_starts==1);
+        CHECK(started.visual->sequence==3);CHECK(started.visual->body==0);
+        CHECK(started.visual->started_at_seconds==Approx(.06));
+        CHECK(started.frame_coordinate==Approx(0));
+        CHECK(initial.weapon_slots[0].clip==25);CHECK(initial.weapon_hud.clips[4]==25);
+        CHECK(authoritative.weapon_slots[0].clip==24);CHECK(authoritative.weapon_hud.reserve_ammo[1]==100);
+        CHECK(controller.sample(.26).frame_coordinate==Approx(6));
+        const auto restart=started.visual->restart_identity;
+        auto confirmed=state(acknowledge ? 24 : 25,3);
+        confirmed.weapon_slots[0].in_reload=true;confirmed.receiving_client->weapon_animation=3;
+        confirmed.receiving_client->next_weapon_attack=1.5;
+        controller.observe(confirmed,.28);const auto observed=controller.sample(.28);
+        REQUIRE(observed.visual);CHECK(observed.reload_confirmed==1);
+        CHECK(observed.visual->restart_identity==restart);
+        CHECK(observed.visual->started_at_seconds==Approx(.06));
+        CHECK(observed.frame_coordinate==Approx(6.6));
+        CHECK(confirmed.weapon_slots[0].clip==(acknowledge ? 24 : 25));
+        CHECK(confirmed.weapon_hud.reserve_ammo[1]==100);
+    }
+}
+TEST_CASE("MP5 held R retries after the player attack gate clears",
+          "[e15][reload-sync][weapon-presentation]") {
+    for(const bool fresh_gate:{false,true}) {
+        CAPTURE(fresh_gate);
+        hl::LocalWeaponPresentationController controller;controller.bind_model(model());
+        auto initial=state(17);initial.receiving_client->next_weapon_attack=.1;
+        initial.weapon_slots[0].next_primary_attack=.5;
+        controller.observe(initial,0);
+        auto held=command(1,.02,false);held.buttons=g::kReferenceGoldSrcButtonReload;
+        controller.submit(held,.02);CHECK(controller.sample(.02).reload_starts==0);
+        held.sequence=2;held.sample_end_seconds=.04;controller.submit(held,.04);
+        CHECK(controller.sample(.04).reload_starts==0);
+        if(fresh_gate) {
+            auto ready=state(17,2);ready.receiving_client->next_weapon_attack=0;
+            ready.weapon_slots[0].next_primary_attack=.4;controller.observe(ready,.06);
+        }
+        const auto at=fresh_gate ? .08 : .12;
+        held.sequence=3;held.sample_end_seconds=at;controller.submit(held,at);
+        const auto started=controller.sample(at);REQUIRE(started.identity);REQUIRE(started.visual);
+        CHECK(started.identity->kind==api::LocalWeaponAction::reload);
+        CHECK(started.identity->command_sequence==3);CHECK(started.reload_starts==1);
+        CHECK(started.visual->sequence==3);CHECK(started.visual->started_at_seconds==Approx(at));
+        held.sequence=4;held.sample_end_seconds=at+.02;controller.submit(held,at+.02);
+        const auto repeated=controller.sample(at+.02);REQUIRE(repeated.visual);
+        CHECK(repeated.reload_starts==1);
+        CHECK(repeated.visual->restart_identity==started.visual->restart_identity);
+        CHECK(initial.weapon_slots[0].clip==17);CHECK(initial.weapon_hud.reserve_ammo[1]==100);
+    }
+}
+TEST_CASE("MP5 partial magazine server reload restarts an unchanged completed role exactly once",
+          "[e15][reload-sync][weapon-presentation][local-audio][game-api]") {
+    auto imported=model();imported.selectable_bodies.fill(true);
+    std::vector<std::byte> sample_name;
+    for(const auto ch:std::string_view{"weapons/e15_fixture_reload.wav"})sample_name.push_back(static_cast<std::byte>(ch));
+    imported.sequences[3].events={{5,5004,0,sample_name},{24,5004,0,sample_name}};
+    api::GameClientHost host{hl::make_half_life_client_module()};host.reset({1,1,1});host.bind_model(imported);
+    auto initial=state(17);initial.receiving_client->weapon_animation=3;
+    host.observe(initial,0);const auto previous=host.sample(0);REQUIRE(previous.visual);
+    const auto previous_restart=previous.visual->restart_identity;
+    (void)host.sample(.2);CHECK(host.drain_audio().count==1);
+    (void)host.sample(.9);CHECK(host.drain_audio().count==1);
+    const auto completed=host.sample(1.6);REQUIRE(completed.visual);CHECK(completed.visual->sequence==0);
+    (void)host.drain_audio();
+    auto reload=state(17,2);reload.receiving_client->weapon_animation=3;
+    reload.weapon_slots[0].in_reload=true;reload.receiving_client->next_weapon_attack=1.5;
+    host.observe(reload,1.7);const auto started=host.sample(1.7);REQUIRE(started.visual);
+    CHECK(started.visual->sequence==3);CHECK(started.visual->body==0);
+    CHECK(started.visual->source==api::LocalWeaponAnimationSource::confirmed_weapon_state);
+    CHECK(started.visual->restart_identity!=previous_restart);
+    CHECK(started.visual->started_at_seconds==Approx(1.7));CHECK(started.frame_coordinate==Approx(0));
+    CHECK_FALSE(started.identity);CHECK(started.reload_starts==0);CHECK(started.primary_fire_starts==0);
+    CHECK(host.hud(reload,1.7).clip==17);CHECK(reload.weapon_slots[0].clip==17);
+    CHECK(reload.weapon_hud.reserve_ammo[1]==100);CHECK(host.drain_audio().count==0);
+    const auto advanced=host.sample(1.9);REQUIRE(advanced.visual);
+    const auto viewmodel=host.viewmodel(reload,imported,1.9,advanced.visual);
+    CHECK(viewmodel.status==api::ViewmodelStatus::ready);CHECK(viewmodel.sequence==3);
+    CHECK(viewmodel.frame_coordinate==Approx(6));
+    const auto audio=host.drain_audio();REQUIRE(audio.count==1);
+    CHECK(audio.cues[0].kind==api::LocalSoundKind::reload);CHECK(audio.cues[0].marker_ordinal==0);
+    CHECK(audio.cues[0].command_sequence==0);
+    host.observe(reload,1.91);CHECK(host.sample(1.91).visual->restart_identity==started.visual->restart_identity);
+    auto repeated=reload;repeated.publication_revision=3;
+    repeated.client_metadata.source=c::RuntimeObservationSource{.record_identity=3,.record_ordinal=3};
+    host.observe(repeated,1.92);CHECK(host.sample(1.92).visual->restart_identity==started.visual->restart_identity);
+    repeated.weapon_hud.animation_source=*repeated.client_metadata.source;
+    repeated.weapon_hud.animation_sequence=3;repeated.weapon_hud.animation_body=0;
+    host.observe(repeated,1.93);const auto exact=host.sample(1.93);REQUIRE(exact.visual);
+    CHECK(exact.visual->source==api::LocalWeaponAnimationSource::service_event);
+    CHECK(exact.visual->restart_identity==started.visual->restart_identity);
+    CHECK(exact.visual->started_at_seconds==Approx(1.7));CHECK(host.drain_audio().count==0);
+    repeated.publication_revision=4;
+    repeated.client_metadata.source=c::RuntimeObservationSource{.record_identity=4,.record_ordinal=4};
+    repeated.weapon_hud.animation_source=*repeated.client_metadata.source;
+    host.observe(repeated,1.94);const auto second_exact=host.sample(1.94);REQUIRE(second_exact.visual);
+    CHECK(second_exact.visual->restart_identity==started.visual->restart_identity);
+    CHECK(second_exact.visual->started_at_seconds==Approx(1.7));CHECK(host.drain_audio().count==0);
+    (void)host.sample(2.6);const auto second=host.drain_audio();REQUIRE(second.count==1);
+    CHECK(second.cues[0].kind==api::LocalSoundKind::reload);CHECK(second.cues[0].marker_ordinal==1);
+    (void)host.sample(2.61);CHECK(host.drain_audio().count==0);
+}
+TEST_CASE("MP5 reload after the first full magazine shot survives delayed shot pose acknowledgements",
+          "[e15][reload-sync][weapon-presentation][local-audio]") {
+    hl::LocalWeaponPresentationController controller;controller.bind_model(model());
+    const auto initial=state(50);controller.observe(initial,0);
+    controller.submit(command(1,.02),.02);CHECK(controller.sample(.02).primary_fire_starts==1);
+    REQUIRE(controller.drain_audio().count==1);
+    auto reload=command(2,.06,false);reload.buttons=g::kReferenceGoldSrcButtonReload;
+    controller.submit(reload,.06);const auto started=controller.sample(.06);
+    REQUIRE(started.identity);REQUIRE(started.visual);
+    CHECK(started.identity->kind==api::LocalWeaponAction::reload);
+    CHECK(started.visual->sequence==3);CHECK(started.reload_starts==1);
+    // The submitted shot reserves one round for local eligibility without editing canonical ammo.
+    CHECK(initial.weapon_slots[0].clip==50);CHECK(initial.weapon_hud.clips[4]==50);
+    CHECK(initial.weapon_hud.reserve_ammo[1]==100);
+    const auto restart=started.visual->restart_identity;
+    auto fire=state(49,2);fire.receiving_client->weapon_animation=5;
+    fire.weapon_slots[0].next_primary_attack=.04;fire.receiving_client->next_weapon_attack=0;
+    controller.observe(fire,.08);auto result=controller.sample(.08);REQUIRE(result.visual);
+    CHECK(result.primary_fire_confirmed==1);CHECK(result.reload_confirmed==0);
+    CHECK(result.visual->sequence==3);CHECK(result.visual->restart_identity==restart);
+    auto idle=state(49,3);idle.receiving_client->weapon_animation=0;
+    idle.receiving_client->next_weapon_attack=0;controller.observe(idle,.1);
+    result=controller.sample(.1);REQUIRE(result.visual);
+    CHECK(result.visual->sequence==3);CHECK(result.visual->restart_identity==restart);
+    auto exact=state(49,4);exact.receiving_client->weapon_animation=0;
+    exact.weapon_hud.animation_source=*exact.client_metadata.source;
+    exact.weapon_hud.animation_sequence=6;exact.weapon_hud.animation_body=2;
+    controller.observe(exact,.12);result=controller.sample(.26);REQUIRE(result.visual);
+    CHECK(result.visual->sequence==3);CHECK(result.visual->restart_identity==restart);
+    CHECK(result.visual->started_at_seconds==Approx(.06));CHECK(result.frame_coordinate==Approx(6));
+    CHECK(result.reload_starts==1);CHECK(result.primary_fire_starts==1);
+    CHECK(result.primary_fire_confirmed==1);CHECK(result.reload_confirmed==0);
+    CHECK(controller.drain_audio().count==0);
+    auto confirmed=state(49,5);confirmed.receiving_client->weapon_animation=3;
+    confirmed.weapon_slots[0].in_reload=true;confirmed.receiving_client->next_weapon_attack=1.5;
+    controller.observe(confirmed,.28);result=controller.sample(.28);REQUIRE(result.visual);
+    CHECK(result.reload_confirmed==1);CHECK(result.visual->restart_identity==restart);
+    CHECK(result.visual->started_at_seconds==Approx(.06));CHECK(result.frame_coordinate==Approx(6.6));
+    CHECK(confirmed.weapon_slots[0].clip==49);CHECK(confirmed.weapon_hud.reserve_ammo[1]==100);
+}
+TEST_CASE("MP5 reload keeps late M203 confirmations separate and releases the old grenade reservation",
+          "[e15][e16][reload-sync][weapon-presentation][local-audio]") {
+    for(const bool timer_confirmed:{false,true})for(const bool event_first:{false,true}) {
+        CAPTURE(timer_confirmed,event_first);
+        const auto with_grenades=[](std::uint8_t grenades,std::size_t ordinal) {
+            auto value=state(25,ordinal);value.receiving_client->water_level=0;
+            value.receiving_client->next_weapon_attack=0;
+            value.weapon_hud.catalogue[0].secondary_ammo_type=3;
+            value.weapon_hud.reserve_ammo[3]=grenades;
+            value.weapon_slots[0].next_secondary_attack=0;return value;
+        };
+        hl::LocalWeaponPresentationController controller;controller.bind_model(model());
+        const std::array bindings{binding(900,"events/mp52.sc")};controller.configure_scripted_events(bindings);
+        const auto initial=with_grenades(2,1);controller.observe(initial,0);
+        auto launch=command(1,.02,false);launch.buttons=g::kReferenceGoldSrcButtonAttack2;
+        controller.submit(launch,.02);const auto fired=controller.sample(.02);
+        REQUIRE(fired.visual);CHECK(fired.visual->sequence==2);CHECK(fired.secondary_launch_starts==1);
+        REQUIRE(controller.drain_audio().count==1);
+        if(timer_confirmed) {
+            auto acknowledged=with_grenades(2,2);acknowledged.receiving_client->weapon_animation=2;
+            acknowledged.weapon_slots[0].next_primary_attack=1;
+            acknowledged.weapon_slots[0].next_secondary_attack=1;
+            controller.observe(acknowledged,.04);
+            CHECK(controller.sample(.04).secondary_launch_confirmed==1);
+        }
+        auto reload=command(2,.06,false);reload.buttons=g::kReferenceGoldSrcButtonReload;
+        controller.submit(reload,.06);const auto started=controller.sample(.06);
+        REQUIRE(started.identity);REQUIRE(started.visual);
+        CHECK(started.identity->kind==api::LocalWeaponAction::reload);
+        CHECK(started.visual->sequence==3);CHECK(started.reload_starts==1);
+        CHECK(initial.weapon_slots[0].clip==25);CHECK(initial.weapon_hud.reserve_ammo[3]==2);
+        const auto restart=started.visual->restart_identity;
+        const auto deliver_event=[&](double at) {
+            auto echo=event(3,1,900);echo.received_at_seconds=at;
+            controller.committed_scripted_event(echo,1);
+        };
+        const auto deliver_ammo=[&](double at) {
+            auto ammo=with_grenades(1,4);
+            ammo.client_metadata.freshness=c::RuntimeObservationFreshness::retained;
+            ammo.weapon_hud.last_message_source=*ammo.client_metadata.source;
+            controller.observe(ammo,at);
+            CHECK(ammo.weapon_hud.reserve_ammo[3]==1);CHECK(ammo.weapon_slots[0].clip==25);
+        };
+        if(event_first) {deliver_event(.1);deliver_ammo(.12);}
+        else {deliver_ammo(.1);deliver_event(.12);}
+        auto observed=controller.sample(.14);REQUIRE(observed.visual);
+        CHECK(observed.secondary_launch_starts==1);CHECK(observed.secondary_launch_confirmed==1);
+        CHECK(observed.reload_starts==1);CHECK(observed.reload_confirmed==0);
+        CHECK(observed.visual->sequence==3);CHECK(observed.visual->restart_identity==restart);
+        CHECK(observed.visual->started_at_seconds==Approx(.06));CHECK(observed.frame_coordinate==Approx(2.4));
+        CHECK(controller.drain_audio().count==0);
+        // A new delivery identity for the same old launch also cannot take over reload.
+        auto repeated_echo=event(5,1,900);repeated_echo.received_at_seconds=.15;
+        controller.committed_scripted_event(repeated_echo,1);
+        observed=controller.sample(.15);REQUIRE(observed.visual);
+        CHECK(observed.secondary_launch_confirmed==1);CHECK(observed.secondary_launch_starts==1);
+        CHECK(observed.visual->restart_identity==restart);CHECK(controller.drain_audio().count==0);
+        auto confirmed=with_grenades(1,6);confirmed.receiving_client->weapon_animation=3;
+        confirmed.weapon_slots[0].in_reload=true;confirmed.receiving_client->next_weapon_attack=1.5;
+        controller.observe(confirmed,.16);CHECK(controller.sample(.16).reload_confirmed==1);
+        auto loaded=with_grenades(1,7);loaded.weapon_slots[0].clip=50;loaded.weapon_hud.clips[4]=50;
+        loaded.weapon_hud.reserve_ammo[1]=75;loaded.receiving_client->weapon_animation=0;
+        // Fresh canonical completion may end a reload early; no local ammo transfer is inferred.
+        controller.observe(loaded,.5);(void)controller.sample(.5);
+        launch.sequence=3;launch.sample_end_seconds=1.1;controller.submit(launch,1.1);
+        const auto next=controller.sample(1.1);
+        // Before the old receipt's 1.52s timeout, the remaining grenade must be usable.
+        CHECK(next.secondary_launch_starts==2);CHECK(next.secondary_launch_confirmed==1);
+        REQUIRE(next.identity);CHECK(next.identity->kind==api::LocalWeaponAction::secondary_launch);
+        CHECK(loaded.weapon_hud.reserve_ammo[3]==1);CHECK(loaded.weapon_slots[0].clip==50);
+    }
+}
+TEST_CASE("MP5 server only reload retains the unacknowledged shot until separate canonical clip consumption",
+          "[e15][reload-sync][weapon-presentation][local-audio]") {
+    hl::LocalWeaponPresentationController controller;controller.bind_model(model());
+    const auto initial=state(1);controller.observe(initial,0);
+    controller.submit(command(1,.02),.02);CHECK(controller.sample(.02).primary_fire_starts==1);
+    REQUIRE(controller.drain_audio().count==1);
+    // No local R and no clip decrement: the fresh in_reload edge owns this occurrence.
+    auto reload=state(1,2);reload.receiving_client->weapon_animation=3;
+    reload.weapon_slots[0].in_reload=true;reload.receiving_client->next_weapon_attack=1.5;
+    controller.observe(reload,.06);const auto started=controller.sample(.06);REQUIRE(started.visual);
+    CHECK(started.visual->sequence==3);
+    CHECK(started.visual->source==api::LocalWeaponAnimationSource::confirmed_weapon_state);
+    CHECK_FALSE(started.identity);CHECK(started.reload_starts==0);
+    CHECK(started.primary_fire_starts==1);CHECK(started.primary_fire_confirmed==0);
+    CHECK(started.actions_rejected==0);CHECK(reload.weapon_slots[0].clip==1);
+    const auto restart=started.visual->restart_identity;
+    auto late=state(1,3);late.receiving_client->weapon_animation=5;
+    late.weapon_slots[0].in_reload=true;late.receiving_client->next_weapon_attack=1.46;
+    controller.observe(late,.08);auto observed=controller.sample(.08);REQUIRE(observed.visual);
+    CHECK(observed.visual->sequence==3);CHECK(observed.visual->restart_identity==restart);
+    auto exact=state(1,4);exact.receiving_client->weapon_animation=5;
+    exact.weapon_slots[0].in_reload=true;exact.receiving_client->next_weapon_attack=1.44;
+    exact.weapon_hud.animation_source=*exact.client_metadata.source;
+    exact.weapon_hud.animation_sequence=6;exact.weapon_hud.animation_body=2;
+    controller.observe(exact,.1);observed=controller.sample(.1);REQUIRE(observed.visual);
+    CHECK(observed.visual->sequence==3);CHECK(observed.visual->restart_identity==restart);
+    auto consumed=state(0,5);consumed.client_metadata.freshness=c::RuntimeObservationFreshness::retained;
+    consumed.weapon_hud.last_message_source=*consumed.client_metadata.source;
+    controller.observe(consumed,.12);observed=controller.sample(.26);REQUIRE(observed.visual);
+    CHECK(observed.primary_fire_confirmed==1);CHECK(observed.actions_confirmed==1);
+    CHECK(observed.actions_rejected==0);CHECK(observed.reload_starts==0);
+    CHECK(observed.visual->sequence==3);CHECK(observed.visual->restart_identity==restart);
+    CHECK(observed.visual->started_at_seconds==Approx(.06));CHECK(observed.frame_coordinate==Approx(6));
+    controller.observe(consumed,.27);CHECK(controller.sample(.27).primary_fire_confirmed==1);
+    CHECK(controller.drain_audio().count==0);
+    CHECK(consumed.weapon_slots[0].clip==0);CHECK(consumed.weapon_hud.reserve_ammo[1]==100);
+    auto loaded=state(1,6);loaded.receiving_client->weapon_animation=0;
+    loaded.receiving_client->next_weapon_attack=0;loaded.weapon_hud.reserve_ammo[1]=99;
+    controller.observe(loaded,1.7);(void)controller.sample(1.7);
+    controller.submit(command(2,1.72),1.72);const auto next=controller.sample(1.72);
+    CHECK(next.primary_fire_starts==2);CHECK(next.primary_fire_confirmed==1);
+    CHECK(next.actions_rejected==0);REQUIRE(next.identity);
+    CHECK(next.identity->kind==api::LocalWeaponAction::primary_fire);
+    CHECK(loaded.weapon_slots[0].clip==1);CHECK(loaded.weapon_hud.reserve_ammo[1]==99);
+}
+TEST_CASE("MP5 timer confirmed reload keeps its timeline when the same record carries the prior fire pose",
+          "[e15][reload-sync][weapon-presentation]") {
+    hl::LocalWeaponPresentationController controller;controller.bind_model(model());
+    auto initial=state(25);initial.receiving_client->next_weapon_attack=0;controller.observe(initial,0);
+    controller.submit(command(1,.02),.02);(void)controller.sample(.02);(void)controller.drain_audio();
+    auto reload=command(2,.06,false);reload.buttons=g::kReferenceGoldSrcButtonReload;
+    controller.submit(reload,.06);const auto started=controller.sample(.06);REQUIRE(started.visual);
+    REQUIRE(started.identity);CHECK(started.identity->kind==api::LocalWeaponAction::reload);
+    auto confirmed=state(24,2);confirmed.receiving_client->next_weapon_attack=1.5;
+    confirmed.receiving_client->weapon_animation=5;confirmed.weapon_slots[0].in_reload=false;
+    controller.observe(confirmed,.1);const auto observed=controller.sample(.1);REQUIRE(observed.visual);
+    CHECK(observed.reload_confirmed==1);CHECK(observed.primary_fire_confirmed==1);
+    CHECK(observed.visual->sequence==3);
+    CHECK(observed.visual->restart_identity==started.visual->restart_identity);
+    CHECK(observed.visual->started_at_seconds==Approx(.06));CHECK(observed.frame_coordinate==Approx(1.2));
+    controller.observe(confirmed,.12);const auto repeated=controller.sample(.12);REQUIRE(repeated.visual);
+    CHECK(repeated.reload_confirmed==1);CHECK(repeated.primary_fire_confirmed==1);
+    CHECK(repeated.visual->restart_identity==started.visual->restart_identity);
+    CHECK(controller.drain_audio().count==0);
+    CHECK(confirmed.weapon_slots[0].clip==24);CHECK(confirmed.weapon_hud.reserve_ammo[1]==100);
+}
+TEST_CASE("MP5 server only reload keeps its predecessor deadline after late M203 receipt retirement",
+          "[e15][e16][reload-sync][weapon-presentation][local-audio]") {
+    for(const bool event_first:{false,true}) {
+        CAPTURE(event_first);
+        const auto with_grenades=[](std::uint8_t grenades,std::size_t ordinal) {
+            auto value=state(25,ordinal);value.receiving_client->water_level=0;
+            value.receiving_client->next_weapon_attack=0;
+            value.weapon_hud.catalogue[0].secondary_ammo_type=3;
+            value.weapon_hud.reserve_ammo[3]=grenades;
+            value.weapon_slots[0].next_secondary_attack=0;return value;
+        };
+        hl::LocalWeaponPresentationController controller;controller.bind_model(model());
+        const std::array bindings{binding(900,"events/mp52.sc")};controller.configure_scripted_events(bindings);
+        const auto initial=with_grenades(2,1);controller.observe(initial,0);
+        auto launch=command(1,.02,false);launch.buttons=g::kReferenceGoldSrcButtonAttack2;
+        controller.submit(launch,.02);CHECK(controller.sample(.02).secondary_launch_starts==1);
+        REQUIRE(controller.drain_audio().count==1);
+        auto reload=with_grenades(2,2);reload.receiving_client->weapon_animation=3;
+        reload.weapon_slots[0].in_reload=true;reload.receiving_client->next_weapon_attack=1.5;
+        controller.observe(reload,.06);const auto started=controller.sample(.06);REQUIRE(started.visual);
+        CHECK(started.visual->sequence==3);CHECK_FALSE(started.identity);
+        CHECK(started.reload_starts==0);CHECK(started.secondary_launch_confirmed==0);
+        const auto restart=started.visual->restart_identity;
+        const auto deliver_event=[&](double at) {
+            auto echo=event(3,1,900);echo.received_at_seconds=at;
+            controller.committed_scripted_event(echo,1);
+        };
+        const auto deliver_ammo=[&](double at) {
+            auto ammo=with_grenades(1,4);
+            ammo.client_metadata.freshness=c::RuntimeObservationFreshness::retained;
+            ammo.weapon_hud.last_message_source=*ammo.client_metadata.source;
+            controller.observe(ammo,at);
+        };
+        if(event_first) {deliver_event(.1);deliver_ammo(.12);}
+        else {deliver_ammo(.1);deliver_event(.12);}
+        auto observed=controller.sample(.12);REQUIRE(observed.visual);
+        CHECK(observed.secondary_launch_confirmed==1);CHECK(observed.secondary_launch_starts==1);
+        CHECK(observed.visual->sequence==3);CHECK(observed.visual->restart_identity==restart);
+        CHECK_FALSE(observed.identity);CHECK(observed.actions_rejected==0);
+        // The receipt is gone, but an older exact grenade pose remains an echo of that launch.
+        auto pose=with_grenades(1,5);pose.weapon_slots[0].in_reload=true;
+        pose.receiving_client->next_weapon_attack=1.4;pose.receiving_client->weapon_animation=2;
+        pose.weapon_hud.animation_source=*pose.client_metadata.source;
+        pose.weapon_hud.animation_sequence=2;pose.weapon_hud.animation_body=2;
+        controller.observe(pose,.14);observed=controller.sample(.14);REQUIRE(observed.visual);
+        CHECK(observed.visual->sequence==3);CHECK(observed.visual->restart_identity==restart);
+        CHECK(observed.visual->started_at_seconds==Approx(.06));CHECK(observed.frame_coordinate==Approx(2.4));
+        auto repeated_echo=event(6,1,900);repeated_echo.received_at_seconds=.16;
+        controller.committed_scripted_event(repeated_echo,1);
+        observed=controller.sample(.2);REQUIRE(observed.visual);
+        CHECK(observed.secondary_launch_confirmed==1);CHECK(observed.secondary_launch_starts==1);
+        CHECK(observed.reload_starts==0);CHECK(observed.visual->sequence==3);
+        CHECK(observed.visual->restart_identity==restart);CHECK(observed.frame_coordinate==Approx(4.2));
+        CHECK(controller.drain_audio().count==0);
+        CHECK(initial.weapon_hud.reserve_ammo[3]==2);CHECK(pose.weapon_hud.reserve_ammo[3]==1);
+        CHECK(pose.weapon_slots[0].clip==25);CHECK(pose.weapon_hud.reserve_ammo[1]==100);
+    }
+}
+TEST_CASE("MP5 firing input retains priority over manual reload",
+          "[e15][reload-sync][weapon-presentation][bounds]") {
+    for(const bool cycle_blocked:{false,true}) {
+        CAPTURE(cycle_blocked);
+        hl::LocalWeaponPresentationController controller;controller.bind_model(model());controller.observe(state(25),0);
+        if(cycle_blocked) {controller.submit(command(1,.02),.02);(void)controller.sample(.02);}
+        auto both=command(2,cycle_blocked ? .04 : .02);
+        both.buttons|=g::kReferenceGoldSrcButtonReload;controller.submit(both,both.sample_end_seconds);
+        const auto result=controller.sample(both.sample_end_seconds);
+        CHECK(result.reload_starts==0);CHECK(result.primary_fire_starts==1);
+        REQUIRE(result.identity);CHECK(result.identity->kind==api::LocalWeaponAction::primary_fire);
+    }
+}
 TEST_CASE("E15 local production module emits MP5 sound shell flash and alternating tracer impact intents", "[e15][weapon-visuals][local-audio]") {
     api::GameClientHost host{hl::make_half_life_client_module()};host.reset({1,1,1});host.bind_model(model());host.observe(state(),0);
     auto ready=host.drain_audio();CHECK(ready.prepare_count>=2);

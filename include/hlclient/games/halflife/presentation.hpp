@@ -7,6 +7,7 @@ namespace hlclient::games::halflife {
 // during a call; retained model/event values and output commands own storage.
 class HalfLifePresentation final {
 public:
+  void set_weapon_diagnostic_observer(game_api::WeaponDiagnosticObserver* observer) noexcept { controller_.set_weapon_diagnostic_observer(observer); }
   void configure_maximum_clients(std::uint32_t value) noexcept {
     maximum_clients_=value;controller_.configure_maximum_clients(value);
   }

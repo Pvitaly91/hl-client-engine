@@ -50,6 +50,28 @@ namespace goldsrc = hlclient::goldsrc;
     return result.error->code;
 }
 
+// Replace only the legacy fixture's disabled-consistency bit and padding.
+// Field widths are independent literal protocol values, not parser constants.
+[[nodiscard]] fixture::Message with_consistency_fields(
+    const fixture::Message& original,
+    const std::vector<std::pair<std::uint32_t, std::size_t>>& fields,
+    const bool align = true)
+{
+    fixture::LsbBitWriter writer;
+    for (std::size_t bit = 0U; bit < original.padding_start_bit; ++bit) {
+        const auto value = std::to_integer<std::uint8_t>(original.bytes[bit / 8U]);
+        writer.write((value >> (bit & 7U)) & 1U, 1U);
+    }
+    for (const auto& [value, width] : fields) {
+        writer.write(value, width);
+    }
+    const auto padding_start = writer.bit_length();
+    const auto padding_count = align ? ((8U - (padding_start & 7U)) & 7U) : 0U;
+    writer.write(0U, padding_count);
+    const auto bit_length = writer.bit_length();
+    return {writer.take_bytes(), bit_length, padding_start, padding_count};
+}
+
 TEST_CASE("GoldSrc resource-list parser matches the independent sanitized literal",
           "[goldsrc][resource-list][fixture]")
 {
@@ -68,6 +90,8 @@ TEST_CASE("GoldSrc resource-list parser matches the independent sanitized litera
     const auto& state = *result.state;
     CHECK(state.resource_count() == 3U);
     CHECK(state.total_name_byte_count() == fixture::kExactTotalNameBytes);
+    CHECK_FALSE(state.file_consistency_required());
+    CHECK(state.file_consistency_ordinals().empty());
     CHECK(state.total_size_code_sum() == fixture::kExactRawSizeCodeSum);
     CHECK(state.source_opcode_byte_offset() == 0U);
     CHECK(state.source_payload_bit_length() == fixture::kExactMessageBits);
@@ -337,6 +361,41 @@ TEST_CASE("GoldSrc resource-list parser accepts confirmed types and raw masks on
           goldsrc::ResourceListErrorCode::unsupported_resource_flags);
 }
 
+TEST_CASE("Resource-list defaults accept the bounded 12-bit aggregate entry range",
+          "[goldsrc][resource-list][limits][public-server][no-stock]")
+{
+    for (const auto count : {1025U, 2049U, 4095U}) {
+        INFO("resource count " << count);
+        std::vector<fixture::EntrySpec> entries;
+        entries.reserve(count);
+        for (unsigned index = 0U; index < count; ++index)
+            entries.push_back({4U, "x", static_cast<std::uint16_t>(index), 0U, 0U});
+        const auto message = fixture::make_message(entries);
+        REQUIRE(message.bytes.size() < goldsrc::kDefaultMaximumResourceMessageBytes);
+        const auto result = goldsrc::ResourceListParser{}.parse(message.bytes, 0U);
+        REQUIRE(result);
+        REQUIRE(result.state);
+        CHECK(result.state->resource_count() == count);
+        CHECK(result.state->total_name_byte_count() == count);
+        CHECK(result.state->entries().back().wire_ordinal() == count - 1U);
+
+        auto constrained = goldsrc::ResourceListLimits{};
+        constrained.maximum_resource_count = 1024U;
+        const auto limited = goldsrc::ResourceListParser{constrained}.parse(message.bytes, 0U);
+        CHECK(error_code(limited) == goldsrc::ResourceListErrorCode::resource_count_limit_exceeded);
+        REQUIRE(limited.error);
+        CHECK(limited.error->context.find("count=" + std::to_string(count)) != std::string::npos);
+        CHECK(limited.error->context.find("limit=1024") != std::string::npos);
+        CHECK(limited.error->context.size() <= goldsrc::kResourceListDiagnosticTextLimit);
+    }
+    // Raising aggregate count does not relax path/name or payload budgets.
+    const goldsrc::ResourceListLimits defaults;
+    CHECK(defaults.maximum_resource_name_length == 255U);
+    CHECK(defaults.maximum_resource_total_name_bytes == 65'536U);
+    CHECK(defaults.maximum_resource_message_bytes == 131'072U);
+    CHECK(defaults.maximum_resource_flags == 1U);
+}
+
 TEST_CASE("GoldSrc resource-list parser bounds names without treating them as paths",
           "[goldsrc][resource-list][names][security]")
 {
@@ -451,10 +510,16 @@ TEST_CASE("GoldSrc resource-list parser enforces the confirmed identity key",
         {2U, "models/a.mdl", 7U, 10U, 0U},
         {2U, "models/b.mdl", 7U, 20U, 0U},
     });
-    CHECK(error_code(goldsrc::ResourceListParser{}.parse(
-              duplicate.bytes,
-              0U)) ==
+    const auto rejected = goldsrc::ResourceListParser{}.parse(
+        duplicate.bytes, 0U);
+    CHECK(error_code(rejected) ==
           goldsrc::ResourceListErrorCode::duplicate_resource_identity);
+    REQUIRE(rejected.error);
+    CHECK(rejected.error->entry_index == 1U);
+    CHECK(rejected.error->context ==
+          "Resource-list repeats (type,index): type=2 index=7 "
+          "first_ordinal=0 repeated_ordinal=1");
+    CHECK(rejected.error->context.find("models/") == std::string::npos);
 
     const auto type_scoped = fixture::make_message({
         {2U, "same", 7U, 10U, 0U},
@@ -470,6 +535,130 @@ TEST_CASE("GoldSrc resource-list parser enforces the confirmed identity key",
     CHECK(accepted.state->entries()[0U].name().bytes() == "same");
     CHECK(accepted.state->entries()[1U].name().bytes() == "same");
     CHECK(accepted.state->entries()[2U].name().bytes() == "Same");
+}
+
+TEST_CASE("GoldSrc non-bindable decal rows retain independent wire metadata",
+          "[goldsrc][resource-list][duplicates][decal]")
+{
+    for (std::size_t count = 1U; count <= 3U; ++count) {
+        INFO("non-bindable decal count=" << count);
+        std::vector<fixture::EntrySpec> specs;
+        for (std::size_t ordinal = 0U; ordinal < count; ++ordinal) {
+            specs.push_back(fixture::EntrySpec{
+                3U, "{metadata" + std::to_string(ordinal), 4095U,
+                static_cast<std::uint32_t>(10U + ordinal),
+                static_cast<std::uint8_t>(ordinal & 1U)});
+        }
+        specs.push_back({3U, "{ordinary", 7U, 5U, 0U});
+        const auto message = fixture::make_message(specs);
+        const auto result = goldsrc::ResourceListParser{}.parse(message.bytes, 0U);
+        REQUIRE(result);
+        REQUIRE(result.state);
+        CHECK(result.state->resource_count() == count + 1U);
+        CHECK(result.state->type_summary().count(goldsrc::ResourceType::decal) ==
+              count + 1U);
+        CHECK(result.state->find_exact(goldsrc::ResourceType::decal, 4095U) ==
+              nullptr);
+        CHECK(result.state->find_exact(goldsrc::ResourceType::decal, 7U) ==
+              &result.state->entries().back());
+        std::size_t expected_name_bytes = 0U;
+        std::uint64_t expected_size_sum = 0U;
+        for (std::size_t ordinal = 0U; ordinal < specs.size(); ++ordinal) {
+            const auto& entry = result.state->entries()[ordinal];
+            CHECK(entry.wire_ordinal() == ordinal);
+            CHECK(entry.name().bytes() == specs[ordinal].name);
+            CHECK(entry.index().value() == specs[ordinal].index);
+            CHECK(entry.declared_size().raw_code() == specs[ordinal].size_code);
+            CHECK(entry.flags().wire_value() == specs[ordinal].flags);
+            expected_name_bytes += specs[ordinal].name.size();
+            expected_size_sum += specs[ordinal].size_code;
+        }
+        CHECK(result.state->total_name_byte_count() == expected_name_bytes);
+        CHECK(result.state->total_size_code_sum() == expected_size_sum);
+        CHECK(result.bits_consumed == message.bit_length);
+    }
+}
+
+TEST_CASE("GoldSrc decal compatibility does not allow indexed resource conflicts",
+          "[goldsrc][resource-list][duplicates][decal]")
+{
+    const std::array<std::pair<std::uint8_t, std::uint16_t>, 7U> keys{{
+        {0U, 4095U}, {2U, 4095U}, {4U, 4095U}, {5U, 4095U},
+        {3U, 0U}, {3U, 7U}, {3U, 4094U},
+    }};
+    for (const auto& [type, index] : keys) {
+        INFO("type=" << static_cast<unsigned>(type) << " index=" << index);
+        const auto message = fixture::make_message({
+            {type, "a", index, 10U, 0U},
+            {type, "b", index, 20U, 0U},
+        });
+        const auto result = goldsrc::ResourceListParser{}.parse(message.bytes, 0U);
+        CHECK(error_code(result) ==
+              goldsrc::ResourceListErrorCode::duplicate_resource_identity);
+        REQUIRE(result.error);
+        CHECK(result.error->entry_index == 1U);
+        CHECK(result.error->context ==
+              "Resource-list repeats (type,index): type=" +
+                  std::to_string(type) + " index=" + std::to_string(index) +
+                  " first_ordinal=0 repeated_ordinal=1");
+        CHECK(goldsrc::resource_has_bindable_index(
+            static_cast<goldsrc::ResourceType>(type), index));
+    }
+    CHECK_FALSE(goldsrc::resource_has_bindable_index(
+        goldsrc::ResourceType::decal, 4095U));
+}
+
+TEST_CASE("GoldSrc non-bindable decals still enforce framing and resource budgets",
+          "[goldsrc][resource-list][duplicates][decal][limits]")
+{
+    const auto message = fixture::make_message({
+        {3U, "a", 4095U, 10U, 0U},
+        {3U, "b", 4095U, 20U, 0U},
+        {3U, "c", 4095U, 30U, 0U},
+    });
+    SECTION("entry count cap")
+    {
+        goldsrc::ResourceListLimits limits;
+        limits.maximum_resource_count = 2U;
+        CHECK(error_code(goldsrc::ResourceListParser{limits}.parse(
+                  message.bytes, 0U)) ==
+              goldsrc::ResourceListErrorCode::resource_count_limit_exceeded);
+    }
+    SECTION("aggregate names cap includes every row")
+    {
+        goldsrc::ResourceListLimits limits;
+        limits.maximum_resource_name_length = 1U;
+        limits.maximum_resource_total_name_bytes = 2U;
+        CHECK(error_code(goldsrc::ResourceListParser{limits}.parse(
+                  message.bytes, 0U)) ==
+              goldsrc::ResourceListErrorCode::total_name_bytes_limit_exceeded);
+    }
+    SECTION("aggregate size metadata cap includes every row")
+    {
+        goldsrc::ResourceListLimits limits;
+        limits.maximum_resource_declared_size = 30U;
+        limits.maximum_resource_total_declared_size = 59U;
+        CHECK(error_code(goldsrc::ResourceListParser{limits}.parse(
+                  message.bytes, 0U)) ==
+              goldsrc::ResourceListErrorCode::total_declared_size_limit_exceeded);
+    }
+    SECTION("custom flags still require unsupported profile handling")
+    {
+        const auto custom = one_entry_message(3U, "a", 4095U, 10U, 4U);
+        CHECK(error_code(goldsrc::ResourceListParser{}.parse(custom.bytes, 0U)) ==
+              goldsrc::ResourceListErrorCode::unsupported_resource_profile);
+    }
+    SECTION("truncated metadata row is never accepted")
+    {
+        for (std::size_t bit_length = 8U;
+             bit_length < message.bit_length; ++bit_length) {
+            INFO("truncated bit length=" << bit_length);
+            const auto result = goldsrc::ResourceListParser{}.parse(
+                message.bytes, 0U, bit_length);
+            CHECK_FALSE(result);
+            REQUIRE(result.error);
+        }
+    }
 }
 
 TEST_CASE("GoldSrc resource-list parser treats the 24-bit size field as raw metadata",
@@ -532,7 +721,7 @@ TEST_CASE("GoldSrc resource-list parser treats the 24-bit size field as raw meta
     }
 }
 
-TEST_CASE("GoldSrc resource-list parser requires exact terminal zero fill and EOP",
+TEST_CASE("GoldSrc resource-list parser requires exact terminal framing and EOP",
           "[goldsrc][resource-list][padding]")
 {
     SECTION("aligned list consumes eight zero bits")
@@ -541,7 +730,7 @@ TEST_CASE("GoldSrc resource-list parser requires exact terminal zero fill and EO
         REQUIRE(message.padding_bit_count == 8U);
         REQUIRE(goldsrc::ResourceListParser{}.parse(message.bytes, 0U));
 
-        fixture::set_bit(message.bytes, message.padding_start_bit, true);
+        fixture::set_bit(message.bytes, message.padding_start_bit + 1U, true);
         CHECK(error_code(goldsrc::ResourceListParser{}.parse(
                   message.bytes,
                   0U)) ==
@@ -564,13 +753,21 @@ TEST_CASE("GoldSrc resource-list parser requires exact terminal zero fill and EO
               goldsrc::ResourceListErrorCode::nonzero_padding);
     }
 
-    SECTION("terminal fill is mandatory")
+    SECTION("the consistency enabled bit is mandatory")
     {
         const auto message = one_entry_message(4U, "x");
         CHECK(error_code(goldsrc::ResourceListParser{}.parse(
                   message.bytes,
                   0U,
                   message.padding_start_bit)) ==
+              goldsrc::ResourceListErrorCode::truncated_file_consistency);
+    }
+
+    SECTION("alignment padding after the disabled consistency bit is mandatory")
+    {
+        const auto message = one_entry_message(4U, "x");
+        CHECK(error_code(goldsrc::ResourceListParser{}.parse(
+                  message.bytes, 0U, message.padding_start_bit + 1U)) ==
               goldsrc::ResourceListErrorCode::truncated_padding);
     }
 
@@ -582,6 +779,195 @@ TEST_CASE("GoldSrc resource-list parser requires exact terminal zero fill and EO
                   message.bytes,
                   0U)) ==
               goldsrc::ResourceListErrorCode::unexpected_trailing_data);
+    }
+}
+
+TEST_CASE("GoldSrc file consistency preserves full-list ordinals and exact framing",
+          "[goldsrc][resource-list][file-consistency]")
+{
+    const auto base = fixture::make_message({
+        {3U, "decal-a", 4095U, 0U, 0U},
+        {3U, "decal-b", 4095U, 0U, 0U},
+        {2U, "models/test.mdl", 51U, 0U, 0U},
+    });
+    REQUIRE(base.padding_start_bit % 8U == 0U);
+    auto message = with_consistency_fields(base, {
+        {1U, 1U}, // enabled
+        {1U, 1U}, {1U, 1U}, {0U, 5U}, // ordinal 0
+        {1U, 1U}, {1U, 1U}, {1U, 5U}, // ordinal 1
+        {1U, 1U}, {1U, 1U}, {1U, 5U}, // ordinal 2
+        {0U, 1U}, // end
+    });
+    const std::array expected_tail{
+        std::byte{0x07U}, std::byte{0x87U}, std::byte{0x03U}};
+    REQUIRE(message.bytes.size() == base.padding_start_bit / 8U + expected_tail.size());
+    CHECK(std::equal(expected_tail.begin(), expected_tail.end(),
+                     message.bytes.begin() + base.padding_start_bit / 8U));
+
+    const auto parsed = goldsrc::ResourceListParser{}.parse(message.bytes, 0U);
+    REQUIRE(parsed);
+    CHECK(parsed.state->file_consistency_required());
+    CHECK(parsed.state->file_consistency_ordinals() ==
+          std::vector<std::uint16_t>{0U, 1U, 2U});
+    CHECK(parsed.state->find_exact(goldsrc::ResourceType::decal, 4095U) == nullptr);
+    CHECK(parsed.state->entries()[2U].index().value() == 51U);
+    CHECK(parsed.bytes_consumed == message.bytes.size());
+    CHECK(parsed.next_bit_offset == 0U);
+    const auto copied = *parsed.state;
+    std::fill(message.bytes.begin(), message.bytes.end(), std::byte{0xffU});
+    CHECK(copied.file_consistency_ordinals() == std::vector<std::uint16_t>{0U, 1U, 2U});
+
+    SECTION("enabled empty list still requires the actual empty reply")
+    {
+        const auto empty = with_consistency_fields(base, {{1U, 1U}, {0U, 1U}});
+        const auto result = goldsrc::ResourceListParser{}.parse(empty.bytes, 0U);
+        REQUIRE(result);
+        CHECK(result.state->file_consistency_required());
+        CHECK(result.state->file_consistency_ordinals().empty());
+    }
+}
+
+TEST_CASE("GoldSrc file consistency accepts absolute ordinals and bounded deltas above 1023",
+          "[goldsrc][resource-list][file-consistency]")
+{
+    std::vector<fixture::EntrySpec> entries;
+    for (std::uint16_t index = 0U; index < 1055U; ++index) {
+        entries.push_back({4U, "x", index, 0U, 0U});
+    }
+    const auto base = fixture::make_message(entries);
+    const auto message = with_consistency_fields(base, {
+        {1U, 1U},
+        {1U, 1U}, {0U, 1U}, {1023U, 10U},
+        {1U, 1U}, {1U, 1U}, {31U, 5U},
+        {0U, 1U},
+    });
+    const auto parsed = goldsrc::ResourceListParser{}.parse(message.bytes, 0U);
+    REQUIRE(parsed);
+    CHECK(parsed.state->file_consistency_ordinals() ==
+          std::vector<std::uint16_t>{1023U, 1054U});
+
+    // Three rows end at a byte boundary. Enabled + two seven-bit delta
+    // requests + terminator occupy exactly sixteen bits: no extra zero byte.
+    entries.resize(3U);
+    const auto aligned_base = fixture::make_message(entries);
+    auto aligned = with_consistency_fields(aligned_base, {
+        {1U, 1U}, {1U, 1U}, {1U, 1U}, {0U, 5U},
+        {1U, 1U}, {1U, 1U}, {1U, 5U}, {0U, 1U},
+    });
+    REQUIRE(aligned.padding_bit_count == 0U);
+    REQUIRE(goldsrc::ResourceListParser{}.parse(aligned.bytes, 0U));
+    aligned.bytes.push_back(std::byte{0U});
+    CHECK(error_code(goldsrc::ResourceListParser{}.parse(aligned.bytes, 0U)) ==
+          goldsrc::ResourceListErrorCode::unexpected_trailing_data);
+}
+
+TEST_CASE("GoldSrc file consistency can request the complete bounded resource list",
+          "[goldsrc][resource-list][file-consistency][limits]")
+{
+    std::vector<fixture::EntrySpec> entries;
+    std::vector<std::pair<std::uint32_t, std::size_t>> fields{{1U, 1U}};
+    for (std::uint16_t ordinal = 0U; ordinal < 4095U; ++ordinal) {
+        entries.push_back({4U, "x", ordinal, 0U, 0U});
+        fields.emplace_back(1U, 1U);
+        fields.emplace_back(1U, 1U);
+        fields.emplace_back(ordinal == 0U ? 0U : 1U, 5U);
+    }
+    fields.emplace_back(0U, 1U);
+    const auto message = with_consistency_fields(fixture::make_message(entries), fields);
+    const auto parsed = goldsrc::ResourceListParser{}.parse(message.bytes, 0U);
+    REQUIRE(parsed);
+    REQUIRE(parsed.state->file_consistency_ordinals().size() == entries.size());
+    for (std::size_t ordinal = 0U; ordinal < entries.size(); ++ordinal) {
+        CHECK(parsed.state->file_consistency_ordinals()[ordinal] == ordinal);
+    }
+}
+
+TEST_CASE("GoldSrc file consistency rejects malformed requests transactionally",
+          "[goldsrc][resource-list][file-consistency][malformed]")
+{
+    const auto base = fixture::make_message({
+        {4U, "x", 17U, 0U, 0U}, {4U, "y", 9U, 0U, 0U},
+        {4U, "z", 6U, 0U, 0U},
+    });
+    using Error = goldsrc::ResourceListErrorCode;
+    SECTION("delta past the resource count")
+    {
+        const auto message = with_consistency_fields(base, {
+            {1U, 1U}, {1U, 1U}, {1U, 1U}, {3U, 5U}, {0U, 1U}});
+        const auto parsed = goldsrc::ResourceListParser{}.parse(message.bytes, 0U);
+        CHECK(error_code(parsed) == Error::invalid_file_consistency_ordinal);
+        CHECK(parsed.error->context.find("ordinal=3 count=3") != std::string::npos);
+    }
+    SECTION("absolute ordinal outside the list")
+    {
+        const auto message = with_consistency_fields(base, {
+            {1U, 1U}, {1U, 1U}, {0U, 1U}, {1023U, 10U}, {0U, 1U}});
+        CHECK(error_code(goldsrc::ResourceListParser{}.parse(message.bytes, 0U)) ==
+              Error::invalid_file_consistency_ordinal);
+    }
+    SECTION("a repeated ordinal is not a second check")
+    {
+        const auto message = with_consistency_fields(base, {
+            {1U, 1U}, {1U, 1U}, {1U, 1U}, {1U, 5U},
+            {1U, 1U}, {1U, 1U}, {0U, 5U}, {0U, 1U}});
+        CHECK(error_code(goldsrc::ResourceListParser{}.parse(message.bytes, 0U)) ==
+              Error::unordered_file_consistency_ordinal);
+    }
+    SECTION("an absolute ordinal cannot move backwards")
+    {
+        const auto message = with_consistency_fields(base, {
+            {1U, 1U}, {1U, 1U}, {1U, 1U}, {2U, 5U},
+            {1U, 1U}, {0U, 1U}, {1U, 10U}, {0U, 1U}});
+        CHECK(error_code(goldsrc::ResourceListParser{}.parse(message.bytes, 0U)) ==
+              Error::unordered_file_consistency_ordinal);
+    }
+    SECTION("request count is capped before reading another row")
+    {
+        const auto message = with_consistency_fields(one_entry_message(), {
+            {1U, 1U}, {1U, 1U}, {1U, 1U}, {0U, 5U}, {1U, 1U}}, false);
+        CHECK(error_code(goldsrc::ResourceListParser{}.parse(
+                  message.bytes, 0U, message.bit_length)) ==
+              Error::file_consistency_request_limit_exceeded);
+    }
+    SECTION("all request field boundaries require their complete bit width")
+    {
+        const std::array<std::vector<std::pair<std::uint32_t, std::size_t>>, 4U>
+            truncated_fields{{
+                {{1U, 1U}},
+                {{1U, 1U}, {1U, 1U}},
+                {{1U, 1U}, {1U, 1U}, {1U, 1U}, {0U, 4U}},
+                {{1U, 1U}, {1U, 1U}, {0U, 1U}, {0U, 9U}},
+            }};
+        for (const auto& fields : truncated_fields) {
+            const auto message = with_consistency_fields(base, fields, false);
+            CHECK(error_code(goldsrc::ResourceListParser{}.parse(
+                      message.bytes, 0U, message.bit_length)) ==
+                  Error::truncated_file_consistency);
+        }
+    }
+    SECTION("every prefix is rejected without publishing partial state")
+    {
+        const auto message = with_consistency_fields(base, {
+            {1U, 1U}, {1U, 1U}, {0U, 1U}, {1U, 10U},
+            {1U, 1U}, {1U, 1U}, {1U, 5U}, {0U, 1U}});
+        REQUIRE(goldsrc::ResourceListParser{}.parse(message.bytes, 0U));
+        for (std::size_t bits = base.padding_start_bit; bits < message.bit_length; ++bits) {
+            INFO("bit length=" << bits);
+            static_cast<void>(error_code(goldsrc::ResourceListParser{}.parse(
+                message.bytes, 0U, bits)));
+        }
+    }
+    SECTION("nonzero alignment and extra trailing bytes remain invalid")
+    {
+        auto message = with_consistency_fields(base, {{1U, 1U}, {0U, 1U}});
+        REQUIRE(message.padding_bit_count > 0U);
+        fixture::set_bit(message.bytes, message.padding_start_bit, true);
+        CHECK(error_code(goldsrc::ResourceListParser{}.parse(message.bytes, 0U)) ==
+              Error::nonzero_padding);
+        fixture::set_bit(message.bytes, message.padding_start_bit, false);
+        message.bytes.push_back(std::byte{0U});
+        CHECK(error_code(goldsrc::ResourceListParser{}.parse(message.bytes, 0U)) ==
+              Error::unexpected_trailing_data);
     }
 }
 

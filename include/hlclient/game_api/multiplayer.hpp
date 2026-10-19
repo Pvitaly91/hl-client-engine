@@ -18,6 +18,13 @@ struct PlayerDisplayUpdate final {
   std::string name;
   PlayerAppearanceFields appearance;
 };
+// Server-observed connection statistics, already mapped to one-based slots.
+// Presence and occupant identity remain owned by the player directory.
+struct PlayerNetworkUpdate final {
+  std::uint32_t slot{};
+  std::uint16_t ping_ms{};
+  std::uint8_t packet_loss{};
+};
 struct MultiplayerPlayerHudEntry final {
   bool present{}, has_score{};
   std::string name, team;
@@ -28,6 +35,8 @@ struct MultiplayerPlayerHudEntry final {
   std::uint64_t occupant_epoch{};
   PlayerAppearanceFields appearance;
   std::uint64_t appearance_revision{};
+  std::optional<std::uint16_t> ping_ms;
+  std::optional<std::uint8_t> packet_loss;
 };
 struct MultiplayerTeamHudEntry final {
   std::string name;
@@ -61,6 +70,11 @@ struct MultiplayerHudState final {
   std::optional<std::uint32_t> local_slot;
   bool teamplay{};
 };
+// Immutable presentation pose for directional screen feedback. Body origin
+// and camera basis are observed locally; no entity/physics state is mutated.
+struct HudViewContext final {
+  std::array<double,3> player_origin{}, forward{}, right{};
+};
 struct HudPresentationContext final {
   std::uint32_t viewport_width{1280U}, viewport_height{720U};
   bool scoreboard_held{};
@@ -69,5 +83,6 @@ struct HudPresentationContext final {
   // module applies this optional user multiplier once to its own UI metrics.
   bool hud_scale_automatic{true};
   float hud_scale{1.0F};
+  std::optional<HudViewContext> view;
 };
 } // namespace hlclient::game_api

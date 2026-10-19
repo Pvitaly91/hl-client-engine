@@ -1724,4 +1724,96 @@ TEST_CASE("Effect diagnostics retain inert particle count/color and reject trunc
         goldsrc::effect_sample_fingerprint("common/bodysplat.wav"));
 }
 
+TEST_CASE("Runtime director length envelopes preserve exact cursor and inert metadata",
+          "[goldsrc][runtime-control][director-signon][security]") {
+  const goldsrc::RuntimeControlDecoder decoder;
+  for(const std::size_t start:{0U,7U})for(const std::size_t length:{0U,1U,255U}) {
+    CAPTURE(start,length);
+    std::vector<std::byte> wire(start,std::byte{254U}); // Outside the selected cursor.
+    wire.push_back(std::byte{51U});wire.push_back(static_cast<std::byte>(length));
+    const std::array opaque{std::byte{11U},std::byte{14U},std::byte{43U},std::byte{9U},
+      std::byte{'e'},std::byte{'x'},std::byte{'e'},std::byte{'c'},std::byte{' '},
+      std::byte{'x'},std::byte{0U},std::byte{57U},std::byte{'p'},std::byte{0U},
+      std::byte{58U},std::byte{255U},std::byte{255U},std::byte{255U},std::byte{255U},std::byte{0U}};
+    for(std::size_t i=0;i<length;++i)wire.push_back(opaque[i%opaque.size()]);
+    const auto next=start+length+2U;
+    wire.insert(wire.end(),{std::byte{7U},std::byte{0U},std::byte{0U},
+      std::byte{0x48U},std::byte{0x41U},std::byte{1U}}); // Actual svc_time(12.5), svc_nop.
+    auto payload=service_payload(wire);goldsrc::RuntimeControlState state{7U};
+    const auto result=decode(decoder,payload,state,start,0U,19U);
+    REQUIRE(result);REQUIRE(result.batch->events.size()==3U);
+    const auto& event=result.batch->events[0];
+    CHECK(event.opcode==goldsrc::RuntimeControlOpcode::svc_director);
+    CHECK(event.kind==goldsrc::RuntimeControlMessageKind::auxiliary_control);
+    const auto& body=std::get<goldsrc::RuntimeControlAuxiliaryControl>(event.body);
+    CHECK(body.body_size==length+1U);CHECK(body.text_length==0U);
+    CHECK_FALSE(body.request_id);CHECK_FALSE(body.value);
+    CHECK(event.provenance.start_cursor.byte_offset()==start);
+    CHECK(event.provenance.end_cursor.byte_offset()==next);
+    CHECK(event.provenance.start_cursor.bit_offset()==0U);
+    CHECK(event.provenance.end_cursor.bit_offset()==0U);
+    CHECK(event.provenance.source_generation==7U);
+    CHECK(event.provenance.source.source_sequence==91U);
+    CHECK(event.provenance.source.source_acknowledgement==73U);
+    CHECK(result.batch->start_cursor.byte_offset()==start);
+    CHECK(result.batch->end_cursor.byte_offset()==wire.size());
+    CHECK(result.batch->consumed_byte_count==wire.size()-start);
+    CHECK(result.batch->payload_ordinal==19U);
+    CHECK(result.batch->events[1].opcode==goldsrc::RuntimeControlOpcode::svc_time);
+    CHECK(result.batch->events[1].provenance.start_cursor.byte_offset()==next);
+    CHECK(result.batch->events[2].opcode==goldsrc::RuntimeControlOpcode::svc_nop);
+    REQUIRE(state.server_time());CHECK(state.server_time()->seconds==12.5F);
+    CHECK(state.committed_message_count()==3U);CHECK(payload.bytes==wire);
+    CHECK_FALSE(goldsrc::runtime_effect_diagnostic(event));
+  }
+}
+
+TEST_CASE("Runtime director truncations are atomic and never parse an embedded opcode",
+          "[goldsrc][runtime-control][director-signon][truncation]") {
+  const goldsrc::RuntimeControlDecoder decoder;
+  // A complete time prefix would mutate state if the transaction were partial.
+  const std::vector<std::byte> prefix{std::byte{7U},std::byte{0U},std::byte{0U},std::byte{0x48U},std::byte{0x41U}};
+  std::vector<std::byte> director{std::byte{51U},std::byte{255U}};
+  director.resize(257U,std::byte{11U});
+  for(std::size_t size=1U;size<director.size();++size) {
+    CAPTURE(size);
+    auto wire=prefix;wire.insert(wire.end(),director.begin(),director.begin()+static_cast<std::ptrdiff_t>(size));
+    goldsrc::RuntimeControlState state{7U};const auto before=state;
+    const auto result=decode(decoder,service_payload(wire),state);
+    require_error(result,goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+    CHECK(state==before);CHECK(result.error->wire_opcode==51U);
+    REQUIRE(result.error->cursor);CHECK(result.error->cursor->byte_offset()==prefix.size());
+    REQUIRE(result.error->failure_cursor);
+    // The shared length/body helper is transactional: only the service opcode
+    // has been consumed, never a guessed body or a scanned continuation.
+    CHECK(result.error->failure_cursor->byte_offset()==prefix.size()+1U);
+  }
+  auto wire=prefix;wire.insert(wire.end(),director.begin(),director.end());
+  const auto unsupported_offset=wire.size();
+  wire.insert(wire.end(),{std::byte{254U},std::byte{1U}});
+  goldsrc::RuntimeControlState state{7U};const auto before=state;
+  const auto rejected=decode(decoder,service_payload(wire),state);
+  require_error(rejected,goldsrc::RuntimeControlDecodeErrorCode::unsupported_opcode);
+  CHECK(state==before);CHECK(rejected.error->wire_opcode==254U);
+  REQUIRE(rejected.error->cursor);CHECK(rejected.error->cursor->byte_offset()==unsupported_offset);
+}
+
+TEST_CASE("Runtime director envelopes remain bounded by total messages and payload bytes",
+          "[goldsrc][runtime-control][director-signon][limits]") {
+  auto limits=goldsrc::RuntimeControlDecodeLimits{};limits.maximum_messages_per_payload=1U;
+  const goldsrc::RuntimeControlDecoder one{limits};
+  auto payload=service_payload({std::byte{51U},std::byte{0U}});
+  goldsrc::RuntimeControlState state{7U};
+  REQUIRE(decode(one,payload,state));CHECK(state.committed_message_count()==1U);
+  payload.bytes.push_back(std::byte{1U});
+  goldsrc::RuntimeControlState clean{7U};const auto before=clean;
+  require_error(decode(one,payload,clean),goldsrc::RuntimeControlDecodeErrorCode::message_limit_exceeded);
+  CHECK(clean==before);
+  limits.maximum_payload_bytes=256U;
+  const goldsrc::RuntimeControlDecoder bounded{limits};
+  payload=service_payload({std::byte{51U},std::byte{255U}});payload.bytes.resize(257U,std::byte{0U});
+  require_error(decode(bounded,payload,clean),goldsrc::RuntimeControlDecodeErrorCode::payload_too_large);
+  CHECK(clean==before);
+}
+
 } // namespace

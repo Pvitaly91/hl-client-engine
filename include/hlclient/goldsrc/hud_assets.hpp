@@ -2,6 +2,7 @@
 #include <hlclient/entity_render/sprite_render_asset.hpp>
 #include <hlclient/filesystem/file_system.hpp>
 #include <hlclient/game_api/hud_resources.hpp>
+#include <hlclient/game_api/text_messages.hpp>
 #include <hlclient/goldsrc/sound_assets.hpp>
 #include <cstdint>
 #include <memory>
@@ -19,6 +20,8 @@ struct HudPreparedSprite final {
 };
 struct HudPreparedAssets final {
     game_api::HudResourceSet resources;
+    game_api::TextMessageCatalogue text_messages;
+    game_api::HudResourceStatus text_messages_status{game_api::HudResourceStatus::missing_file};
     std::vector<HudPreparedSprite> sprites;
     std::size_t source_bytes{}, retained_decoded_bytes{}, ready_entries{}, rejected_entries{};
 };
@@ -33,7 +36,8 @@ struct HudPreparedAssets final {
 // The only production reader is bound to the selected approved world's root.
 class ApprovedHudAssets final {
 public:
-    ApprovedHudAssets(PreparedSoundResources, std::span<const game_api::HudManifestRequest>);
+    ApprovedHudAssets(PreparedSoundResources, std::span<const game_api::HudManifestRequest>,
+        std::string_view text_resource = {});
     ~ApprovedHudAssets();
     ApprovedHudAssets(const ApprovedHudAssets&) = delete;
     ApprovedHudAssets& operator=(const ApprovedHudAssets&) = delete;

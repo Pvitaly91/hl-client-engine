@@ -119,7 +119,11 @@ bool valid_resource_transition_stage_configuration(
                kMaximumResourceTransitionStageEvents &&
            config.maximum_driver_events_per_update > 0U &&
            config.maximum_driver_events_per_update <=
-               kMaximumResourceTransitionDriverEventsPerUpdate;
+               kMaximumResourceTransitionDriverEventsPerUpdate &&
+           config.maximum_pre_ack_payloads > 0U &&
+           config.maximum_pre_ack_payloads <= kMaximumTransitionPreAckPayloads &&
+           config.maximum_pre_ack_payload_bytes > 0U &&
+           config.maximum_pre_ack_payload_bytes <= kMaximumTransitionPreAckBytes;
 }
 
 ResourceTransitionSourcePayloadMetadata::
@@ -209,18 +213,25 @@ ResourceTransitionState::ResourceTransitionState(
     ResourceTransitionRequest request,
     ResourceTransitionControlState control,
     Opcode43Boundary boundary,
-    ResourceTransitionSourcePayloadMetadata source_payload) noexcept
+    ResourceTransitionSourcePayloadMetadata source_payload,
+    SignonUserInfoUpdates user_info_updates) noexcept
     : user_info_{std::move(user_info)},
       request_{std::move(request)},
       control_{std::move(control)},
       boundary_{std::move(boundary)},
-      source_payload_{std::move(source_payload)}
+      source_payload_{std::move(source_payload)},
+      user_info_updates_{std::move(user_info_updates)}
 {
 }
 
 const UserInfoSignonState& ResourceTransitionState::user_info() const noexcept
 {
     return user_info_;
+}
+
+const SignonUserInfoUpdates& ResourceTransitionState::user_info_updates() const noexcept
+{
+    return user_info_updates_;
 }
 
 const ResourceTransitionRequest& ResourceTransitionState::request() const noexcept
@@ -326,6 +337,7 @@ ResourceTransitionStage::ResourceTransitionStage(
           UserInfoSignonStage::RetainConnectionAtBoundary{}},
       event_slots_(configuration_valid_ ? config_.maximum_stage_events : 0U)
 {
+    if (configuration_valid_) pre_ack_payloads_.reserve(config_.maximum_pre_ack_payloads);
 }
 
 ResourceTransitionStage::~ResourceTransitionStage() = default;
@@ -427,10 +439,15 @@ void ResourceTransitionStage::update(const ResourceTransitionStageTimePoint now)
         return;
     }
 
+    promote_pre_ack_payload();
     if (pending_decode_payload_) {
         decode_pending_payload(now);
         if (terminal_state(state_) || pending_decode_payload_) {
             return;
+        }
+        if (!pre_ack_payloads_.empty()) {
+            promote_pre_ack_payload();
+            return; // One queued owning payload per update before later driver events.
         }
     }
 
@@ -879,13 +896,19 @@ void ResourceTransitionStage::handle_request_acknowledgement(
         request_ ? request_->message_bytes() : 0U,
         request_ ? std::optional{static_cast<std::uint8_t>(request_->opcode())}
                  : std::nullopt);
-    if (pre_ack_payload_) {
-        pending_decode_payload_.emplace(std::move(*pre_ack_payload_));
-        pending_decode_payload_ordinal_ = pre_ack_payload_ordinal_;
-        pre_ack_payload_.reset();
-        pre_ack_payload_ordinal_.reset();
-        state_ = ResourceTransitionStageState::decoding_transition_control;
-    }
+    promote_pre_ack_payload();
+}
+
+void ResourceTransitionStage::promote_pre_ack_payload() noexcept
+{
+    if (!request_acknowledged_ || pending_decode_payload_ || pre_ack_payloads_.empty()) return;
+    pre_ack_payload_bytes_ -= pre_ack_payloads_.front().bytes.size();
+    pending_decode_payload_.emplace(std::move(pre_ack_payloads_.front()));
+    pending_decode_payload_ordinal_ = pre_ack_payload_ordinal_;
+    pre_ack_payloads_.erase(pre_ack_payloads_.begin());
+    if (pre_ack_payloads_.empty()) pre_ack_payload_ordinal_.reset();
+    else ++*pre_ack_payload_ordinal_;
+    state_ = ResourceTransitionStageState::decoding_transition_control;
 }
 
 void ResourceTransitionStage::handle_payload(
@@ -909,16 +932,21 @@ void ResourceTransitionStage::handle_payload(
     }
     const auto payload_ordinal = ++received_nonempty_payload_count_;
     if (!request_acknowledged_) {
-        if (pre_ack_payload_) {
+        if (pre_ack_payloads_.size() >= config_.maximum_pre_ack_payloads ||
+            payload.bytes.size() > config_.maximum_pre_ack_payload_bytes - pre_ack_payload_bytes_) {
             fail(
                 ResourceTransitionStageErrorCode::service_payload_before_ack_overflow,
                 ResourceTransitionStageState::protocol_error,
-                "More than one second service payload arrived before request ACK",
+                "Pre-ACK service queue exceeds its bound: count=" +
+                    std::to_string(pre_ack_payloads_.size()) + " bytes=" +
+                    std::to_string(pre_ack_payload_bytes_) + " incoming=" +
+                    std::to_string(payload.bytes.size()),
                 now);
             return;
         }
-        pre_ack_payload_.emplace(std::move(payload));
-        pre_ack_payload_ordinal_ = payload_ordinal;
+        if (pre_ack_payloads_.empty()) pre_ack_payload_ordinal_ = payload_ordinal;
+        pre_ack_payload_bytes_ += payload.bytes.size();
+        pre_ack_payloads_.push_back(std::move(payload));
         return;
     }
     if (pending_decode_payload_) {
@@ -1132,13 +1160,28 @@ void ResourceTransitionStage::decode_pending_payload(
             return;
         }
         const auto& event = *decoded_message.event;
-        if (event.kind != RuntimeControlMessageKind::nop ||
-            event.opcode != RuntimeControlOpcode::svc_nop) {
+        const bool inert_nop = event.kind == RuntimeControlMessageKind::nop &&
+            event.opcode == RuntimeControlOpcode::svc_nop;
+        const bool inert_text = event.kind == RuntimeControlMessageKind::text_control &&
+            (event.opcode == RuntimeControlOpcode::svc_print ||
+             event.opcode == RuntimeControlOpcode::svc_stufftext);
+        const bool inert_query = event.kind == RuntimeControlMessageKind::auxiliary_control &&
+            (event.opcode == RuntimeControlOpcode::svc_sendcvarvalue ||
+             event.opcode == RuntimeControlOpcode::svc_sendcvarvalue2);
+        const bool inert_director = event.kind == RuntimeControlMessageKind::auxiliary_control &&
+            event.opcode == RuntimeControlOpcode::svc_director;
+        const auto* identity_update = event.kind == RuntimeControlMessageKind::user_info_update &&
+            event.opcode == RuntimeControlOpcode::svc_updateuserinfo
+            ? std::get_if<RuntimeControlUserInfoUpdate>(&event.body) : nullptr;
+        // Customized servers can interleave these controls during sign-on.
+        // Commands/queries stay inert. Typed directory updates are retained
+        // separately and applied only by the owning runtime initialization.
+        if (!inert_nop && !inert_text && !inert_query && !inert_director && !identity_update) {
             fail(
                 ResourceTransitionStageErrorCode::
                     unexpected_intermediate_message,
                 ResourceTransitionStageState::unsupported_message,
-                "Only a decoder-validated svc_nop is permitted before resource transition control",
+                "Unsupported decoded control before resource transition control",
                 now,
                 std::nullopt,
                 std::nullopt,
@@ -1181,6 +1224,7 @@ void ResourceTransitionStage::decode_pending_payload(
             return;
         }
         last_intermediate_message_byte_offset_ = transition_cursor;
+        if (identity_update) user_info_updates_[identity_update->client_index] = *identity_update;
         last_intermediate_message_end_byte_offset_ = end_cursor;
         last_intermediate_payload_ordinal_ = payload_ordinal;
         last_intermediate_source_sequence_ = envelope.payload.source_sequence;
@@ -1189,14 +1233,14 @@ void ResourceTransitionStage::decode_pending_payload(
             ResourceTransitionStageEventType::intermediate_message_decoded,
             transition_cursor,
             end_cursor - transition_cursor,
-            static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop),
+            static_cast<std::uint8_t>(event.opcode),
             now,
         });
         emit_trace(
             ResourceTransitionTraceClassification::intermediate_message_decoded,
             transition_cursor,
             end_cursor - transition_cursor,
-            static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop));
+            static_cast<std::uint8_t>(event.opcode));
         transition_cursor = end_cursor;
         ++payload_message_ordinal;
     }
@@ -1248,6 +1292,26 @@ void ResourceTransitionStage::decode_pending_payload(
         return;
     }
     if (!*parsed || !parsed->state || !parsed->boundary) {
+        if (parsed->error) {
+            using Code = ResourceTransitionControlErrorCode;
+            switch (parsed->error->code) {
+            case Code::wrong_next_boundary_opcode:
+            case Code::missing_next_boundary:
+            case Code::truncated_next_boundary_body:
+                // The fixed body and optional resource-location string were
+                // consumed exactly. Report the failing next-message cursor,
+                // rather than the original opcode-45 cursor.
+                failure_metadata = make_failure_metadata(parsed->error->byte_offset);
+                failure_metadata.expected_opcode =
+                    kPostResourceTransitionControlBoundaryOpcode;
+                break;
+            default:
+                // Body/string errors do not establish an opcode boundary;
+                // retain the known start, not an arbitrary resource URL byte.
+                break;
+            }
+            failure_metadata.parser_error_byte_offset = parsed->error->byte_offset;
+        }
         failure_metadata.parser_error = parsed->error
             ? std::optional{parsed->error->code}
             : std::nullopt;
@@ -1307,7 +1371,8 @@ void ResourceTransitionStage::decode_pending_payload(
             *request_,
             std::move(*parsed->state),
             std::move(*parsed->boundary),
-            source_metadata};
+            source_metadata,
+            user_info_updates_};
         candidate_result.emplace(std::move(built_result));
     } catch (...) {
         fail(
@@ -1319,6 +1384,17 @@ void ResourceTransitionStage::decode_pending_payload(
     }
 
     if (retain_connection_at_boundary_) {
+        auto* const driver = user_info_stage_.retained_driver();
+        if (!pre_ack_payloads_.empty() &&
+            (driver == nullptr || !driver->prepend_retained_payloads(pre_ack_payloads_))) {
+            fail(ResourceTransitionStageErrorCode::event_backpressure,
+                ResourceTransitionStageState::backpressure,
+                "Unable to atomically restore queued post-boundary payloads to the retained driver", now);
+            return;
+        }
+        pre_ack_payloads_.clear();
+        pre_ack_payload_bytes_ = 0U;
+        pre_ack_payload_ordinal_.reset();
         retained_source_payload_.emplace(std::move(envelope.payload));
     }
     result_.emplace(std::move(*candidate_result));
@@ -1526,7 +1602,9 @@ void ResourceTransitionStage::cleanup(
     }
     cleanup_done_ = true;
     user_info_stage_.finalize_retained_boundary(now);
-    pre_ack_payload_.reset();
+    pre_ack_payloads_.clear();
+    pre_ack_payload_bytes_ = 0U;
+    user_info_updates_ = {};
     pending_decode_payload_.reset();
     pre_ack_payload_ordinal_.reset();
     pending_decode_payload_ordinal_.reset();

@@ -61,6 +61,9 @@ public:
   [[nodiscard]] std::optional<double> velocity_z_for(
       const hlclient::movement::PlayerMovementHitIdentity& hit) const noexcept;
   [[nodiscard]] std::span<const movement::ServerEntityCollisionBox> entity_boxes() const noexcept { return current_.boxes; }
+  // Actual committed source clock of the current pusher observation, not an
+  // inferred prior command time or an extrapolated presentation timestamp.
+  [[nodiscard]] std::optional<double> source_time_seconds() const noexcept { return current_.server_time; }
   [[nodiscard]] std::shared_ptr<const collision::BrushCollisionScene>
       sample(double server_seconds) const;
   [[nodiscard]] float displacement(const hlclient::movement::PlayerMovementHitIdentity& hit,

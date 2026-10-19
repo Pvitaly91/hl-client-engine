@@ -227,7 +227,8 @@ private:
     const bool reliable,
     const std::uint32_t acknowledgement,
     const bool reliable_acknowledgement,
-    std::vector<std::byte> payload)
+    std::vector<std::byte> payload,
+    const std::size_t maximum_datagram_size = goldsrc::kDefaultNetchanDatagramSize)
 {
     const goldsrc::ServerToClientNetchanPacket packet{
         goldsrc::NetchanHeader{
@@ -243,7 +244,8 @@ private:
         {},
         std::move(payload),
     };
-    auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
+    auto encoded = goldsrc::encode_server_to_client_netchan_packet(
+        packet, {maximum_datagram_size});
     REQUIRE(encoded);
     REQUIRE(encoded.datagram);
     return std::move(*encoded.datagram);
@@ -610,6 +612,122 @@ TEST_CASE("Resource-list stage atomically publishes the list and response bounda
     CHECK(transport.sent.size() == sends_at_boundary);
     CHECK(stage.cleanup_count() == 1U);
     CHECK(releases == 1U);
+}
+
+TEST_CASE("Resource-list stage publishes the full 12-bit count within coordinated event limits",
+          "[goldsrc][resource-list][stage][limits][public-server][no-stock]")
+{
+    constexpr std::size_t count = 4095U;
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'850U);
+    const auto epoch = goldsrc::ResourceListStageTimePoint{} + 1s;
+    auto config = test_config();
+    config.maximum_stage_events = goldsrc::ResourceListStageConfig{}.maximum_stage_events;
+    // A synthetic single datagram substitutes for reliable fragmentation in
+    // this stage-only test; production transport bounds are unchanged.
+    config.transition.user_info.movement_environment.delta.pre_resource
+        .initial_signon.driver.maximum_datagram_size = goldsrc::kMaximumNetchanDatagramSize;
+    bool expect_backpressure = false;
+    SECTION("default exact publication capacity") {}
+    SECTION("one missing event remains transactionally rejected") {
+        --config.maximum_stage_events;
+        expect_backpressure = true;
+    }
+    REQUIRE(config.maximum_stage_events == count + (expect_backpressure ? 2U : 3U));
+    goldsrc::ResourceListStage stage{transport, remote, config};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+    std::vector<std::byte> semantic{
+        std::byte{45U}, std::byte{1U}, std::byte{0U}, std::byte{0U}, std::byte{0U},
+        std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{43U}};
+    std::size_t bit_cursor = semantic.size() * 8U;
+    append_lsb_bits(semantic, bit_cursor, static_cast<std::uint32_t>(count), 12U);
+    for (std::size_t index = 0U; index < count; ++index)
+        append_resource_entry(semantic, bit_cursor, 4U, "x",
+            static_cast<std::uint16_t>(index), 0U, 0U);
+    append_lsb_bits(semantic, bit_cursor, 0U, 8U - (bit_cursor & 7U));
+    REQUIRE(semantic.size() < goldsrc::kDefaultMaximumSecondServicePayloadSize);
+    transport.queue(remote, server_packet(2U, false,
+        driven.transition_request.header.sequence.sequence.value(), false,
+        service_envelope(semantic), goldsrc::kMaximumNetchanDatagramSize));
+    stage.update(epoch + 4ms);
+    if (expect_backpressure) {
+        CHECK(stage.state() == goldsrc::ResourceListStageState::backpressure);
+        CHECK_FALSE(stage.result());
+        REQUIRE(stage.error());
+        CHECK(stage.error()->code == goldsrc::ResourceListStageErrorCode::event_backpressure);
+        CHECK(stage.pending_event_count() == 1U);
+        const auto event = stage.poll_event();
+        REQUIRE(event);
+        CHECK(event->type == goldsrc::ResourceListStageEventType::backpressure);
+    } else {
+        REQUIRE(stage.state() == goldsrc::ResourceListStageState::client_response_required);
+        REQUIRE(stage.result());
+        CHECK(stage.result()->resource_list().resource_count() == count);
+        CHECK(stage.pending_event_count() == count + 3U);
+        std::size_t entries = 0U;
+        while (const auto event = stage.poll_event())
+            if (event->type == goldsrc::ResourceListStageEventType::resource_entry_metadata) ++entries;
+        CHECK(entries == count);
+    }
+}
+
+TEST_CASE("Resource-list stage decodes the relocated list after compressed FastDL metadata",
+          "[goldsrc][resource-list][stage][fastdl][bzip2][cursor][security][regression]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'812U);
+    const auto epoch = goldsrc::ResourceListStageTimePoint{} + 1s;
+    ForbiddenResourceConsumerCallCounts forbidden_calls;
+    MetadataOnlyResourceIsolationMock isolation_mock{forbidden_calls};
+    goldsrc::ResourceListStage stage{
+        transport, remote, test_config(),
+        {}, {}, {}, {}, {}, {},
+        goldsrc::ResourceListTraceCallback{std::ref(isolation_mock)}};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+
+    constexpr std::string_view location{"https://cdn.invalid/hl/+8/"};
+    std::vector<std::byte> location_message{std::byte{56U}};
+    for (const char character : location) {
+        location_message.push_back(static_cast<std::byte>(
+            static_cast<unsigned char>(character)));
+    }
+    location_message.push_back(std::byte{0U});
+    auto semantic = resource_semantic_payload();
+    semantic.insert(
+        semantic.begin() + static_cast<std::ptrdiff_t>(
+            goldsrc::kResourceTransitionControlMessageSize),
+        location_message.begin(), location_message.end());
+    // Preserve a nonzero opcode-45 cursor as well as the additional location.
+    semantic.insert(semantic.begin(), std::byte{1U});
+    const auto expected_list_offset = 1U +
+        goldsrc::kResourceTransitionControlMessageSize + location_message.size();
+    const auto expected_payload_size = semantic.size();
+    deliver_resource_payload(
+        stage, transport, remote, driven, epoch + 4ms, std::move(semantic));
+
+    REQUIRE(stage.state() == goldsrc::ResourceListStageState::client_response_required);
+    REQUIRE(stage.result());
+    CHECK_FALSE(stage.error());
+    const auto& result = *stage.result();
+    CHECK(result.transition().control().source_message_offset() == 1U);
+    CHECK(result.transition().boundary().byte_offset() == expected_list_offset);
+    CHECK(result.transition().source_payload().decompressed());
+    CHECK(result.resource_list().source_opcode_byte_offset() == expected_list_offset);
+    CHECK(result.resource_list().next_byte_offset() == expected_payload_size);
+    REQUIRE(result.resource_list().entries().size() == 2U);
+    CHECK(result.resource_list().entries()[0U].name().bytes() == "models/test_model.mdl");
+    CHECK(result.resource_list().entries()[1U].name().bytes() == "sound/test_sound.wav");
+    CHECK(result.boundary().kind() == goldsrc::PostResourceListBoundaryKind::exact_end_of_payload);
+    CHECK(result.boundary().remaining_byte_count() == 0U);
+    CHECK(stage.pending_event_count() == 5U);
+    CHECK(stage.response_queue_count() == 0U);
+    CHECK(stage.cleanup_count() == 1U);
+    CHECK(isolation_mock.entry_metadata_calls == 2U);
+    CHECK(isolation_mock.observed_name_byte_count ==
+          std::string_view{"models/test_model.mdl"}.size() +
+          std::string_view{"sound/test_sound.wav"}.size());
+    CHECK(forbidden_calls.total() == 0U);
+    CHECK(forbidden_calls.download_starts == 0U);
 }
 
 TEST_CASE("Resource-list stage isolation seam exposes names as metadata only",

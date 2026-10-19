@@ -241,7 +241,7 @@ TEST_CASE("E18 zoomed fire retains FOV and server Python death notice score rema
     auto scored=m.host.stage_record({&m.observed,m.observed,scores,1,8});REQUIRE(scored);
     CHECK(scored.state->multiplayer.players[1].frags==1);
 }
-TEST_CASE("E18 horizontal game FOV converts at three actual aspects without input pose or physics change", "[e18][game-api][camera]") {
+TEST_CASE("E18 horizontal game FOV retains stock reference-aspect coverage without input pose or physics change", "[e18][game-api][camera]") {
     for(const double aspect:{4.0/3.0,16.0/9.0,16.0/10.0}) {
         f::Module m;input::InputStateTracker tracker;hlclient::app::LiveVisualCameraController controller;
         c::ClientWorldState world;const auto normal=m.host.camera(m.observed,0);
@@ -249,7 +249,8 @@ TEST_CASE("E18 horizontal game FOV converts at three actual aspects without inpu
         const auto baseline=world.camera();fov(m,40,2,true);
         REQUIRE(controller.update(&m.observed,neutral_intent(tracker),world,m.host.camera(m.observed,0),false,{},aspect));
         constexpr double rad=.01745329251994329577;
-        CHECK(world.camera().vertical_field_of_view_radians==Approx(2*std::atan(std::tan(20*rad)/aspect)));
+        CHECK(normal.field_of_view_reference_aspect_ratio==4./3.);
+        CHECK(world.camera().vertical_field_of_view_radians==Approx(2*std::atan(std::tan(20*rad)/(4./3.))));
         CHECK(f::same(world.camera().position,baseline.position));CHECK(f::same(world.camera().target,baseline.target));
         CHECK(controller.yaw_degrees()==0);CHECK(controller.pitch_degrees()==0);
         fov(m,0,3,true);

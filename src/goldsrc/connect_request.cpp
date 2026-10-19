@@ -215,7 +215,7 @@ template<class Result>
     std::size_t& result) noexcept
 {
     // Header + "connect " + "48 " + challenge + SP + two quoted arguments,
-    // the one inter-argument SP, and the undelimited binary suffix.
+    // the inter-argument SP, the text line's LF, and the opaque binary suffix.
     result = kConnectionlessPacketHeaderSize;
     return checked_connect_request_size_add(result, kConnectPrefix.size(), result) &&
            checked_connect_request_size_add(result, kProtocolVersionText.size() + 1U, result) &&
@@ -223,6 +223,7 @@ template<class Result>
            checked_connect_request_size_add(result, protocol_info_size + 2U, result) &&
            checked_connect_request_size_add(result, 1U, result) &&
            checked_connect_request_size_add(result, user_info_size + 2U, result) &&
+           checked_connect_request_size_add(result, 1U, result) &&
            checked_connect_request_size_add(result, authentication_suffix_size, result);
 }
 
@@ -597,6 +598,9 @@ ConnectRequestBuildResult ConnectRequestBuilder::build(
     payload += "\" \"";
     payload += request.user_info_.value().serialized();
     payload.push_back('"');
+    // GoldSrc reads the connectionless text line before handing the remaining
+    // bytes to Steam. Terminate that line, never the opaque ticket itself.
+    payload.push_back('\n');
 
     auto payload_bytes = text_as_bytes(payload);
     payload_bytes.insert(
@@ -720,6 +724,16 @@ ConnectRequestParseResult parse_connect_request(
     }
     const auto user_text = text.substr(position, user_quote_end - position);
     position = user_quote_end + 1U;
+
+    if (position >= payload.size() || payload[position] != std::byte{'\n'}) {
+        return failure<ConnectRequestParseResult>(
+            ConnectRequestErrorCode::invalid_terminator,
+            kConnectionlessPacketHeaderSize + position,
+            "Connect text header must end with LF before authentication material");
+    }
+    // Consume exactly one byte: a ticket may itself start with LF, NUL or any
+    // other value, so whitespace trimming would corrupt authentication.
+    ++position;
 
     const auto suffix_size = payload.size() - position;
     if (!valid_binary_authentication_size(profile, suffix_size)) {

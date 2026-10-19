@@ -730,7 +730,11 @@ public:
         const EntitySnapshotReference& reference);
     [[nodiscard]] EntitySnapshotHistoryMutationResult release_required_base(
         const EntitySnapshotReference& reference);
-    [[nodiscard]] EntitySnapshotHistoryPublishResult publish() const;
+    [[nodiscard]] EntitySnapshotHistoryPublishResult publish() const &;
+    // A disposable transaction can transfer its owning vectors directly.
+    // Successful publication leaves a reusable empty builder; const/lvalue
+    // publication retains the independent owning-copy contract above.
+    [[nodiscard]] EntitySnapshotHistoryPublishResult publish() &&;
     [[nodiscard]] std::size_t candidate_snapshot_count() const noexcept;
 
 private:

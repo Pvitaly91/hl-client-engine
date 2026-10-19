@@ -325,6 +325,8 @@ in vec3 fragment_light;
 in vec3 fragment_world_position;
 uniform sampler2D u_texture;
 uniform int u_masked;
+uniform float u_opacity;
+uniform vec3 u_tint;
 uniform vec3 u_point_light_center;
 uniform vec3 u_point_light_color;
 uniform float u_point_light_radius;
@@ -353,7 +355,7 @@ void main()
         light_factor+=u_effect_light_color_intensity[i].rgb *
             (u_effect_light_color_intensity[i].w*falloff*falloff);
     }
-    output_color = vec4(sampled.rgb * light_factor, sampled.a);
+    output_color = vec4(sampled.rgb * light_factor * u_tint, sampled.a * u_opacity);
 }
 )GLSL";
 
@@ -414,6 +416,8 @@ struct StudioProgram {
     GLint camera_position{-1};
     GLint chrome{-1};
     GLint masked{-1};
+    GLint opacity{-1};
+    GLint tint{-1};
     GLint static_light_rgb{-1};
     GLint light_direction{-1};
     GLint directional_light{-1};
@@ -457,6 +461,8 @@ struct SpriteProgram {
     result.camera_position = glGetUniformLocation(name, "u_camera_position");
     result.chrome = glGetUniformLocation(name, "u_chrome");
     result.masked = glGetUniformLocation(name, "u_masked");
+    result.opacity = glGetUniformLocation(name, "u_opacity");
+    result.tint = glGetUniformLocation(name, "u_tint");
     result.static_light_rgb = glGetUniformLocation(name, "u_static_light_rgb");
     result.light_direction = glGetUniformLocation(name, "u_light_direction");
     result.directional_light = glGetUniformLocation(name, "u_directional_light");
@@ -472,7 +478,8 @@ struct SpriteProgram {
         result.texture_dimensions < 0 || result.camera_forward < 0 ||
         result.camera_up < 0 || result.camera_position < 0 || result.chrome < 0 ||
         result.light_direction < 0 || result.directional_light < 0 || result.flatshade < 0 ||
-        result.masked < 0 || result.static_light_rgb < 0 || result.point_light_center < 0 ||
+        result.masked < 0 || result.opacity < 0 || result.tint < 0 ||
+        result.static_light_rgb < 0 || result.point_light_center < 0 ||
         result.point_light_color < 0 || result.point_light_radius < 0 ||
         result.point_light_intensity < 0 || !result.effect_lights.valid() || texture < 0 ||
         block == GL_INVALID_INDEX) {
@@ -880,6 +887,12 @@ public:
         statistics_.entity_frame_revision = 0U;
     }
 
+    void reset_session_resources() noexcept
+    {
+        release_resources();
+        statistics_ = {};
+    }
+
     [[nodiscard]] EntitySceneGpu& ensure_scene(
         const std::shared_ptr<const entity_render::EntitySceneRenderPackage>& package)
     {
@@ -979,6 +992,8 @@ public:
             entity_render::RuntimeEntityVisibilityStatus::visible) {
             return;
         }
+        const bool translucent = instance.blend_mode != entity_render::StudioBlendMode::opaque;
+        if (translucent && instance.opacity == 0.0F) return;
         if (instance.studio_asset_index >= gpu.studio.size() ||
             instance.pose_index >= frame.studio_poses().size()) {
             fail_entity(OpenGlRendererErrorCode::entity_draw_invalid,
@@ -1004,6 +1019,20 @@ public:
                 "Studio bodypart selection failed at draw time");
         }
         glUseProgram(studio_program_.program.name());
+        if (translucent) {
+            glEnable(GL_BLEND);
+            glDepthMask(GL_FALSE);
+            if (instance.blend_mode == entity_render::StudioBlendMode::additive)
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
+            else
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                    GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        } else {
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+        }
+        glUniform1f(studio_program_.opacity, translucent ? instance.opacity : 1.0F);
+        glUniform3f(studio_program_.tint, instance.tint[0], instance.tint[1], instance.tint[2]);
         glUniformMatrix4fv(studio_program_.view_projection, 1, GL_FALSE,
             view_projection.values.data());
         glUniformMatrix4fv(studio_program_.entity_transform, 1, GL_FALSE,
@@ -1299,7 +1328,7 @@ public:
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
             glDisable(GL_CULL_FACE);
-            for (const auto& command : frame.draw_commands()) {
+            const auto draw = [&](const entity_render::EntityDrawCommand& command) {
                 switch (command.visual_kind) {
                 case entity_render::RuntimeEntityVisualKind::studio_model:
                     draw_studio(gpu, frame, command, camera, view_projection, light,effect_lights,light_direction);
@@ -1311,12 +1340,50 @@ public:
                     fail_entity(OpenGlRendererErrorCode::entity_draw_invalid,
                         "Unsupported entity kind reached the draw list");
                 }
+            };
+            // Camera-independent frames retain their stable draw identities.
+            // Execute opaque geometry first, then compose all translucent
+            // Studio/sprite instances back-to-front against that same depth.
+            translucent_commands_.clear();
+            const auto translucent = [&](const entity_render::EntityDrawCommand& command) {
+                if (command.visual_kind == entity_render::RuntimeEntityVisualKind::studio_model)
+                    return frame.studio_instances()[command.instance_index].blend_mode !=
+                        entity_render::StudioBlendMode::opaque;
+                if (command.visual_kind != entity_render::RuntimeEntityVisualKind::sprite) return false;
+                const auto& instance = frame.sprite_instances()[command.instance_index];
+                if (instance.blend_mode != entity_render::SpriteBlendMode::source_asset_default)
+                    return instance.blend_mode != entity_render::SpriteBlendMode::opaque;
+                const auto& asset = *gpu.sprites[instance.sprite_asset_index]->owner;
+                const auto profile = asset.frames()[instance.selected_frame_index].profile;
+                return profile == entity_render::SpriteRenderTextureProfile::additive ||
+                    profile == entity_render::SpriteRenderTextureProfile::index_alpha;
+            };
+            for (const auto& command : frame.draw_commands()) {
+                if (translucent(command)) translucent_commands_.push_back(&command);
+                else draw(command);
             }
+            const auto forward = subtract(camera.target, camera.position);
+            const auto depth = [&](const entity_render::EntityDrawCommand& command) {
+                const auto& origin = command.visual_kind == entity_render::RuntimeEntityVisualKind::studio_model
+                    ? frame.studio_instances()[command.instance_index].transform.origin
+                    : frame.sprite_instances()[command.instance_index].transform.origin;
+                return (static_cast<double>(origin.x) - camera.position.x) * forward.x +
+                    (static_cast<double>(origin.y) - camera.position.y) * forward.y +
+                    (static_cast<double>(origin.z) - camera.position.z) * forward.z;
+            };
+            std::sort(translucent_commands_.begin(), translucent_commands_.end(),
+                [&](const auto* left, const auto* right) {
+                    const auto a = depth(*left), b = depth(*right);
+                    return a != b ? a > b : left < right;
+                });
+            for (const auto* command : translucent_commands_) draw(*command);
+            translucent_commands_.clear();
             bind_neutral_entity_state();
             require_gl("OpenGL entity draw failed");
             ++statistics_.entity_frame_count;
         } catch (...) {
             statistics_ = retained_statistics;
+            translucent_commands_.clear();
             bind_neutral_entity_state();
             discard_gl_errors_bounded();
             throw;
@@ -1334,6 +1401,7 @@ private:
     SpriteProgram sprite_program_;
     SpriteQuad sprite_quad_;
     Object pose_buffer_;
+    std::vector<const entity_render::EntityDrawCommand*> translucent_commands_;
     std::optional<EntitySceneGpu> scene_;
     OpenGlEntityRendererStatistics statistics_{};
 };
@@ -1361,6 +1429,11 @@ void OpenGlEntityRendererBackend::render(
 void OpenGlEntityRendererBackend::release_resources() noexcept
 {
     implementation_->release_resources();
+}
+
+void OpenGlEntityRendererBackend::reset_session_resources() noexcept
+{
+    implementation_->reset_session_resources();
 }
 
 const OpenGlEntityRendererStatistics& OpenGlEntityRendererBackend::statistics()

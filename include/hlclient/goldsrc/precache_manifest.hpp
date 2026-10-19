@@ -13,7 +13,8 @@
 namespace hlclient::goldsrc {
 
 // Project safety limits, not stock-engine maxima.
-inline constexpr std::size_t kDefaultMaximumPrecacheManifestEntries = 1'024U;
+inline constexpr std::size_t kDefaultMaximumPrecacheManifestEntries =
+    kDefaultMaximumResourceCount;
 inline constexpr std::size_t kMaximumPrecacheManifestEntries = 4'095U;
 inline constexpr std::size_t kDefaultMaximumPrecacheSlotsPerType = 4'096U;
 inline constexpr std::size_t kMaximumPrecacheSlotsPerType = 4'096U;

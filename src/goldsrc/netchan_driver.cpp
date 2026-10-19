@@ -1,5 +1,6 @@
 #include <hlclient/goldsrc/netchan_driver.hpp>
 #include <hlclient/goldsrc/disconnect_request.hpp>
+#include <hlclient/core/multiplayer_diagnostics.hpp>
 
 #include <algorithm>
 #include <array>
@@ -289,6 +290,13 @@ public:
         head_ = (head_ + 1U) % slots_.size();
         --size_;
         return event;
+    }
+
+    void push_front(NetchanDriverEvent event) noexcept
+    {
+        head_ = (head_ + slots_.size() - 1U) % slots_.size();
+        slots_[head_].emplace(std::move(event));
+        ++size_;
     }
 
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
@@ -609,10 +617,10 @@ public:
             network::DatagramTransportReceiveResult received;
             try {
                 ++receive_statistics_.receive_polls;
-                if (movement_diagnostics_enabled_)
+                if (movement_diagnostics_enabled_ || multiplayer_enabled())
                     socket_read_begin_ns_ = actual_socket_read_ns();
                 received = transport_.receive(config_.maximum_datagram_size);
-                if (movement_diagnostics_enabled_)
+                if (movement_diagnostics_enabled_ || multiplayer_enabled())
                     socket_read_end_ns_ = actual_socket_read_ns();
             } catch (...) {
                 enter_terminal(
@@ -1091,6 +1099,33 @@ public:
         return events_.pop();
     }
 
+    [[nodiscard]] bool prepend_retained_payloads(
+        const std::span<OwnedNetchanPayload> payloads) noexcept
+    {
+        if (trace_callback_active_ || state_ != NetchanDriverState::active ||
+            !events_.can_push(payloads.size())) {
+            return false;
+        }
+        // These payloads were produced and sequence-validated by this driver.
+        // Only trusted owning stage facades can restore them; preflight the
+        // complete batch before moving anything or changing event order.
+        for (const auto& payload : payloads) {
+            if (payload.bytes.empty() ||
+                payload.bytes.size() > config_.maximum_opaque_payload_size ||
+                payload.direction != NetchanDirection::server_to_client) {
+                return false;
+            }
+        }
+        for (auto it = payloads.rbegin(); it != payloads.rend(); ++it) {
+            const auto bytes = it->bytes.size();
+            const auto occurred_at = it->received_at;
+            events_.push_front(NetchanDriverEvent{
+                NetchanDriverEventType::payload_ready, std::move(*it),
+                bytes, 0U, 0U, bytes, occurred_at});
+        }
+        return true;
+    }
+
     [[nodiscard]] bool valid_configuration() const noexcept
     {
         return configuration_valid_;
@@ -1131,10 +1166,48 @@ public:
     void set_movement_diagnostics_enabled(const bool enabled) noexcept
     {
         movement_diagnostics_enabled_ = enabled;
-        if (!enabled) {
+        if (!enabled && !multiplayer_enabled()) {
             socket_read_begin_ns_.reset();
             socket_read_end_ns_.reset();
         }
+    }
+    void set_multiplayer_diagnostics(core::MultiplayerDiagnosticSink* sink,
+        const std::uint64_t network_generation, const std::uint64_t map_generation) noexcept
+    {
+        multiplayer_sink_=sink;
+        multiplayer_network_generation_=network_generation;
+        multiplayer_map_generation_=map_generation;
+    }
+    [[nodiscard]] bool multiplayer_enabled() const noexcept {
+        return multiplayer_sink_ && multiplayer_sink_->enabled();
+    }
+    void observe_multiplayer_network(const core::MultiplayerNetworkPhase phase,
+        const NetchanHeader* header, const std::size_t bytes,
+        const std::optional<std::uint64_t> begin={},
+        const std::optional<std::uint64_t> end={}) noexcept {
+        if(!multiplayer_enabled()) return;
+        core::MultiplayerDiagnosticEvent event;
+        event.identity.producer=core::MultiplayerDiagnosticProducer::transport;
+        event.identity.producer_event_id=++multiplayer_event_id_;
+        event.identity.network_generation=multiplayer_network_generation_;
+        event.identity.map_generation=multiplayer_map_generation_;
+        event.local_steady_ns=core::multiplayer_diagnostic_now_ns();
+        event.provenance=core::MultiplayerProvenance::runtime_observed;
+        event.edge=core::MultiplayerEdgeConfidence::exact;
+        core::MultiplayerNetworkPayload value;
+        value.phase=phase;value.bytes=static_cast<std::uint32_t>(bytes);
+        value.begin_ns=begin;value.end_ns=end;
+        if(header) {
+            if(phase==core::MultiplayerNetworkPhase::packet_sent)
+                event.identity.carrier_packet=header->sequence.sequence.value();
+            else event.identity.source_sequence=header->sequence.sequence.value();
+            value.acknowledgement=header->acknowledgement.sequence.value();
+            value.reliable=header->sequence.flags.reliable;
+        }
+        if(phase==core::MultiplayerNetworkPhase::transport_ack)
+            event.knowledge=core::MultiplayerKnowledge::transport_acknowledged;
+        event.payload=value;
+        static_cast<void>(multiplayer_sink_->observe(event));
     }
     [[nodiscard]] std::optional<std::uint64_t>
     last_sent_unreliable_context_identity() const noexcept
@@ -1651,6 +1724,10 @@ private:
                 completed_reliable_generation = transfer->transfer_id.value();
             }
         }
+        std::optional<NetchanCompletedFragmentTransfer> completion_witness;
+        if (!retain_completion_witness(completes_reliable, completion_witness, now)) {
+            return false;
+        }
         const std::size_t required_events = completes_reliable ? 2U : 1U;
         if (!ensure_event_capacity(required_events, now)) {
             return false;
@@ -1681,6 +1758,9 @@ private:
             return false;
         }
 
+        if(acknowledgement && acknowledgement->disposition==NetchanAcknowledgementDisposition::advanced)
+            observe_multiplayer_network(core::MultiplayerNetworkPhase::transport_ack,
+                &packet.header,0U);
         if (graceful_close_.requested) {
             // Terminal scheduling owns the next ordinary packet/ACK. Never
             // introduce an extra send (or new gameplay payload) from RX.
@@ -1713,6 +1793,7 @@ private:
                 now,
                 acknowledgement,
                 completed_reliable_generation,
+                std::move(completion_witness),
             });
         }
         const auto payload_size = payload.bytes.size();
@@ -1893,6 +1974,10 @@ private:
                 completed_reliable_generation = transfer->transfer_id.value();
             }
         }
+        std::optional<NetchanCompletedFragmentTransfer> completion_witness;
+        if (!retain_completion_witness(completes_reliable, completion_witness, now)) {
+            return false;
+        }
         const bool has_completion = prepared.plan->completion_size().has_value();
         const auto prepared_completion_size =
             prepared.plan->completion_size().value_or(0U);
@@ -1975,6 +2060,9 @@ private:
             return false;
         }
 
+        if(acknowledgement && acknowledgement->disposition==NetchanAcknowledgementDisposition::advanced)
+            observe_multiplayer_network(core::MultiplayerNetworkPhase::transport_ack,
+                &packet.header,0U);
         if (graceful_close_.requested) {
             acknowledgement_pending_ = true;
         } else if (!session_.first_acknowledgement_sent()) {
@@ -2004,6 +2092,7 @@ private:
                 now,
                 acknowledgement,
                 completed_reliable_generation,
+                std::move(completion_witness),
             });
         }
         if (receipt.started_transfer) {
@@ -2369,10 +2458,10 @@ private:
             network::DatagramTransportReceiveResult received;
             try {
                 ++receive_statistics_.receive_polls;
-                if (movement_diagnostics_enabled_)
+                if (movement_diagnostics_enabled_ || multiplayer_enabled())
                     socket_read_begin_ns_ = actual_socket_read_ns();
                 received = transport_.receive(config_.maximum_datagram_size);
-                if (movement_diagnostics_enabled_)
+                if (movement_diagnostics_enabled_ || multiplayer_enabled())
                     socket_read_end_ns_ = actual_socket_read_ns();
             } catch (...) {
                 enter_terminal(NetchanDriverState::network_error,
@@ -2559,6 +2648,8 @@ private:
             return false;
         }
         network::DatagramSendResult sent;
+        const auto send_begin=multiplayer_enabled()
+            ? std::optional{core::multiplayer_diagnostic_now_ns()} : std::nullopt;
         try {
             sent = transport_.send_to(remote_endpoint_, datagram);
         } catch (...) {
@@ -2589,6 +2680,9 @@ private:
             return false;
         }
         ++transmitted_packet_count_;
+        observe_multiplayer_network(core::MultiplayerNetworkPhase::packet_sent,
+            &header,datagram.size(),send_begin,
+            multiplayer_enabled() ? std::optional{core::multiplayer_diagnostic_now_ns()} : std::nullopt);
         // Only a successful send advances the idle poll clock. A blocked send
         // retains its sequence and can retry without a burst/catch-up schedule.
         last_transport_send_time_ = now;
@@ -2602,6 +2696,43 @@ private:
             fragment_transfer_size,
             fragment_plan);
         return true;
+    }
+
+    [[nodiscard]] bool retain_completion_witness(
+        const bool completes_reliable,
+        std::optional<NetchanCompletedFragmentTransfer>& result,
+        const NetchanDriverTimePoint now)
+    {
+        const auto& transfer = session_.outgoing_fragment_transfer();
+        if (!completes_reliable || !transfer) return true;
+        const auto& in_flight = session_.in_flight_reliable_payload();
+        if (!in_flight || !transfer->transfer_id.valid() ||
+            transfer->canonical_bytes.empty() ||
+            transfer->canonical_bytes.size() > kMaximumOutgoingNormalFragmentTransferSize ||
+            in_flight->bytes.empty() ||
+            in_flight->bytes.size() > kStockProtocol48NormalFragmentChunkSize ||
+            transfer->fragment_count == 0U ||
+            transfer->fragment_count > kMaximumOutgoingNormalFragments ||
+            transfer->current_fragment_index != transfer->fragment_count) {
+            enter_terminal(NetchanDriverState::protocol_error,
+                NetchanDriverErrorCode::invalid_acknowledgement,
+                "Reliable completion has no bounded final-fragment witness", now,
+                NetchanDriverTraceClassification::protocol_failure,
+                NetchanDriverEventType::protocol_error);
+            return false;
+        }
+        try {
+            result.emplace(NetchanCompletedFragmentTransfer{*transfer, *in_flight});
+            return true;
+        } catch (...) {
+            // Nothing has been committed or acknowledged to the consumer yet.
+            enter_terminal(NetchanDriverState::backpressure,
+                NetchanDriverErrorCode::event_backpressure,
+                "Unable to retain bounded reliable-completion witness", now,
+                NetchanDriverTraceClassification::protocol_failure,
+                NetchanDriverEventType::protocol_error);
+            return false;
+        }
     }
 
     [[nodiscard]] bool ensure_event_capacity(
@@ -2702,6 +2833,20 @@ private:
         const std::size_t transfer_size = 0U,
         const NetchanFragmentBuildPlan* const fragment_plan = nullptr)
     {
+        if(multiplayer_enabled()) {
+            using P=core::MultiplayerNetworkPhase;
+            std::optional<P> phase;
+            switch(classification) {
+            case NetchanDriverTraceClassification::sequenced_packet_received: phase=P::socket_read;break;
+            case NetchanDriverTraceClassification::duplicate_sequence_ignored: phase=P::duplicate;break;
+            case NetchanDriverTraceClassification::older_sequence_ignored: phase=P::reordered;break;
+            case NetchanDriverTraceClassification::wrong_endpoint_ignored:
+            case NetchanDriverTraceClassification::protocol_failure: phase=P::rejected;break;
+            default:break;
+            }
+            if(phase) observe_multiplayer_network(*phase,header,datagram_size,
+                socket_read_begin_ns_,socket_read_end_ns_);
+        }
         if (classification == NetchanDriverTraceClassification::duplicate_sequence_ignored ||
                    classification == NetchanDriverTraceClassification::older_sequence_ignored) {
             ++receive_statistics_.rejected_sequences;
@@ -2780,6 +2925,8 @@ private:
     std::size_t transmitted_packet_count_{0U};
     NetchanDriverReceiveStatistics receive_statistics_{};
     bool movement_diagnostics_enabled_{false};
+    core::MultiplayerDiagnosticSink* multiplayer_sink_{};
+    std::uint64_t multiplayer_event_id_{},multiplayer_network_generation_{},multiplayer_map_generation_{};
     std::optional<std::uint64_t> socket_read_begin_ns_;
     std::optional<std::uint64_t> socket_read_end_ns_;
     std::size_t cleanup_count_{0U};
@@ -2881,6 +3028,12 @@ std::optional<NetchanDriverEvent> NetchanDriver::poll_event()
     return implementation_->poll_event();
 }
 
+bool NetchanDriver::prepend_retained_payloads(
+    const std::span<OwnedNetchanPayload> payloads) noexcept
+{
+    return implementation_->prepend_retained_payloads(payloads);
+}
+
 bool NetchanDriver::valid_configuration() const noexcept
 {
     return implementation_->valid_configuration();
@@ -2936,6 +3089,11 @@ NetchanDriverReceiveStatistics NetchanDriver::receive_statistics() const noexcep
 void NetchanDriver::set_movement_diagnostics_enabled(const bool enabled) noexcept
 {
     implementation_->set_movement_diagnostics_enabled(enabled);
+}
+void NetchanDriver::set_multiplayer_diagnostics(core::MultiplayerDiagnosticSink* sink,
+    const std::uint64_t network_generation,const std::uint64_t map_generation) noexcept
+{
+    implementation_->set_multiplayer_diagnostics(sink,network_generation,map_generation);
 }
 
 std::optional<std::uint64_t>

@@ -915,11 +915,13 @@ TEST_CASE("Netchan driver permits bounded client-first reliable data only",
     CHECK(acknowledged->acknowledgement->disposition ==
           goldsrc::NetchanAcknowledgementDisposition::advanced);
     CHECK_FALSE(acknowledged->completed_reliable_generation);
+    CHECK_FALSE(acknowledged->completed_fragment_transfer);
     auto payload = driver.poll_event();
     REQUIRE(payload);
     CHECK(payload->type == goldsrc::NetchanDriverEventType::payload_ready);
     CHECK_FALSE(payload->acknowledgement);
     CHECK_FALSE(payload->completed_reliable_generation);
+    CHECK_FALSE(payload->completed_fragment_transfer);
     REQUIRE(payload->payload);
     CHECK(payload->payload->bytes == bytes("SERVER_FIRST"));
     CHECK_FALSE(driver.poll_event());
@@ -2093,6 +2095,9 @@ TEST_CASE("Netchan driver retains one bounded unreliable payload until post-boot
 TEST_CASE("Outgoing normal fragments are stop-and-wait and retry only the missing unit",
           "[goldsrc][netchan][driver][fragment][outgoing][project-policy]")
 {
+    bool fragmented_final_ack = false;
+    SECTION("final ACK arrives in an ordinary packet") {}
+    SECTION("final ACK arrives in a reliable server fragment") { fragmented_final_ack = true; }
     FakeTransport transport;
     const auto remote = network::NetworkAddress::loopback(27'015U);
     auto config = test_config();
@@ -2244,17 +2249,30 @@ TEST_CASE("Outgoing normal fragments are stop-and-wait and retry only the missin
     REQUIRE(driver.session().in_flight_reliable_payload());
     const bool final_toggle =
         driver.session().in_flight_reliable_payload()->toggle;
+    const auto expected_final_snapshot = *driver.session().in_flight_reliable_payload();
+    REQUIRE(driver.session().outgoing_fragment_transfer());
+    const auto expected_transfer_snapshot = *driver.session().outgoing_fragment_transfer();
+
+    // Earlier fragment ACKs and a retry must not publish a whole-transfer
+    // completion or retain a completion witness for only a partial payload.
+    while (const auto event = driver.poll_event()) {
+        CHECK(event->type != goldsrc::NetchanDriverEventType::reliable_payload_acknowledged);
+        CHECK_FALSE(event->completed_reliable_generation);
+        CHECK_FALSE(event->completed_fragment_transfer);
+    }
 
     transport.queue(
         remote,
-        server_packet(
+        fragmented_final_ack ? server_fragment_packet(
+            5U, final_fragment.header.sequence.sequence.value(), final_toggle,
+            1U, 1U, bytes("ACK_END_")) : server_packet(
             5U,
             false,
             final_fragment.header.sequence.sequence.value(),
             final_toggle,
             bytes("ACK_END_")));
     driver.update(epoch + 7ms);
-    CHECK(transport.sent.size() == 6U);
+    CHECK(transport.sent.size() == (fragmented_final_ack ? 7U : 6U));
     CHECK_FALSE(driver.session().outgoing_fragment_transfer());
     CHECK_FALSE(driver.session().in_flight_reliable_payload());
     CHECK(driver.session().pending_reliable_payload().empty());
@@ -2272,8 +2290,24 @@ TEST_CASE("Outgoing normal fragments are stop-and-wait and retry only the missin
                   goldsrc::NetchanAcknowledgementDisposition::advanced);
             REQUIRE(event->completed_reliable_generation);
             CHECK(*event->completed_reliable_generation == reliable_generation);
+            REQUIRE(event->completed_fragment_transfer);
+            const auto& completed = *event->completed_fragment_transfer;
+            CHECK(completed.transfer.transfer_id == expected_transfer_snapshot.transfer_id);
+            CHECK(completed.transfer.transfer_id.value() == reliable_generation);
+            CHECK(completed.transfer.canonical_bytes == canonical);
+            CHECK(completed.transfer.fragment_count == 3U);
+            CHECK(completed.transfer.current_fragment_index == 3U);
+            CHECK(completed.final_fragment.bytes == final_fragment.payload);
+            CHECK(completed.final_fragment.bytes == expected_final_snapshot.bytes);
+            CHECK(completed.final_fragment.toggle == final_toggle);
+            CHECK(completed.final_fragment.first_sent_sequence == expected_final_snapshot.first_sent_sequence);
+            CHECK(completed.final_fragment.most_recent_sent_sequence == expected_final_snapshot.most_recent_sent_sequence);
+            CHECK(completed.final_fragment.send_count == expected_final_snapshot.send_count);
+            CHECK(completed.final_fragment.send_count == 1U);
+            CHECK_FALSE(completed.final_fragment.retransmission_requested);
         } else {
             CHECK_FALSE(event->completed_reliable_generation);
+            CHECK_FALSE(event->completed_fragment_transfer);
         }
     }
     CHECK(acknowledged_events == 1U);

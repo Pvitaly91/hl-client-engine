@@ -19,8 +19,9 @@ class UserInfoSignonStage;
 using MovementEnvironmentStageClock = DeltaDescriptionStageClock;
 using MovementEnvironmentStageTimePoint = DeltaDescriptionStageTimePoint;
 
-// Project safety limits, not stock engine maxima.
-inline constexpr std::size_t kDefaultMaximumMovementEnvironmentStageEvents = 64U;
+// Atomic publication: controls plus the ready and boundary events.
+inline constexpr std::size_t kDefaultMaximumMovementEnvironmentStageEvents =
+    kDefaultMaximumPostMoveVarsControls + 2U;
 inline constexpr std::size_t kMaximumMovementEnvironmentStageEvents = 256U;
 inline constexpr std::size_t kMovementEnvironmentStageDiagnosticTextLimit = 256U;
 

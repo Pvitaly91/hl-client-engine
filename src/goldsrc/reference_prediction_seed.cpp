@@ -449,6 +449,17 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         command_profile == player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2 &&
         server_grounded && witnessed_post_movement_ground_boundary(
             seed, boundary_command, exact_post_boundary_command);
+    // A native server endpoint can acquire upward velocity after PM has
+    // already published ONGROUND, without a locally predicted command
+    // effect (for example an external impulse). Its unchanged hull must
+    // still be free and the ordinary probe below must prove actual support.
+    // This describes the endpoint, not the next command's categorization:
+    // PM_CatagorizePosition clears ground for upward velocity >180 before
+    // friction, so no impulse is added, consumed, or zeroed here.
+    const bool native_upward_ground_endpoint =
+        command_profile == player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2 &&
+        !server_ladder && server_grounded &&
+        velocity.z > config.maximum_ground_snap_upward_velocity;
     if (seed.move_type != 3U && !server_ladder)
         return {ReferencePredictionGroundStatus::invalid_movement_state};
     if (server_ladder && (!ladder_context || !query_reference_ladder_contact(
@@ -502,7 +513,8 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
 
     player::PlayerGroundStateCreateInfo ground;
     ground.contact_position = origin;
-    if (velocity.z <= config.maximum_ground_snap_upward_velocity || post_movement_ground_boundary) {
+    if (velocity.z <= config.maximum_ground_snap_upward_velocity ||
+        post_movement_ground_boundary || native_upward_ground_endpoint) {
         const assets::AssetVector3 end{
             origin.x, origin.y,
             static_cast<float>(static_cast<double>(origin.z) -

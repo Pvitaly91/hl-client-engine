@@ -1,6 +1,7 @@
 #include <hlclient/game_api/game_client_host.hpp>
 #include <hlclient/goldsrc/runtime_replay_fixture.hpp>
 #include <hlclient/goldsrc/client_message.hpp>
+#include <hlclient/core/log.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -18,6 +19,7 @@ namespace api = hlclient::game_api;
 namespace client = hlclient::client;
 
 struct TestModuleProbe {
+    api::WeaponDiagnosticObserver* diagnostic_observer{};
     api::ScreenEffectsFrame screen_effects;
     double mouse_sensitivity_scale{1.0};
     bool persistent_beams{};
@@ -51,6 +53,9 @@ struct TestModuleProbe {
 // asset installation is available to this test. It uses the production host.
 class TestGameClientModule final : public api::IGameClientModule {
 public:
+    void set_weapon_diagnostic_observer(api::WeaponDiagnosticObserver* observer) noexcept override {
+        probe_->diagnostic_observer=observer;
+    }
     api::ScreenEffectsFrame screen_effects(double) const noexcept override {return probe_->screen_effects;}
     std::span<const api::DecalAssetRequest> surface_decal_preparation() const noexcept override {
         if(!probe_->surface_decal_test)return {};
@@ -211,6 +216,10 @@ public:
     api::GameRecordResult stage_record(const api::GameRecordInput& input) const override {
         auto staged = input.previous ? committed_ : api::GameRecordState{};
         for (const auto& message : input.messages) {
+            if(message.name=="ProjectConsole") {
+                staged.console_text.push_back({std::string{reinterpret_cast<const char*>(message.body.data()),message.body.size()},message.source});
+                continue;
+            }
             if (message.name != "ProjectSignal") continue; // explicit unknown behavior
             if (message.body.size() < 2U || message.body.size() > 9U)
                 return {{}, std::string{"ProjectSignal body is outside the project fixture bound"}};
@@ -813,6 +822,139 @@ TEST_CASE("GameClientHost accepts an independent module with owning transactiona
     CHECK(host.movement_policy().speed_key_multiplier == 0.25F);
     CHECK(host.movement_policy().bindings->actions_for_key(hlclient::input::PhysicalKey::w) == 0U);
     CHECK(host.movement_policy().bindings->actions_for_key(hlclient::input::PhysicalKey::up) != 0U);
+}
+
+TEST_CASE("Core alternate diagnostics are opt in and preserve neutral callback generations",
+          "[multiplayer-diagnostics][game-module][game-api][core-only]") {
+    namespace diagnostic=hlclient::core;
+    struct Sink final : diagnostic::MultiplayerDiagnosticSink {
+        bool enabled() const noexcept override {return on;}
+        bool observe(const diagnostic::MultiplayerDiagnosticEvent& event) noexcept override {
+            if(count==events.size())return false;
+            events[count++]=event;return true;
+        }
+        bool on{};
+        std::size_t count{};
+        std::array<diagnostic::MultiplayerDiagnosticEvent,8> events;
+    } sink;
+    const auto probe=std::make_shared<TestModuleProbe>();
+    api::GameClientHost host{std::make_unique<TestGameClientModule>(probe)};
+    host.reset({3U,5U,2U});
+    CHECK_FALSE(probe->diagnostic_observer);
+    CHECK(host.weapon_diagnostic_capabilities().empty()); // no concrete-game catalogue fallback.
+    host.set_diagnostic_sink(&sink);
+    REQUIRE(probe->diagnostic_observer);
+    CHECK_FALSE(probe->diagnostic_observer->weapon_diagnostics_enabled());
+    api::WeaponActionDiagnosticObservation action;
+    action.identity.generation=3U;action.identity.weapon_id=231U;
+    action.identity.command_sequence=77U;action.identity.started_at_seconds=1.25;
+    action.kind=diagnostic::MultiplayerActionKind::projectile;
+    action.command=api::LocalWeaponSubmittedCommand{3U,77U,1U,1.25};
+    probe->diagnostic_observer->weapon_action_observed(action);
+    CHECK(sink.count==0U);CHECK(probe->commands==0U);
+    sink.on=true;
+    REQUIRE(probe->diagnostic_observer->weapon_diagnostics_enabled());
+    probe->diagnostic_observer->weapon_action_observed(action);
+    REQUIRE(sink.count==1U);
+    CHECK(sink.events[0].identity.command_id==77U);
+    CHECK(sink.events[0].identity.network_generation==3U);
+    CHECK(sink.events[0].identity.map_generation==5U);
+    CHECK(sink.events[0].knowledge==diagnostic::MultiplayerKnowledge::local_action_accepted);
+    CHECK(std::get<diagnostic::MultiplayerActionPayload>(sink.events[0].payload).weapon_id==231U);
+    CHECK(probe->commands==0U); // logging did not invoke an alternate action.
+    probe->diagnostic_observer->weapon_action_observed(action);
+    CHECK(sink.count==1U); // exact receipt repeated, not a new firing action.
+    action.identity.generation=2U;
+    probe->diagnostic_observer->weapon_action_observed(action);
+    CHECK(sink.count==1U);
+    host.reset({4U,6U,2U});
+    sink.count=0U;
+    action.identity.generation=3U;
+    probe->diagnostic_observer->weapon_action_observed(action);
+    CHECK(sink.count==0U); // a deferred old-generation callback remains stale.
+    host.set_diagnostic_sink(nullptr);
+    CHECK_FALSE(probe->diagnostic_observer);
+    CHECK(host.weapon_diagnostic_capabilities().empty());
+    host.teardown();CHECK_FALSE(probe->diagnostic_observer);
+}
+
+TEST_CASE("Diagnostic canonical map binding preserves game epochs and rejects foreign owners",
+          "[diagnostic-map-identity][multiplayer-diagnostics][game-module][game-api][core-only]") {
+    namespace d=hlclient::core;
+    struct Sink final:d::MultiplayerDiagnosticSink {
+        bool on{};std::size_t count{};std::array<d::MultiplayerDiagnosticEvent,16> events;
+        bool enabled()const noexcept override{return on;}
+        bool observe(const d::MultiplayerDiagnosticEvent& event)noexcept override {
+            if(count==events.size())return false;events[count++]=event;return true;
+        }
+    } sink;
+    const auto probe=std::make_shared<TestModuleProbe>();
+    api::GameClientHost host{std::make_unique<TestGameClientModule>(probe)};
+    host.reset({3,5,2});host.set_diagnostic_sink(&sink);
+    std::array<std::uint64_t,2> canonical{3,263};std::size_t reads{};
+    bool throws{};
+    auto lifetime=std::make_shared<unsigned>(7);std::weak_ptr<unsigned> retained=lifetime;
+    host.set_diagnostic_generations([&,keep=lifetime] {
+        ++reads;if(throws)throw std::runtime_error{"fixture owner unavailable"};return canonical;
+    });lifetime.reset();
+    const auto fire=[&](std::uint64_t generation,std::uint32_t sequence) {
+        api::WeaponActionDiagnosticObservation action;
+        action.identity.generation=generation;action.identity.weapon_id=231;
+        action.identity.command_sequence=sequence;action.identity.started_at_seconds=sequence;
+        action.kind=d::MultiplayerActionKind::projectile;
+        action.command=api::LocalWeaponSubmittedCommand{generation,sequence,1,double(sequence)};
+        probe->diagnostic_observer->weapon_action_observed(action);
+    };
+    fire(3,1);CHECK(reads==0);CHECK(sink.count==0); // OFF never consults the owner.
+    sink.on=true;fire(3,1);REQUIRE(sink.count==1);
+    CHECK(sink.events[0].identity.network_generation==3);CHECK(sink.events[0].identity.map_generation==263);
+    CHECK(probe->identity==api::GameSessionIdentity{3,5,2});CHECK(probe->resets==1);
+    canonical={4,264};fire(3,2);REQUIRE(sink.count==2);
+    CHECK(sink.events[1].identity.network_generation==3);CHECK(sink.events[1].identity.map_generation==0);
+    throws=true;fire(3,3);REQUIRE(sink.count==3);CHECK(sink.events[2].identity.map_generation==0);
+    throws=false;canonical={3,264};fire(3,4);REQUIRE(sink.count==4);
+    CHECK(sink.events[3].identity.map_generation==0); // same module epoch cannot adopt a different map implicitly.
+    host.reset({4,6,2});canonical={4,264};fire(3,5);CHECK(sink.count==4);
+    fire(4,1);REQUIRE(sink.count==5);CHECK(sink.events[4].identity.map_generation==264);
+    CHECK(probe->identity==api::GameSessionIdentity{4,6,2});CHECK(probe->resets==2);
+    const auto before=reads;host.set_diagnostic_sink(nullptr);CHECK(retained.expired());
+    CHECK_FALSE(probe->diagnostic_observer);CHECK(reads==before);
+    host.set_diagnostic_sink(&sink);host.reset({5,7,2});fire(5,1);REQUIRE(sink.count==6);
+    CHECK(sink.events[5].identity.map_generation==7);CHECK(reads==before); // detached mapping does not leak into later sessions.
+    lifetime=std::make_shared<unsigned>(8);retained=lifetime;
+    host.set_diagnostic_generations([keep=lifetime]{return std::array<std::uint64_t,2>{5,265};});
+    lifetime.reset();host.teardown();CHECK(retained.expired());CHECK_FALSE(probe->diagnostic_observer);
+    // Initialization may precede the first usable session receipt. Neither an
+    // absent owner nor an owner from another connection may consume the latch.
+    host.reset({6,8,2});host.set_diagnostic_sink(&sink);canonical={0,0};
+    host.set_diagnostic_generations([&]{++reads;return canonical;});
+    fire(6,1);REQUIRE(sink.count==7);CHECK(sink.events[6].identity.map_generation==0);
+    canonical={5,265};fire(6,2);REQUIRE(sink.count==8);CHECK(sink.events[7].identity.map_generation==0);
+    canonical={6,266};fire(6,3);REQUIRE(sink.count==9);CHECK(sink.events[8].identity.map_generation==266);
+    CHECK(probe->identity==api::GameSessionIdentity{6,8,2});
+    host.set_diagnostic_sink(nullptr);
+}
+
+TEST_CASE("E33 alternate modules deliver bounded console text only after commit with source deduplication",
+          "[e33][game-module][game-api][core-only][server-text]") {
+    namespace core=hlclient::core;
+    core::initialize_logging();core::reset_console_log();
+    const auto probe=std::make_shared<TestModuleProbe>();
+    api::GameClientHost host{std::make_unique<TestGameClientModule>(probe)};host.reset({3U,5U,2U});
+    const auto observation=test_observation();
+    std::vector<std::byte> body{std::byte{'o'},std::byte{'w'},std::byte{'n'}};
+    std::array messages{api::GameMessageView{api::GameMessageKind::console_text,"ProjectConsole",body,test_source()}};
+    auto staged=host.stage_record({nullptr,observation,messages,2U});REQUIRE(staged);
+    CHECK(core::drain_console_log().records.empty());
+    const auto repeated=*staged.state;host.commit_record(std::move(*staged.state));
+    auto first=core::drain_console_log();REQUIRE(first.records.size()==1U);CHECK(first.records[0].message=="[server] own");
+    auto duplicate=repeated;host.commit_record(std::move(duplicate));CHECK(core::drain_console_log().records.empty());
+    host.reset({4U,6U,2U});auto fresh=repeated;host.commit_record(std::move(fresh));
+    CHECK(core::drain_console_log().records.size()==1U);
+    body.resize(4097U,std::byte{'x'});messages[0].body=body;
+    CHECK_FALSE(host.stage_record({nullptr,observation,messages,2U}));CHECK(core::drain_console_log().records.empty());
+    body.resize(3U);messages[0].body=body;messages[0].source.record_identity=0U;
+    CHECK_FALSE(host.stage_record({nullptr,observation,messages,2U}));CHECK(core::drain_console_log().records.empty());
 }
 
 TEST_CASE("GameClientHost routes unique command presentation and lifecycle to the selected module",

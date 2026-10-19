@@ -260,11 +260,67 @@ bool GoldSrcUserCmdTransmissionStage::push_event(
     return true;
 }
 
+void GoldSrcUserCmdTransmissionStage::observe_multiplayer_packet(
+    const core::MultiplayerNetworkPhase phase,
+    const GoldSrcUserCmdPacketPlan& packet, const std::uint32_t carrier) noexcept
+{
+    auto* sink=config_.multiplayer_diagnostics;
+    if(!sink || !sink->enabled()) return;
+    core::MultiplayerDiagnosticEvent event;
+    event.identity.producer=core::MultiplayerDiagnosticProducer::command_transmission;
+    event.identity.producer_event_id=++multiplayer_event_id_;
+    event.identity.network_generation=config_.diagnostic_network_generation;
+    event.identity.map_generation=config_.diagnostic_map_generation;
+    event.identity.carrier_packet=carrier;
+    event.local_steady_ns=core::multiplayer_diagnostic_now_ns();
+    event.provenance=core::MultiplayerProvenance::runtime_observed;
+    event.edge=core::MultiplayerEdgeConfidence::exact;
+    event.knowledge=phase==core::MultiplayerNetworkPhase::packet_sent
+        ? core::MultiplayerKnowledge::command_sent
+        : phase==core::MultiplayerNetworkPhase::packet_encoded
+            ? core::MultiplayerKnowledge::command_encoded : core::MultiplayerKnowledge::unknown;
+    core::MultiplayerNetworkPayload value;
+    value.phase=phase;
+    value.bytes=static_cast<std::uint32_t>(packet.expected_encoded_bytes());
+    value.command_count=static_cast<std::uint32_t>(packet.new_command_count());
+    value.backup_count=static_cast<std::uint32_t>(packet.backup_command_count());
+    const auto& selected=packet.ordered_sequences();
+    for(const auto sequence:selected) {
+        if(value.inclusion_count>=value.command_ids.size()) break;
+        value.command_ids[value.inclusion_count++]=sequence.value();
+    }
+    if(packet.new_command_count()!=0U && packet.backup_command_count()<selected.size()) {
+        value.first_command_id=selected[packet.backup_command_count()].value();
+        value.last_command_id=selected.back().value();
+    }
+    event.payload=value;
+    static_cast<void>(sink->observe(event));
+    // The plan already owns the codec's accepted quantized command values.
+    // Observe that exact result; do not parse packet bytes a second time.
+    if(phase==core::MultiplayerNetworkPhase::packet_encoded && packet.reference_message()) {
+        const auto& commands=packet.reference_message()->commands;
+        for(std::size_t index=0;index<commands.size() && index<selected.size();++index) {
+            const auto& wire=commands[index].value;
+            event.identity.producer_event_id=++multiplayer_event_id_;
+            event.identity.command_id=selected[index].value();
+            event.local_steady_ns=core::multiplayer_diagnostic_now_ns();
+            core::MultiplayerCommandPayload command;
+            command.phase=core::MultiplayerCommandPhase::encoded;
+            command.angle_turns=wire.angle_turns;command.movement={wire.forward,wire.side,wire.up};
+            command.buttons=wire.buttons;command.msec=wire.msec;command.lerp_msec=wire.lerp_msec;
+            command.impulse=wire.impulse;event.payload=command;
+            static_cast<void>(sink->observe(event));
+        }
+    }
+}
+
 void GoldSrcUserCmdTransmissionStage::abandon_prepared_move() noexcept
 {
     if (!prepared_move_) {
         return;
     }
+    observe_multiplayer_packet(core::MultiplayerNetworkPhase::rejected,
+        prepared_move_->packet,prepared_move_->outgoing_sequence);
     try {
         static_cast<void>(
             driver_.abandon_unreliable(std::move(prepared_move_->context)));
@@ -315,6 +371,8 @@ GoldSrcUserCmdTransmissionStage::commit_prepared_move(
         std::move(prepared_move_->context),
         prepared_move_->packet.encoded_bytes());
     if (!submitted) {
+        observe_multiplayer_packet(core::MultiplayerNetworkPhase::rejected,
+            prepared_move_->packet,outgoing_sequence);
         static_cast<void>(
             planner_.abandon(std::move(prepared_move_->packet)));
         prepared_move_.reset();
@@ -352,6 +410,8 @@ GoldSrcUserCmdTransmissionStage::commit_prepared_move(
             true);
     }
     prepared_move_->driver_owned = true;
+    observe_multiplayer_packet(core::MultiplayerNetworkPhase::packet_queued,
+        prepared_move_->packet,outgoing_sequence);
     bound_now = true;
     }
 
@@ -385,6 +445,11 @@ GoldSrcUserCmdTransmissionStage::commit_prepared_move(
             now,
             true);
     }
+    // The immutable plan still owns the exact included IDs. This publication
+    // occurs only after the matching successful driver send receipt, never on
+    // bind, would-block, backup selection or a transport acknowledgement.
+    observe_multiplayer_packet(core::MultiplayerNetworkPhase::packet_sent,
+        prepared_move_->packet,outgoing_sequence);
     const auto committed =
         planner_.commit(history_, std::move(prepared_move_->packet));
     prepared_move_.reset();
@@ -1009,6 +1074,10 @@ GoldSrcUserCmdTransmissionOperationResult GoldSrcUserCmdTransmissionStage::trans
     const auto encoded_bytes = packet_plan.plan->expected_encoded_bytes();
     const auto encoded_bits = packet_plan.plan->expected_encoded_bits();
     const auto changed_field_count = packet_plan.plan->changed_field_count();
+    observe_multiplayer_packet(core::MultiplayerNetworkPhase::packet_planned,
+        *packet_plan.plan,outgoing_sequence);
+    observe_multiplayer_packet(core::MultiplayerNetworkPhase::packet_encoded,
+        *packet_plan.plan,outgoing_sequence);
     if (encoded_bytes >
         context.plan->maximum_unreliable_payload_size()) {
         static_cast<void>(planner_.abandon(std::move(*packet_plan.plan)));

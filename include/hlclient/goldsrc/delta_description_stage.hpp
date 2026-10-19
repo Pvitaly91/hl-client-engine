@@ -19,7 +19,9 @@ class MovementEnvironmentStage;
 using DeltaDescriptionStageClock = PreResourceSignonClock;
 using DeltaDescriptionStageTimePoint = PreResourceSignonTimePoint;
 
-inline constexpr std::size_t kDefaultMaximumDeltaDescriptionStageEvents = 32U;
+// Atomic publication: one event per schema plus ready and boundary events.
+inline constexpr std::size_t kDefaultMaximumDeltaDescriptionStageEvents =
+    kDefaultMaximumDeltaSchemaCount + 2U;
 inline constexpr std::size_t kMaximumDeltaDescriptionStageEvents = 512U;
 inline constexpr std::size_t kDeltaDescriptionStageDiagnosticTextLimit = 256U;
 

@@ -228,6 +228,41 @@ ResourceTransitionControlParseResult ResourceTransitionControlParser::parse(
             boundary_offset,
             "Transition-control payload ends before the required next opcode");
     }
+    if (std::to_integer<std::uint8_t>(
+            second_service_payload[boundary_offset]) ==
+        kResourceLocationOpcode) {
+        // The optional FastDL location is one bounded NUL-terminated field,
+        // not an invitation to scan for a later opcode or fetch a URL. Keep
+        // the fixed opcode-45 state independent of this intervening message.
+        ++boundary_offset;
+        for (std::size_t count = 0U;; ++count) {
+            if (boundary_offset >= second_service_payload.size()) {
+                return failure(
+                    ResourceTransitionControlErrorCode::
+                        truncated_resource_location,
+                    boundary_offset,
+                    "Resource-location string is missing its NUL terminator");
+            }
+            if (second_service_payload[boundary_offset] == std::byte{0U}) {
+                ++boundary_offset;
+                break;
+            }
+            if (count == kMaximumResourceLocationStringBytes) {
+                return failure(
+                    ResourceTransitionControlErrorCode::
+                        resource_location_too_long,
+                    boundary_offset,
+                    "Resource-location string exceeds the 128-byte bound");
+            }
+            ++boundary_offset;
+        }
+        if (boundary_offset >= second_service_payload.size()) {
+            return failure(
+                ResourceTransitionControlErrorCode::missing_next_boundary,
+                boundary_offset,
+                "Resource-location payload ends before the required next opcode");
+        }
+    }
     const auto boundary_opcode = std::to_integer<std::uint8_t>(
         second_service_payload[boundary_offset]);
     if (boundary_opcode != kPostResourceTransitionControlBoundaryOpcode) {
@@ -257,7 +292,7 @@ ResourceTransitionControlParseResult ResourceTransitionControlParser::parse(
             profile_,
         },
         std::nullopt,
-        kResourceTransitionControlMessageSize,
+        boundary_offset - opcode_byte_offset,
         boundary_offset,
     };
 }

@@ -7,12 +7,14 @@
 #include <hlclient/games/halflife/tripmine_profile.hpp>
 #include <hlclient/games/halflife/snark_profile.hpp>
 #include <hlclient/game_api/presentation.hpp>
+#include <hlclient/game_api/weapon_diagnostics.hpp>
 #include <hlclient/game_api/remote_effects.hpp>
 #include <hlclient/client/runtime_observation.hpp>
 namespace hlclient::games::halflife {
 using namespace game_api;
 class LocalWeaponPresentationController final {
 public:
+  void set_weapon_diagnostic_observer(WeaponDiagnosticObserver* observer) noexcept { diagnostic_observer_=observer; }
   void configure_maximum_clients(std::uint32_t value) noexcept { maximum_clients_=value; }
   void configure_projection(double horizontal) noexcept { crossbow_sniper_=maximum_clients_>1 && horizontal==20; }
   [[nodiscard]] bool crossbow_sniper_action() const noexcept { return action_ && action_->crossbow_sniper; }
@@ -53,6 +55,9 @@ public:
   LocalAudioBatch drain_audio() noexcept { return audio_.drain(); }
 
 private:
+  WeaponDiagnosticObserver* diagnostic_observer_{};
+  void diagnostic_action(core::MultiplayerActionPhase) const noexcept;
+    void diagnostic_rejection(const game_api::LocalWeaponSubmittedCommand&,std::string_view) const noexcept;
   WeaponAudio audio_;
   struct ActionState final {
     LocalWeaponActionIdentity identity{};
@@ -69,6 +74,9 @@ private:
     std::uint8_t rounds_reserved{1U};
     bool scripted_event_confirmed{};
     bool crossbow_sniper{};
+    // A reload can replace a shot before its server echo arrives. Bound the
+    // lower-precedence pose guard by that shot's original receipt deadline.
+    std::optional<double> reload_predecessor_deadline;
   };
   struct SeenEvent final {
     client::RuntimeObservationSource source{};
@@ -85,8 +93,10 @@ private:
   void publish_idle(double);
   void observe_shotgun_reload(std::optional<std::int32_t> previous_stage,
       std::optional<std::int32_t> previous_clip, double now);
-  void observe_empty_magazine_reload(std::optional<bool> previous_reload,
+  void observe_conventional_reload(std::optional<bool> previous_reload,
       bool client_pose_published, std::uint32_t sequence, double now);
+  void retain_fire_predecessor() noexcept;
+  [[nodiscard]] bool reload_predecessor_active(double now) const noexcept;
   void start_crossbow(std::uint32_t command,double at,int post_clip,int reserve,bool sniper);
   void start_hornet(HornetFireMode,std::uint32_t command,double at,bool committed=false);
   void expire_hornet_reservations(double now) noexcept;
@@ -155,6 +165,7 @@ private:
   double last_secondary_launch_at_{-1.0e9};
   double launch_idle_not_before_{};
   std::optional<ActionState> pending_launch_;
+  std::optional<double> server_reload_predecessor_deadline_;
   std::size_t provisional_grenades_{};
   std::optional<std::uint16_t> secondary_event_index_;
   std::optional<std::uint16_t> glock_secondary_event_index_;

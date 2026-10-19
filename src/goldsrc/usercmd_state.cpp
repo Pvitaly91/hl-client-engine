@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/usercmd_state.hpp>
+#include <hlclient/goldsrc/reference_client_move.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -83,7 +84,8 @@ namespace {
         kSyntheticGoldSrcButtonAttack |
         kSyntheticGoldSrcButtonJump | kSyntheticGoldSrcButtonDuck |
         kSyntheticGoldSrcButtonReload |
-        (use ? kSyntheticGoldSrcButtonUse | kSyntheticGoldSrcButtonAttack2 : 0U);
+        (use ? kSyntheticGoldSrcButtonUse | kSyntheticGoldSrcButtonAttack2 |
+            kReferenceGoldSrcButtonScore : 0U);
     return (use || info.compatibility_profile == GoldSrcUserCmdCompatibilityProfile::
                public_goldsrc48_jump_duck_weapon_prediction_v3) &&
            info.input_mapping_profile == GoldSrcUserCmdInputMappingProfile::

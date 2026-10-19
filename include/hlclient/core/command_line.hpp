@@ -97,6 +97,8 @@ enum class RuntimeReplayVisualOption {
 struct CommandLineOptions {
     // Direct external client configuration is distinct from research CLI.
     bool external_server_client{};
+    // Application idle/console startup, not a connection or research stop.
+    bool open_client{};
     std::optional<std::string> external_config;
     std::optional<std::uintptr_t> external_cancel_event;
     VideoSettings video;

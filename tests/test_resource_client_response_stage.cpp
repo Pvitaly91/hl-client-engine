@@ -16,6 +16,8 @@
 #include <catch2/catch_approx.hpp>
 
 #include <hlclient/client/client_world_state.hpp>
+#include <hlclient/core/movement_correction_witness.hpp>
+#include <hlclient/core/multiplayer_diagnostics.hpp>
 #include <hlclient/game_api/game_client_host.hpp>
 #include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
 #include <hlclient/games/halflife/client_module.hpp>
@@ -26,6 +28,7 @@
 #include <hlclient/goldsrc/reference_client_move.hpp>
 #include <hlclient/goldsrc/resource_client_response_stage.hpp>
 #include <hlclient/goldsrc/stock_spawn_request.hpp>
+#include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
 #include <hlclient/resource_consistency/provider.hpp>
@@ -52,6 +55,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -66,6 +70,16 @@ namespace user_fixture = hlclient::test::user_info_fixture;
 namespace goldsrc = hlclient::goldsrc;
 namespace local = hlclient::local_resources;
 namespace network = hlclient::network;
+
+void check_live_receipt_counter_equivalence(const goldsrc::LiveRuntimeStage& stage) {
+  const auto snapshot = stage.live_usercmd_snapshot();
+  const auto counters = stage.live_usercmd_receipt_counters();
+  REQUIRE(counters.has_value() == snapshot.has_value());
+  if (!snapshot) return;
+  CHECK(counters->new_command_submission_count == snapshot->new_command_submission_count);
+  CHECK(counters->transmitted_packet_count == snapshot->transmitted_packet_count);
+  CHECK(counters->server_sample_count == snapshot->server_sample_count);
+}
 
 // Project-owned alternate module used only to prove the neutral host -> live
 // command cache -> prediction path.  The second accepted command receives one
@@ -574,6 +588,47 @@ live_response_config() {
   return payload;
 }
 
+// Independent bit-level fixture: file rows with optional consistency requests
+// by full-list ordinal (not the rows' model precache indices starting at eight).
+[[nodiscard]] std::vector<std::byte> file_consistency_resource_payload(
+    const std::string_view name, const bool enabled, const bool request_file,
+    const std::uint16_t row_count = 1U) {
+  REQUIRE(row_count > 0U);
+  REQUIRE(row_count <= 1000U);
+  resource_list_test_fixture::LsbBitWriter writer;
+  writer.write(43U, 8U);
+  writer.write(row_count, 12U);
+  for (std::uint16_t row = 0U; row < row_count; ++row) {
+    writer.write(2U, 4U);
+    for (const auto character : name)
+      writer.write(static_cast<unsigned char>(character), 8U);
+    writer.write(0U, 8U);
+    writer.write(8U + row, 12U);
+    writer.write(3U, 24U);
+    writer.write(0U, 4U);
+  }
+  writer.write(enabled ? 1U : 0U, 1U);
+  if (enabled) {
+    if (request_file) {
+      writer.write(1U, 1U);
+      writer.write(0U, 1U);
+      writer.write(0U, 10U);
+      for (std::uint16_t row = 1U; row < row_count; ++row) {
+        writer.write(1U, 1U);
+        writer.write(1U, 1U);
+        writer.write(1U, 5U);
+      }
+    }
+    writer.write(0U, 1U);
+  }
+  writer.write(0U, (8U - (writer.bit_length() & 7U)) & 7U);
+  auto list = writer.take_bytes();
+  std::vector<std::byte> payload{std::byte{45U}, std::byte{1U}, std::byte{0U},
+      std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{0U}};
+  payload.insert(payload.end(), list.begin(), list.end());
+  return payload;
+}
+
 [[nodiscard]] goldsrc::ClientToServerNetchanPacket
 decode_sent(const SentDatagram &datagram) {
   const auto decoded =
@@ -918,7 +973,8 @@ live_runtime_record(const float server_time, const std::uint32_t health,
     const bool brush = false, const std::optional<unsigned> lift_z_eighths = {}, const bool boxes=false,
     const std::optional<unsigned> unrelated_box_x_eighths = {}, const bool include_clientdata = true,
     const std::optional<unsigned> velocity_z_eighths = {},
-    const bool explicitly_grounded = false) {
+    const bool explicitly_grounded = false,
+    const std::optional<unsigned> unrelated_box_z_eighths = {}) {
   delta_fixture::BitWriter writer;
   writer.write(7U, 8U);
   writer.write(std::bit_cast<std::uint32_t>(server_time), 32U);
@@ -987,7 +1043,7 @@ live_runtime_record(const float server_time, const std::uint32_t health,
     writer.write(1U,1U); writer.write(0U,1U); writer.write(0U,1U);
     writer.write(2U,3U); writer.write(0xffffU,16U);
     writer.write(goldsrc_signed_positive(*unrelated_box_x_eighths),16U);
-    writer.write(0U,16U); writer.write(goldsrc_signed_positive(60U*8U),16U);
+    writer.write(0U,16U); writer.write(goldsrc_signed_positive(unrelated_box_z_eighths.value_or(60U*8U)),16U);
     for(unsigned i=0;i<3;++i) writer.write(0U,16U);
     writer.write(0U,16U); writer.write(2U,3U); writer.write(3U,4U); writer.write(0U,8U);
     for(unsigned i=0;i<3;++i) writer.write(goldsrc_signed_positive(4U*8U)|1U,16U);
@@ -1174,6 +1230,17 @@ struct LiveVisualReadyDrive final {
   goldsrc::LiveRuntimeStageTimePoint ready_at{};
 };
 
+class MultiplayerNetworkTestSink final : public hlclient::core::MultiplayerDiagnosticSink {
+public:
+  bool enabled() const noexcept override {return on;}
+  bool observe(const hlclient::core::MultiplayerDiagnosticEvent& event) noexcept override {
+    if(events.size()>=4096U) return false;
+    try {events.push_back(event);return true;}catch(...){return false;}
+  }
+  bool on{true};
+  std::vector<hlclient::core::MultiplayerDiagnosticEvent> events;
+};
+
 // Full production owner, including the typed resource response, spawn and
 // sendents handoff. Failure tests below inject only transport observations;
 // they never manufacture a retained-driver pointer or a ready usercmd stage.
@@ -1225,6 +1292,216 @@ struct LiveVisualReadyDrive final {
   REQUIRE_FALSE(stage.terminal());
   while (stage.poll_event()) {}
   return {resource_sequence + 5U, ready_at};
+}
+
+TEST_CASE("Live command timeline binds actual interpolation reserve and release wire values",
+          "[goldsrc][live-runtime][multiplayer-diagnostics][lerp-contract]") {
+  namespace diag=hlclient::core;
+  FakeTransport transport;
+  const auto remote=network::NetworkAddress::loopback(27866U);
+  const auto epoch=goldsrc::LiveRuntimeStageTimePoint{}+80s;
+  hlclient::client::ClientWorldState world;
+  auto config=live_test_config();MultiplayerNetworkTestSink sink;
+  config.multiplayer_diagnostics=&sink;
+  config.movement_diagnostic_generations=[] {return std::array<std::uint64_t,2>{9,4};};
+  config.operation_mode=goldsrc::LiveRuntimeOperationMode::live_visual_control;
+  config.live_visual_input_source=goldsrc::LiveVisualControlInputSource::keyboard_mouse;
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+  const auto route=drive_live_visual_ready(stage,transport,remote,epoch);
+  auto now=route.ready_at+1ms;
+  goldsrc::LiveVisualControlInput input{1,1,0,0,90,30,true,true};
+  input.input_sample_ns=diag::multiplayer_diagnostic_now_ns();
+  input.effective_interpolation_seconds=.075;
+  REQUIRE(stage.submit_live_visual_input(input,now));
+  REQUIRE(stage.activate_live_visual_control(now));
+  for (const auto invalid_reserve : {-0.001, 0.100001, 0.512,
+      std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+    auto invalid = input;
+    ++invalid.input_revision;
+    invalid.effective_interpolation_seconds = invalid_reserve;
+    CHECK_FALSE(stage.submit_live_visual_input(invalid, now));
+  }
+  sink.events.clear();
+  auto registry=hlclient::test::usercmd_fixture::exact_registry();
+  auto bound=goldsrc::bind_goldsrc_usercmd_schema(registry,
+      goldsrc::GoldSrcUserCmdSchemaBindingProfile::public_goldsrc48_usercmd_schema_v1);
+  REQUIRE(bound);goldsrc::GoldSrcReferenceClientMoveCodec codec{*bound.binding,1U};
+  const auto primary=hlclient::gameplay_input::gameplay_button_mask(
+      hlclient::gameplay_input::GameplayButton::attack_primary);
+  for(unsigned tick=0;tick<5;++tick) {
+    const auto expected_lerp=tick==0 || tick==3 ? 75U : tick==1 ? 100U : 0U;
+    input.effective_interpolation_seconds=static_cast<double>(expected_lerp)/1000.0;
+    if(tick==4) input.effective_interpolation_seconds.reset(); // unavailable is not configured 100 ms.
+    sink.on=tick!=3; // actual wire contract does not depend on recording being enabled.
+    ++input.input_revision;input.pressed_buttons=tick==0 ? primary : 0U;
+    input.held_buttons=tick==0 ? primary : 0U;input.released_buttons=tick==1 ? primary : 0U;
+    REQUIRE(stage.submit_live_visual_input(input,now));
+    CHECK_FALSE(stage.submit_live_visual_input(input,now));
+    auto stale=input;stale.generation=2;stale.input_revision++;
+    CHECK_FALSE(stage.submit_live_visual_input(stale,now));
+    now+=20ms;stage.update(now);REQUIRE_FALSE(stage.terminal());
+    const auto sent=decode_sent(transport.sent.back());
+    goldsrc::ReferenceMoveSource source;source.generation=1U;
+    source.sequence=sent.header.sequence.sequence.value();
+    const auto decoded=goldsrc::decode_reference_client_payload(codec,sent.payload,
+        source);
+    REQUIRE_FALSE(decoded.error);REQUIRE(decoded.moves.size()==1U);
+    REQUIRE(decoded.moves[0].new_count==1U);
+    const auto& wire=decoded.moves[0].commands.back().value;
+    CHECK(wire.lerp_msec==expected_lerp); // literal reserve, not the configured maximum or prior command.
+    if(tick==0) {
+      // Independent LSB extraction of descriptor field zero, not the codec's
+      // projection/readback. Munging itself has separate fixed-byte vectors.
+      const auto start=decoded.moves[0].start_byte;
+      const auto length=std::to_integer<unsigned>(sent.payload[start+1]);
+      std::vector<std::byte> body(sent.payload.begin()+static_cast<std::ptrdiff_t>(start+3),sent.payload.end());
+      REQUIRE(goldsrc::transform_reference_move_body(body,length,source.sequence,true));
+      REQUIRE(std::to_integer<unsigned>(body[1])==0U);
+      REQUIRE(std::to_integer<unsigned>(body[2])==1U);
+      std::size_t bit=24;
+      const auto read=[&](unsigned width) {
+        std::uint32_t value{};
+        for(unsigned i=0;i<width;++i,++bit) {
+          REQUIRE(bit<body.size()*8);
+          value|=((std::to_integer<unsigned>(body[bit/8])>>(bit%8))&1U)<<i;
+        }
+        return value;
+      };
+      const auto masks=read(3);REQUIRE(masks<=2U);
+      std::uint32_t mask{};for(unsigned i=0;i<masks;++i)mask|=read(8)<<(i*8);
+      const auto literal_lerp=(mask&1U)!=0U ? read(9) : 0U;
+      CHECK(literal_lerp==75U);
+    }
+    CHECK(wire.msec==20U);CHECK(wire.buttons==(tick==0 ? 1U : 0U));
+    CHECK(wire.angle_turns[0]==60075U);CHECK(wire.angle_turns[1]==16384U);
+    const auto command=stage.poll_weapon_command_submission();REQUIRE(command);
+    if(!sink.on) {
+      CHECK(std::none_of(sink.events.begin(),sink.events.end(),[&](const auto& event) {
+        return event.identity.command_id==command->command_sequence;
+      }));
+      continue;
+    }
+    const diag::MultiplayerCommandPayload* accepted=nullptr;
+    for(const auto& event:sink.events) if(event.identity.command_id==command->command_sequence) {
+      if(const auto* value=std::get_if<diag::MultiplayerCommandPayload>(&event.payload);
+          value && value->phase==diag::MultiplayerCommandPhase::history_inserted) {
+        REQUIRE(accepted==nullptr);accepted=value;
+        CHECK(event.identity.network_generation==9U);CHECK(event.identity.map_generation==4U);
+        CHECK(event.identity.input_sequence==input.input_revision);
+      }
+    }
+    REQUIRE(accepted);CHECK(accepted->buttons==wire.buttons);CHECK(accepted->lerp_msec==wire.lerp_msec);
+    CHECK(accepted->angle_turns==wire.angle_turns);CHECK(accepted->input_sample_ns==input.input_sample_ns);
+    REQUIRE(accepted->build_ns);REQUIRE(accepted->history_insert_ns);
+    CHECK(*accepted->build_ns<=*accepted->history_insert_ns);
+    CHECK(accepted->configured_interpolation_seconds==.1);
+    CHECK(accepted->effective_interpolation_seconds==input.effective_interpolation_seconds);
+    if(tick==1) CHECK(decoded.moves[0].commands.front().value.lerp_msec==75U); // immutable backup unchanged.
+    unsigned packet_receipts{};
+    for(const auto& event:sink.events) if(event.identity.producer==diag::MultiplayerDiagnosticProducer::command_transmission &&
+        event.identity.carrier_packet==sent.header.sequence.sequence.value()) {
+      if(const auto* value=std::get_if<diag::MultiplayerNetworkPayload>(&event.payload);
+          value && value->phase==diag::MultiplayerNetworkPhase::packet_sent) {
+        ++packet_receipts;CHECK(value->last_command_id==command->command_sequence);
+        CHECK(value->inclusion_count==value->command_count+value->backup_count);
+        CHECK(value->command_ids[value->inclusion_count-1U]==command->command_sequence);
+        CHECK(event.knowledge==diag::MultiplayerKnowledge::command_sent);
+      }
+    }
+    CHECK(packet_receipts==1U);
+  }
+  const auto revision=world.runtime_publication_revision();
+  const auto last=decode_sent(transport.sent.back());
+  sink.events.clear();
+  // Truncated svc_time is rejected by the sole production record parser.
+  const std::array malformed_time{std::byte{7U},std::byte{0U}};
+  transport.queue(remote,server_packet(route.next_server_sequence,false,
+      last.header.sequence.sequence.value(),false,service_envelope(malformed_time)));
+  now+=1ms;stage.update(now);REQUIRE(stage.terminal());
+  CHECK(world.runtime_publication_revision()==revision);
+  unsigned commits{},rollbacks{},acks{};
+  for(const auto& event:sink.events)if(const auto* value=std::get_if<diag::MultiplayerNetworkPayload>(&event.payload)) {
+    commits+=value->phase==diag::MultiplayerNetworkPhase::committed;
+    rollbacks+=value->phase==diag::MultiplayerNetworkPhase::rollback;
+    acks+=value->phase==diag::MultiplayerNetworkPhase::transport_ack;
+    if(value->phase==diag::MultiplayerNetworkPhase::transport_ack)
+      CHECK(event.knowledge==diag::MultiplayerKnowledge::transport_acknowledged);
+  }
+  CHECK(commits==0U);CHECK(rollbacks==1U);CHECK(acks==1U);
+}
+
+TEST_CASE("Live commit timeline attaches server time only to its fresh owning record",
+          "[goldsrc][live-runtime][multiplayer-diagnostics][clock-ownership]") {
+  namespace diag=hlclient::core;
+  FakeTransport transport;
+  const auto remote=network::NetworkAddress::loopback(27866U);
+  const auto epoch=goldsrc::LiveRuntimeStageTimePoint{}+80s;
+  hlclient::client::ClientWorldState world;
+  auto config=live_test_config();MultiplayerNetworkTestSink sink;
+  config.multiplayer_diagnostics=&sink;
+  config.movement_diagnostic_generations=[] {return std::array<std::uint64_t,2>{9,4};};
+  config.operation_mode=goldsrc::LiveRuntimeOperationMode::live_visual_control;
+  config.live_visual_input_source=goldsrc::LiveVisualControlInputSource::keyboard_mouse;
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+  const auto route=drive_live_visual_ready(stage,transport,remote,epoch);
+  auto next_sequence=route.next_server_sequence;
+  auto now=route.ready_at;
+  const auto commit=[&](const std::span<const std::byte> body) {
+    sink.events.clear();
+    const auto sent=decode_sent(transport.sent.back());
+    transport.queue(remote,server_packet(next_sequence++,false,
+        sent.header.sequence.sequence.value(),sent.header.sequence.flags.reliable,
+        service_envelope(body)));
+    now+=1ms;stage.update(now);
+  };
+  delta_fixture::BitWriter time;
+  time.write(7U,8U);time.write(std::bit_cast<std::uint32_t>(102.5F),32U);
+  commit(time.bytes());
+  REQUIRE_FALSE(stage.terminal());
+  REQUIRE(world.runtime_observation());
+  REQUIRE(world.runtime_observation()->server_time_metadata.source);
+  const auto time_source=*world.runtime_observation()->server_time_metadata.source;
+  unsigned fresh_commits{};
+  for(const auto& event:sink.events) {
+    CHECK_FALSE(std::holds_alternative<diag::MultiplayerClockMappingPayload>(event.payload));
+    const auto* value=std::get_if<diag::MultiplayerNetworkPayload>(&event.payload);
+    if(!value || value->phase!=diag::MultiplayerNetworkPhase::committed)continue;
+    ++fresh_commits;CHECK(event.server_seconds==102.5);
+    CHECK(event.server_time_domain==diag::MultiplayerTimeDomain::server_simulation_seconds);
+    CHECK(event.identity.source_record==time_source.record_identity);
+    CHECK(event.identity.source_sequence==time_source.source_transport_sequence);
+    CHECK(event.provenance==diag::MultiplayerProvenance::runtime_observed);
+    REQUIRE(value->commit_ns);CHECK(*value->commit_ns>0U);
+  }
+  CHECK(fresh_commits==1U); // Positive control: fresh svc_time is not simply suppressed.
+  const std::array nop{std::byte{1U}};
+  commit(nop);REQUIRE_FALSE(stage.terminal());
+  REQUIRE(world.runtime_observation()->server_time_metadata.source);
+  CHECK(world.runtime_observation()->server_time_seconds==102.5);
+  CHECK(world.runtime_observation()->server_time_metadata.source->record_identity==time_source.record_identity);
+  unsigned retained_commits{};
+  for(const auto& event:sink.events) {
+    CHECK_FALSE(std::holds_alternative<diag::MultiplayerClockMappingPayload>(event.payload));
+    const auto* value=std::get_if<diag::MultiplayerNetworkPayload>(&event.payload);
+    if(!value || value->phase!=diag::MultiplayerNetworkPhase::committed)continue;
+    ++retained_commits;CHECK_FALSE(event.server_seconds);
+    CHECK(event.server_time_domain==diag::MultiplayerTimeDomain::unknown);
+    CHECK(event.identity.source_record!=time_source.record_identity);
+  }
+  CHECK(retained_commits==1U);
+  const auto revision=world.runtime_publication_revision();
+  const std::array malformed{std::byte{7U},std::byte{0U}};
+  commit(malformed);REQUIRE(stage.terminal());
+  CHECK(world.runtime_publication_revision()==revision);
+  unsigned rollbacks{};
+  for(const auto& event:sink.events) {
+    if(event.identity.producer!=diag::MultiplayerDiagnosticProducer::runtime_commit)continue;
+    CHECK_FALSE(event.server_seconds);
+    const auto* value=std::get_if<diag::MultiplayerNetworkPayload>(&event.payload);
+    REQUIRE(value);CHECK(value->phase!=diag::MultiplayerNetworkPhase::committed);
+    rollbacks+=value->phase==diag::MultiplayerNetworkPhase::rollback;
+  }
+  CHECK(rollbacks==1U);
 }
 
 TEST_CASE("Live owner retains exact terminal driver cause across teardown",
@@ -1432,7 +1709,7 @@ TEST_CASE("Live owner retains driver cause before first map and signon publicati
 }
 
 TEST_CASE("Live owner preserves sent move receipt before same pump RX rejection",
-          "[e311][driver-failure][goldsrc][live-runtime][integration][usercmd][shared-driver]") {
+          "[e311][driver-failure][goldsrc][live-runtime][integration][usercmd][shared-driver][b080-receipt-counters]") {
   FakeTransport transport;
   const auto remote = network::NetworkAddress::loopback(27'867U);
   const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 90s;
@@ -1484,9 +1761,11 @@ TEST_CASE("Live owner preserves sent move receipt before same pump RX rejection"
   CHECK(snapshot->generated_command_count == 1U);
   CHECK(snapshot->new_command_submission_count == expected_move_receipts);
   CHECK(snapshot->transmitted_packet_count == expected_move_receipts);
+  check_live_receipt_counter_equivalence(stage);
   stage.update(active_at + 40ms);
   CHECK(stage.usercmd_transmit_count() == expected_move_receipts);
   CHECK(stage.cleanup_count() == 1U);
+  check_live_receipt_counter_equivalence(stage);
 }
 
 TEST_CASE("Resource response requires an explicit provider and sends no "
@@ -2204,6 +2483,87 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "Pre-ACK transition tail is restored before later driver payloads without replay",
+    "[goldsrc][resource-response][stage][ordering][pre-ack][regression]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27'861U);
+  const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 10s;
+  std::vector<goldsrc::ResourceResponsePayloadDiagnostic> controls;
+  goldsrc::ResourceClientResponseStage stage{
+      transport, remote, live_response_config(), nullptr,
+      {}, {}, {}, {}, {}, {}, {},
+      [&controls](const goldsrc::ResourceClientResponseTraceEvent &event) {
+        if (event.classification == goldsrc::ResourceClientResponseTraceClassification::
+                                        pre_transmit_control_consumed ||
+            event.classification == goldsrc::ResourceClientResponseTraceClassification::
+                                        post_transmit_control_consumed) {
+          REQUIRE(event.payload_diagnostic);
+          controls.push_back(*event.payload_diagnostic);
+        }
+      }};
+  const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+  const auto request_sequence = driven.request.header.sequence.sequence.value();
+
+  // The resource boundary and two subsequent controls arrive before the
+  // reliable sendres ACK. No semantic decode may precede that ACK.
+  transport.queue(remote, server_packet(2U, true, request_sequence, true,
+      service_envelope(resource_semantic_payload())));
+  stage.update(epoch + 4ms);
+  for (std::uint32_t source = 3U; source <= 4U; ++source) {
+    transport.queue(remote, server_packet(source, false, request_sequence, true,
+        std::vector<std::byte>(source - 2U, std::byte{1U})));
+    stage.update(epoch + std::chrono::milliseconds{source + 2U});
+  }
+  REQUIRE_FALSE(stage.terminal());
+  CHECK(stage.response_queue_count() == 0U);
+  CHECK(controls.empty());
+  REQUIRE(transport.incoming.empty());
+
+  // A later payload is already in the driver event ring when the retained
+  // pre-ACK tail is handed back. The tail must precede it in FIFO order.
+  const auto covering_ack = decode_sent(transport.sent.back()).header.sequence.sequence.value();
+  REQUIRE(covering_ack > request_sequence);
+  transport.queue(remote, server_packet(5U, false, covering_ack, false));
+  transport.queue(remote, server_packet(6U, false, covering_ack, false,
+      std::vector<std::byte>(3U, std::byte{1U})));
+  stage.update(epoch + 7ms);
+  REQUIRE_FALSE(stage.terminal());
+  REQUIRE(stage.response_transmitted());
+  REQUIRE(controls.size() == 3U);
+  constexpr std::array expected_sequences{3U, 4U, 6U};
+  constexpr std::array expected_counts{1U, 3U, 6U};
+  for (std::size_t index = 0U; index < controls.size(); ++index) {
+    CHECK(controls[index].source_sequence == expected_sequences[index]);
+    CHECK(controls[index].source_acknowledgement == (index < 2U ? request_sequence : covering_ack));
+    CHECK(controls[index].wire_byte_count == index + 1U);
+    CHECK(controls[index].consumed_control_message_count == expected_counts[index]);
+    CHECK(controls[index].receive_position == goldsrc::ResourceResponseReceivePosition::
+                                                before_first_response_transmit);
+  }
+  CHECK(stage.initial_request_queue_count() == 1U);
+  CHECK(stage.transition_request_queue_count() == 1U);
+  CHECK(stage.response_queue_count() == 1U);
+  CHECK(stage.response_build_count() == 1U);
+  REQUIRE(transport.incoming.empty());
+
+  const auto transmitted_before_idle = transport.sent.size();
+  stage.update(epoch + 8ms);
+  CHECK(controls.size() == 3U);
+  CHECK(transport.sent.size() == transmitted_before_idle);
+  constexpr std::array empty_response{std::byte{0x05U}, std::byte{0U}, std::byte{0U}};
+  const auto response = require_response_packet(transport, empty_response);
+  transport.queue(remote, server_packet(7U, false,
+      response.header.sequence.sequence.value(), response.header.sequence.flags.reliable));
+  stage.update(epoch + 9ms);
+  REQUIRE(stage.result());
+  const auto &source = stage.result()->resource_list().transition().source_payload();
+  CHECK(source.source_sequence() == 2U);
+  CHECK(source.received_at() == epoch + 4ms);
+  CHECK(stage.result()->reliable_lifecycle().transmit_count() == 1U);
+  CHECK(controls.size() == 3U);
+}
+
+TEST_CASE(
     "Live response ordering preserves would-block history and rejects unknown "
     "pre-TX framing",
     "[goldsrc][resource-response][stage][ordering][backpressure][security]") {
@@ -2483,6 +2843,139 @@ TEST_CASE(
       }
     }
   }
+}
+
+TEST_CASE(
+    "Live response accepts only exact inert text and query controls without executing or replying",
+    "[goldsrc][resource-response][stage][ordering][public-server][security]") {
+  const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 10s;
+  constexpr std::array empty_response{std::byte{5U}, std::byte{0U}, std::byte{0U}};
+  for (const auto opcode : {8U, 9U, 57U, 58U}) {
+    for (const bool compressed : {false, true}) {
+      for (const bool after_transmit : {false, true}) {
+        DYNAMIC_SECTION("opcode=" << opcode << " compressed=" << compressed
+                                  << " after_transmit=" << after_transmit) {
+          FakeTransport transport;
+          const auto remote = network::NetworkAddress::loopback(27'868U);
+          goldsrc::ResourceClientResponseStage stage{transport, remote, live_response_config()};
+          const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+          const auto old_ack = driven.request.header.sequence.sequence.value();
+          std::vector<std::byte> body{std::byte{1U}, static_cast<std::byte>(opcode)};
+          if (opcode == 58U) {
+            body.insert(body.end(), {std::byte{45U}, std::byte{43U}, std::byte{0U}, std::byte{0U}});
+          }
+          // Embedded boundary values and command-like text are opaque data.
+          body.insert(body.end(), {std::byte{'q'}, std::byte{'u'}, std::byte{'i'},
+              std::byte{'t'}, std::byte{45U}, std::byte{43U}, std::byte{0U}});
+          const auto wire = compressed ? service_envelope(body) : body;
+          transport.queue(remote, server_packet(2U, false, old_ack, false,
+              service_envelope(resource_semantic_payload())));
+          if (after_transmit) stage.update(epoch + 4ms);
+          transport.queue(remote, server_packet(3U, false, old_ack, false, wire));
+          stage.update(epoch + (after_transmit ? 5ms : 4ms));
+          REQUIRE_FALSE(stage.terminal());
+          REQUIRE(stage.response_transmitted());
+          CHECK_FALSE(stage.response_acknowledged());
+          REQUIRE(stage.payload_diagnostic());
+          const auto &diagnostic = *stage.payload_diagnostic();
+          CHECK(diagnostic.actual_opcode == opcode);
+          CHECK(diagnostic.cursor_byte_offset == 1U);
+          CHECK(diagnostic.source_sequence == 3U);
+          CHECK(diagnostic.consumed_control_message_count == 2U);
+          CHECK(diagnostic.last_successful_handoff_cursor == body.size());
+          CHECK(diagnostic.classification == (after_transmit
+              ? goldsrc::ResourceResponsePayloadClassification::post_transmit_control
+              : goldsrc::ResourceResponsePayloadClassification::pre_transmit_control));
+          const auto events = drain_events(stage);
+          bool observed_control = false;
+          for (const auto &event : events) {
+            if (event.type == goldsrc::ResourceClientResponseStageEventType::pre_transmit_control_consumed ||
+                event.type == goldsrc::ResourceClientResponseStageEventType::post_transmit_control_consumed) {
+              CHECK(event.opcode == opcode);
+              observed_control = true;
+            }
+          }
+          CHECK(observed_control);
+          const auto sent_before_idle = transport.sent.size();
+          stage.update(epoch + 6ms);
+          CHECK(transport.sent.size() == sent_before_idle);
+          CHECK(stage.payload_diagnostic()->consumed_control_message_count == 2U);
+          CHECK(stage.response_queue_count() == 1U);
+          for (const auto &sent : transport.sent) {
+            const auto packet = decode_sent(sent);
+            if (packet.payload.empty()) continue;
+            const auto client_opcode = std::to_integer<unsigned>(packet.payload.front());
+            CHECK(client_opcode != 10U); // No clc_cvarvalue response.
+            CHECK(client_opcode != 11U); // No clc_cvarvalue2 response.
+          }
+          const auto response = require_response_packet(transport, empty_response);
+          transport.queue(remote, server_packet(4U, false,
+              response.header.sequence.sequence.value(), response.header.sequence.flags.reliable));
+          stage.update(epoch + 7ms);
+          REQUIRE(stage.result());
+          CHECK(stage.result()->reliable_lifecycle().transmit_count() == 1U);
+        }
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "Live response malformed inert controls fail closed at the proven cursor",
+    "[goldsrc][resource-response][stage][ordering][public-server][security]") {
+  const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 11s;
+  for (const auto opcode : {8U, 9U, 57U, 58U}) {
+    std::vector<std::byte> control{static_cast<std::byte>(opcode)};
+    if (opcode == 58U) {
+      control.insert(control.end(), {std::byte{45U}, std::byte{43U}, std::byte{0U}, std::byte{0U}});
+    }
+    control.insert(control.end(), {std::byte{'x'}, std::byte{45U}, std::byte{43U}, std::byte{0U}});
+    for (std::size_t length = 1U; length < control.size(); ++length) {
+      INFO("opcode=" << opcode << " prefix=" << length);
+      FakeTransport transport;
+      const auto remote = network::NetworkAddress::loopback(27'869U);
+      goldsrc::ResourceClientResponseStage stage{transport, remote, live_response_config()};
+      const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+      const auto ack = driven.request.header.sequence.sequence.value();
+      std::vector<std::byte> body{std::byte{1U}};
+      body.insert(body.end(), control.begin(), control.begin() + length);
+      transport.queue(remote, server_packet(2U, false, ack, false,
+          service_envelope(resource_semantic_payload())));
+      transport.queue(remote, server_packet(3U, false, ack, false, body));
+      stage.update(epoch + 4ms);
+      REQUIRE(stage.error());
+      CHECK(stage.error()->code == goldsrc::ResourceClientResponseStageErrorCode::pre_transmit_control_decode_failed);
+      REQUIRE(stage.error()->payload_diagnostic);
+      CHECK(stage.error()->payload_diagnostic->actual_opcode == opcode);
+      CHECK(stage.error()->payload_diagnostic->cursor_byte_offset == 1U);
+      CHECK(stage.error()->payload_diagnostic->control_code == goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+      CHECK_FALSE(stage.response_transmitted());
+      const auto events = drain_events(stage);
+      CHECK(event_count(events, goldsrc::ResourceClientResponseStageEventType::pre_transmit_control_consumed) == 0U);
+      CHECK_FALSE(stage.result());
+    }
+  }
+}
+
+TEST_CASE(
+    "Strict response policy still rejects valid inert queries",
+    "[goldsrc][resource-response][stage][ordering][public-server][security]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27'870U);
+  const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 12s;
+  auto config = live_response_config();
+  config.pre_transmit_payload_policy = goldsrc::ResourceResponsePreTransmitPayloadPolicy::reject;
+  goldsrc::ResourceClientResponseStage stage{transport, remote, config};
+  const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+  const auto ack = driven.request.header.sequence.sequence.value();
+  transport.queue(remote, server_packet(2U, false, ack, false,
+      service_envelope(resource_semantic_payload())));
+  transport.queue(remote, server_packet(3U, false, ack, false,
+      {std::byte{57U}, std::byte{'x'}, std::byte{0U}}));
+  stage.update(epoch + 4ms);
+  REQUIRE(stage.error());
+  CHECK(stage.error()->code == goldsrc::ResourceClientResponseStageErrorCode::server_payload_before_response_transmit);
+  CHECK_FALSE(stage.response_transmitted());
 }
 
 TEST_CASE(
@@ -2919,6 +3412,509 @@ TEST_CASE("Historical resource-list stop remains zero-queue and zero-send at "
   CHECK(connection_releases == 1U);
 }
 
+TEST_CASE("Live signon directory keeps the newest raced identity and vacancy",
+          "[goldsrc][live-runtime][integration][userinfo][public-server]") {
+  for (const bool vacant : {false, true}) {
+    CAPTURE(vacant);
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27893U);
+    const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 30s;
+    hlclient::client::ClientWorldState world;
+    auto config = live_test_config();
+    goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+    const auto driven = drive_live_initial(stage, transport, remote, epoch, false, false);
+    const auto sequence = driven.last_server_sequence + 1U;
+    auto resource = user_fixture::make_message(2U, 123U, "\\name\\Transition\\model\\gman");
+    const auto temporary = user_fixture::make_message(1U, 321U, "\\name\\Transient");
+    resource.insert(resource.end(), temporary.begin(), temporary.end());
+    const auto list = resource_semantic_payload();
+    resource.insert(resource.end(), list.begin(), list.end());
+    transport.queue(remote, server_packet(sequence, false,
+        driven.transition_request.header.sequence.sequence.value(), false, service_envelope(resource)));
+    transport.queue(remote, server_packet(sequence + 1U, false,
+        driven.transition_request.header.sequence.sequence.value(), false, {std::byte{1U}}));
+    for (std::size_t step = 1U; step <= 8U; ++step)
+      stage.update(driven.now + std::chrono::milliseconds{step});
+    constexpr std::array advertisement{std::byte{5U}, std::byte{0U}, std::byte{0U}};
+    const auto response = require_latest_payload(transport, advertisement);
+    auto updates = user_fixture::make_message(2U, 123U, "\\name\\Middle");
+    const auto newest = user_fixture::make_message(2U, vacant ? 0U : 123U,
+        vacant ? "" : "\\name\\Newest\\model\\barney");
+    const auto departed = user_fixture::make_message(1U, 0U, "");
+    updates.insert(updates.end(), newest.begin(), newest.end());
+    updates.insert(updates.end(), departed.begin(), departed.end());
+    auto now = driven.now + 9ms;
+    // Still in flight from before response TX: do not mistake this directory
+    // traffic for the semantic continuation or require a causally newer ACK.
+    transport.queue(remote, server_packet(sequence + 2U, true,
+        driven.transition_request.header.sequence.sequence.value(), false, updates));
+    stage.update(now);
+    INFO((stage.error() ? stage.error()->context : std::string{}));
+    REQUIRE_FALSE(stage.terminal());
+    const auto covering = decode_sent(transport.sent.back()).header.sequence.sequence.value();
+    transport.queue(remote, server_packet(sequence + 3U, false,
+        covering, response.header.sequence.flags.reliable));
+    stage.update(now += 1ms);
+    const auto spawn = require_latest_payload(transport,
+        goldsrc::StockSpawnRequestBuilder::build(0x12345678U,
+            goldsrc::decode_stock_server_world_map_crc(0xdeadbeefU, 0U)).encoding->semantic_bytes());
+    transport.queue(remote, server_packet(sequence + 4U, true,
+        spawn.header.sequence.sequence.value(), false,
+        live_baseline_and_runtime_payload(100.0F, 100U, 80U)));
+    stage.update(now += 1ms);
+    INFO((stage.error() ? stage.error()->context : std::string{}));
+    REQUIRE_FALSE(stage.terminal());
+    REQUIRE(world.runtime_observation());
+    config.game_client->set_hud_context({640U, 480U, true});
+    const auto board = config.game_client->hud(*world.runtime_observation(), 0.0);
+    const auto contains_name = [&](std::string_view name) {
+      return std::ranges::any_of(board.draw.texts, [&](const auto& text) { return text.text == name; });
+    };
+    CHECK(contains_name("Newest") == !vacant);
+    CHECK_FALSE(contains_name("Synthetic"));
+    CHECK_FALSE(contains_name("Transition"));
+    CHECK_FALSE(contains_name("Middle"));
+    CHECK_FALSE(contains_name("Transient"));
+    stage.cancel(now + 1ms);
+  }
+}
+
+TEST_CASE("Live response malformed userinfo cannot publish a partial directory snapshot",
+          "[goldsrc][resource-response][stage][userinfo][security]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27894U);
+  const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 10s;
+  goldsrc::ResourceClientResponseStage stage{transport, remote, live_response_config()};
+  const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+  auto malformed = user_fixture::make_message(2U, 123U, "\\name\\Valid");
+  const auto bad = user_fixture::make_message(32U, 123U, "\\name\\Bad-+");
+  malformed.insert(malformed.end(), bad.begin(), bad.end());
+  // Pre-TX controls require the complete body to validate; a later 45/43
+  // inside identity text cannot rescue the malformed record.
+  transport.queue(remote, server_packet(2U, false,
+      driven.request.header.sequence.sequence.value(), false,
+      service_envelope(resource_semantic_payload())));
+  transport.queue(remote, server_packet(3U, false,
+      driven.request.header.sequence.sequence.value(), false,
+      service_envelope(malformed)));
+  stage.update(epoch + 4ms);
+  REQUIRE(stage.error());
+  CHECK_FALSE(stage.result());
+  CHECK(stage.error()->code == goldsrc::ResourceClientResponseStageErrorCode::pre_transmit_control_decode_failed);
+  while (const auto event = stage.poll_event()) {
+    CHECK(event->type != goldsrc::ResourceClientResponseStageEventType::pre_transmit_control_consumed);
+    CHECK(event->type != goldsrc::ResourceClientResponseStageEventType::response_completion_ready);
+  }
+}
+
+TEST_CASE("Live runtime queues requested file consistency before spawn in one reliable generation",
+          "[goldsrc][live-runtime][integration][file-consistency]") {
+  for (const unsigned mode : {0U, 1U, 2U}) {
+    INFO("mode: no request=0, required empty=1, required file=2; mode=" << mode);
+    hlclient::tests::ScopedLocalResourceTestRoot root;
+    root.write("valve", "models/consistency_test.mdl", "abc");
+    auto roots = local::LocalResourceSearchRoots::create(root.path(), "valve");
+    REQUIRE(roots);
+    auto created = local::LocalResourceEnvironment::create(std::move(*roots.roots));
+    REQUIRE(created);
+    std::shared_ptr<const local::LocalResourceEnvironment> environment{
+        std::move(created.environment)};
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27891U);
+    const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 30s;
+    hlclient::client::ClientWorldState world;
+    auto config = live_test_config();
+    if (mode != 0U) config.file_consistency_environment = environment;
+    goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+    const auto driven = drive_live_initial(stage, transport, remote, epoch, false, false);
+    const auto resource_sequence = driven.last_server_sequence + 1U;
+    const auto resource_payload = file_consistency_resource_payload(
+        "models/consistency_test.mdl", mode != 0U, mode == 2U);
+    transport.queue(remote, server_packet(resource_sequence, false,
+        driven.transition_request.header.sequence.sequence.value(), false,
+        service_envelope(resource_payload)));
+    transport.queue(remote, server_packet(resource_sequence + 1U, false,
+        driven.transition_request.header.sequence.sequence.value(), false, {std::byte{1U}}));
+    for (std::size_t step = 1U; step <= 8U; ++step)
+      stage.update(driven.now + std::chrono::milliseconds{step});
+    constexpr std::array advertisement{std::byte{5U}, std::byte{0U}, std::byte{0U}};
+    const auto response = require_latest_payload(transport, advertisement);
+    const auto spawn_request = goldsrc::StockSpawnRequestBuilder::build(0x12345678U,
+        goldsrc::decode_stock_server_world_map_crc(0xdeadbeefU, 0U));
+    REQUIRE(spawn_request);
+    const auto spawn_bytes = spawn_request.encoding->semantic_bytes();
+    const auto list = goldsrc::ResourceListParser{}.parse(resource_payload, 9U);
+    REQUIRE(list);
+    auto consistency = goldsrc::build_file_consistency_response(
+        *list.state, *environment, 0x12345678U);
+    REQUIRE(consistency);
+    if (mode == 0U) CHECK(consistency.semantic_bytes.empty());
+    else {
+      REQUIRE_FALSE(consistency.semantic_bytes.empty());
+      CHECK(consistency.semantic_bytes.front() == std::byte{7U});
+    }
+    auto combined = std::move(consistency.semantic_bytes);
+    const auto response_length = combined.size();
+    combined.insert(combined.end(), spawn_bytes.begin(), spawn_bytes.end());
+    CHECK(std::ranges::equal(std::span<const std::byte>{combined}.subspan(response_length), spawn_bytes));
+    auto now = driven.now + 9ms;
+    transport.queue(remote, server_packet(resource_sequence + 2U, false,
+        response.header.sequence.sequence.value(), response.header.sequence.flags.reliable));
+    stage.update(now);
+    const auto has_combined = [&] {
+      return std::ranges::any_of(transport.sent, [&](const auto& datagram) {
+        return std::ranges::equal(decode_sent(datagram).payload, combined);
+      });
+    };
+    for (unsigned attempt = 0U; attempt < 2000U && !stage.terminal() && !has_combined(); ++attempt) {
+      std::this_thread::sleep_for(1ms);
+      stage.update(now += 1ms);
+    }
+    INFO((stage.error() ? stage.error()->context : std::string{}));
+    REQUIRE_FALSE(stage.terminal());
+    REQUIRE(has_combined());
+    auto spawn = require_latest_payload(transport, combined);
+    if (mode != 0U) {
+      CHECK_FALSE(std::ranges::any_of(transport.sent, [&](const auto& datagram) {
+        return std::ranges::equal(decode_sent(datagram).payload, spawn_bytes);
+      }));
+    }
+    auto next_server_sequence = resource_sequence + 3U;
+    if (mode == 2U) {
+      const auto first_spawn = spawn;
+      // Wrong-generation ACK followed by an ACK gap requests a transport
+      // retransmission. Hashing and semantic queueing must not repeat.
+      transport.queue(remote, server_packet(next_server_sequence++, true,
+          spawn.header.sequence.sequence.value(), true));
+      stage.update(now += 1ms);
+      const auto gap = decode_sent(transport.sent.back());
+      REQUIRE_FALSE(gap.header.sequence.flags.reliable);
+      transport.queue(remote, server_packet(next_server_sequence++, false,
+          gap.header.sequence.sequence.value(), true));
+      stage.update(now += 1ms);
+      INFO((stage.error() ? stage.error()->context : std::string{}));
+      REQUIRE_FALSE(stage.terminal());
+      spawn = require_latest_payload(transport, combined);
+      CHECK(spawn.header.sequence.sequence != first_spawn.header.sequence.sequence);
+      REQUIRE(first_spawn.fragments[0U]);
+      REQUIRE(spawn.fragments[0U]);
+      CHECK(spawn.fragments[0U]->packed_id() == first_spawn.fragments[0U]->packed_id());
+      CHECK(spawn.payload == first_spawn.payload);
+    }
+    // ACK the combined generation, not a second stand-alone spawn generation.
+    transport.queue(remote, server_packet(next_server_sequence++, true,
+        spawn.header.sequence.sequence.value(), false,
+        live_baseline_and_runtime_payload(100.0F, 100U, 80U)));
+    stage.update(now += 1ms);
+    stage.update(now += 1ms);
+    INFO((stage.error() ? stage.error()->context : std::string{}));
+    REQUIRE_FALSE(stage.terminal());
+    const auto sendents = require_latest_payload(transport,
+        goldsrc::StockSendEntitiesRequestBuilder::build().semantic_bytes());
+    transport.queue(remote, server_packet(next_server_sequence++, false,
+        sendents.header.sequence.sequence.value(), sendents.header.sequence.flags.reliable,
+        service_envelope(live_runtime_record(101.0F, 90U, 96U))));
+    stage.update(now += 1ms);
+    stage.update(now + 2s + 1ms);
+    INFO((stage.error() ? stage.error()->context : std::string{}));
+    REQUIRE(stage.result());
+    CHECK(stage.result()->spawn_request_queue_count == 1U);
+    CHECK(stage.result()->spawn_request_transmitted);
+    CHECK(stage.result()->spawn_request_acknowledged);
+    CHECK(stage.result()->signon_reply_acknowledged);
+    std::size_t queued_events = 0U;
+    while (const auto event = stage.poll_event()) {
+      if (event->type == goldsrc::LiveRuntimeStageEventType::spawn_request_queued) {
+        ++queued_events;
+        CHECK(event->payload_byte_count == combined.size());
+      }
+    }
+    CHECK(queued_events == 1U);
+  }
+}
+
+TEST_CASE("Live runtime preserves a multipart file consistency and spawn generation through ACKs and retries",
+          "[goldsrc][live-runtime][integration][file-consistency][fragment][retransmit]") {
+  unsigned batch_mode = 0U;
+  SECTION("fragment ACKs arrive in separate updates") {}
+  SECTION("two fragment ACKs arrive in one transport update") { batch_mode = 1U; }
+  SECTION("the whole remaining transfer completes in one transport update") { batch_mode = 2U; }
+
+  constexpr std::uint16_t row_count = 400U;
+  hlclient::tests::ScopedLocalResourceTestRoot root;
+  // Distinct precache identities may refer to the same real local file.
+  root.write("valve", "models/t.mdl", "abc");
+  auto roots = local::LocalResourceSearchRoots::create(root.path(), "valve");
+  REQUIRE(roots);
+  auto created = local::LocalResourceEnvironment::create(std::move(*roots.roots));
+  REQUIRE(created);
+  std::shared_ptr<const local::LocalResourceEnvironment> environment{
+      std::move(created.environment)};
+  const auto resource_payload = file_consistency_resource_payload(
+      "models/t.mdl", true, true, row_count);
+  const auto list = goldsrc::ResourceListParser{}.parse(resource_payload, 9U);
+  REQUIRE(list);
+  REQUIRE(list.state->file_consistency_ordinals().size() == row_count);
+  auto built = goldsrc::build_file_consistency_response(*list.state, *environment, 0x12345678U);
+  INFO((built.error ? built.error->context : std::string{}));
+  REQUIRE(built);
+  auto combined = std::move(built.semantic_bytes);
+  REQUIRE(combined.front() == std::byte{7U});
+  const auto spawn_request = goldsrc::StockSpawnRequestBuilder::build(0x12345678U,
+      goldsrc::decode_stock_server_world_map_crc(0xdeadbeefU, 0U));
+  REQUIRE(spawn_request);
+  const auto spawn_bytes = spawn_request.encoding->semantic_bytes();
+  combined.insert(combined.end(), spawn_bytes.begin(), spawn_bytes.end());
+  constexpr auto chunk_size = goldsrc::kStockProtocol48NormalFragmentChunkSize;
+  REQUIRE(combined.size() > 2U * chunk_size);
+  const auto fragment_count = static_cast<std::uint16_t>(
+      (combined.size() + chunk_size - 1U) / chunk_size);
+  REQUIRE(fragment_count >= 3U);
+
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27895U);
+  const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 40s;
+  hlclient::client::ClientWorldState world;
+  auto config = live_test_config();
+  config.file_consistency_environment = environment;
+  config.resource_response.resource_list.maximum_stage_events = row_count + 3U;
+  goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+  const auto driven = drive_live_initial(stage, transport, remote, epoch, false, false);
+  auto server_sequence = driven.last_server_sequence + 1U;
+  transport.queue(remote, server_packet(server_sequence++, false,
+      driven.transition_request.header.sequence.sequence.value(), false,
+      service_envelope(resource_payload)));
+  transport.queue(remote, server_packet(server_sequence++, false,
+      driven.transition_request.header.sequence.sequence.value(), false, {std::byte{1U}}));
+  for (std::size_t step = 1U; step <= 8U; ++step)
+    stage.update(driven.now + std::chrono::milliseconds{step});
+  INFO((stage.error() ? stage.error()->context : std::string{}));
+  REQUIRE_FALSE(stage.terminal());
+  constexpr std::array advertisement{std::byte{5U}, std::byte{0U}, std::byte{0U}};
+  const auto response = require_latest_payload(transport, advertisement);
+  const auto spawn_datagram_begin = transport.sent.size();
+  auto now = driven.now + 9ms;
+  transport.queue(remote, server_packet(server_sequence++, false,
+      response.header.sequence.sequence.value(), response.header.sequence.flags.reliable));
+  stage.update(now);
+
+  std::size_t queued_events = 0U, transmitted_events = 0U, acknowledged_events = 0U;
+  const auto drain_events = [&] {
+    while (const auto event = stage.poll_event()) {
+      if (event->type == goldsrc::LiveRuntimeStageEventType::spawn_request_queued) {
+        ++queued_events;
+        CHECK(event->payload_byte_count == combined.size());
+      } else if (event->type == goldsrc::LiveRuntimeStageEventType::spawn_request_transmitted) {
+        ++transmitted_events;
+        CHECK(event->payload_byte_count == combined.size());
+      } else if (event->type == goldsrc::LiveRuntimeStageEventType::spawn_request_acknowledged) {
+        ++acknowledged_events;
+      }
+    }
+  };
+  const auto update_active = [&] {
+    stage.update(now += 1ms);
+    INFO((stage.error() ? stage.error()->context : std::string{}));
+    REQUIRE_FALSE(stage.terminal());
+    drain_events();
+  };
+  const auto find_fragment = [&](const std::uint16_t index)
+      -> std::optional<goldsrc::ClientToServerNetchanPacket> {
+    for (auto i = transport.sent.size(); i > spawn_datagram_begin; --i) {
+      auto packet = decode_sent(transport.sent[i - 1U]);
+      if (!packet.fragments[0U] || !packet.fragments[0U]->packed_id()) continue;
+      const auto id = *packet.fragments[0U]->packed_id();
+      if (id.fragment_count() == fragment_count && id.fragment_index() == index)
+        return packet;
+    }
+    return {};
+  };
+  for (unsigned attempt = 0U; attempt < 2000U && !stage.terminal() && !find_fragment(1U); ++attempt) {
+    std::this_thread::sleep_for(1ms);
+    update_active();
+  }
+  INFO((stage.error() ? stage.error()->context : std::string{}));
+  REQUIRE_FALSE(stage.terminal());
+  drain_events();
+  REQUIRE(find_fragment(1U));
+  CHECK(queued_events == 1U);
+  CHECK(transmitted_events == 1U);
+  CHECK(acknowledged_events == 0U);
+  CHECK_FALSE(world.runtime_observation());
+
+  const auto retry_fragment = [&](goldsrc::ClientToServerNetchanPacket packet,
+      const bool toggle) {
+    REQUIRE(packet.fragments[0U]);
+    const auto id = *packet.fragments[0U]->packed_id();
+    // A wrong toggle is insufficient; only the following advanced ACK gap
+    // asks the transport to retry the same fragment, not rebuild/requeue spawn.
+    transport.queue(remote, server_packet(server_sequence++, true,
+        packet.header.sequence.sequence.value(), !toggle));
+    update_active();
+    const auto gap = decode_sent(transport.sent.back());
+    REQUIRE_FALSE(gap.header.sequence.flags.reliable);
+    transport.queue(remote, server_packet(server_sequence++, false,
+        gap.header.sequence.sequence.value(), !toggle));
+    update_active();
+    const auto retry = find_fragment(id.fragment_index());
+    REQUIRE(retry);
+    REQUIRE(retry->fragments[0U]);
+    CHECK(retry->fragments[0U]->packed_id() == packet.fragments[0U]->packed_id());
+    CHECK(retry->payload == packet.payload);
+    CHECK(retry->header.sequence.sequence != packet.header.sequence.sequence);
+    CHECK(queued_events == 1U);
+    CHECK(transmitted_events == 1U);
+    CHECK(acknowledged_events == 0U);
+    return *retry;
+  };
+
+  auto current = retry_fragment(*find_fragment(1U), false);
+  std::uint16_t current_index = 1U;
+  if (batch_mode != 0U) {
+    // Reliable server carriers cause the driver to emit the next fragment
+    // during RX. A second covering ACK is therefore legal in the same update.
+    const auto second_sequence = decode_sent(transport.sent.back()).header.sequence.sequence.value() + 1U;
+    transport.queue(remote, server_packet(server_sequence++, true,
+        current.header.sequence.sequence.value(), false));
+    const auto ack_through = batch_mode == 2U ? fragment_count : 2U;
+    for (std::uint16_t index = 2U; index <= ack_through; ++index) {
+      auto payload = batch_mode == 2U && index == fragment_count
+          ? live_baseline_and_runtime_payload(100.0F, 100U, 80U) : std::vector<std::byte>{};
+      transport.queue(remote, server_packet(server_sequence++, true,
+          second_sequence + index - 2U, (index % 2U) == 0U, std::move(payload)));
+    }
+    update_active();
+    REQUIRE(find_fragment(2U));
+    CHECK(find_fragment(2U)->header.sequence.sequence.value() == second_sequence);
+    REQUIRE(find_fragment(3U));
+    current_index = batch_mode == 2U ? fragment_count : 3U;
+    current = *find_fragment(current_index);
+    CHECK(acknowledged_events == (batch_mode == 2U ? 1U : 0U));
+    if (batch_mode == 2U) REQUIRE(world.runtime_observation());
+  }
+  while (current_index < fragment_count) {
+    const bool toggle = (current_index % 2U) == 0U;
+    transport.queue(remote, server_packet(server_sequence++, true,
+        current.header.sequence.sequence.value(), toggle));
+    update_active();
+    CHECK(acknowledged_events == 0U);
+    CHECK_FALSE(world.runtime_observation());
+    ++current_index;
+    REQUIRE(find_fragment(current_index));
+    current = *find_fragment(current_index);
+  }
+
+  std::vector<std::byte> reconstructed;
+  for (std::uint16_t index = 1U; index <= fragment_count; ++index) {
+    const auto packet = find_fragment(index);
+    REQUIRE(packet);
+    REQUIRE(packet->fragments[0U]);
+    REQUIRE_FALSE(packet->fragments[1U]);
+    const auto offset = (static_cast<std::size_t>(index) - 1U) * chunk_size;
+    const auto expected = std::span<const std::byte>{combined}.subspan(
+        offset, (std::min)(chunk_size, combined.size() - offset));
+    CHECK(packet->fragments[0U]->length == expected.size());
+    CHECK(std::ranges::equal(packet->payload, expected));
+    reconstructed.insert(reconstructed.end(), packet->payload.begin(), packet->payload.end());
+  }
+  CHECK(reconstructed == combined);
+  const bool final_toggle = (fragment_count % 2U) == 0U;
+  if (batch_mode != 2U) {
+    const auto first_final_sequence = current.header.sequence.sequence.value();
+    current = retry_fragment(current, final_toggle);
+    // Matching toggle on an old carrier still cannot ACK the retransmitted tail.
+    transport.queue(remote, server_packet(server_sequence++, false, first_final_sequence, final_toggle));
+    update_active();
+    CHECK(acknowledged_events == 0U);
+    CHECK_FALSE(world.runtime_observation());
+
+    transport.queue(remote, server_packet(server_sequence++, true,
+        current.header.sequence.sequence.value(), final_toggle,
+        live_baseline_and_runtime_payload(100.0F, 100U, 80U)));
+    update_active();
+  }
+  update_active();
+  CHECK(acknowledged_events == 1U);
+  REQUIRE(world.runtime_observation());
+  const auto sendents = require_latest_payload(transport,
+      goldsrc::StockSendEntitiesRequestBuilder::build().semantic_bytes());
+  transport.queue(remote, server_packet(server_sequence++, false,
+      sendents.header.sequence.sequence.value(), !final_toggle,
+      service_envelope(live_runtime_record(101.0F, 90U, 96U))));
+  update_active();
+  stage.update(now + 2s + 1ms);
+  INFO((stage.error() ? stage.error()->context : std::string{}));
+  REQUIRE(stage.result());
+  CHECK(stage.result()->spawn_request_queue_count == 1U);
+  CHECK(stage.result()->spawn_request_transmitted);
+  CHECK(stage.result()->spawn_request_acknowledged);
+  CHECK(stage.result()->signon_reply_acknowledged);
+  drain_events();
+  CHECK(queued_events == 1U);
+  CHECK(transmitted_events == 1U);
+  CHECK(acknowledged_events == 1U);
+}
+
+TEST_CASE("Live runtime refuses requested consistency without honest approved file bytes",
+          "[goldsrc][live-runtime][integration][file-consistency][failure]") {
+  for (const unsigned mode : {0U, 1U, 2U}) {
+    INFO("mode: missing environment=0, missing file=1, unsafe path=2; mode=" << mode);
+    hlclient::tests::ScopedLocalResourceTestRoot root;
+    root.write("valve", "models/available.mdl", "abc");
+    auto roots = local::LocalResourceSearchRoots::create(root.path(), "valve");
+    REQUIRE(roots);
+    auto created = local::LocalResourceEnvironment::create(std::move(*roots.roots));
+    REQUIRE(created);
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27892U);
+    const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 35s;
+    hlclient::client::ClientWorldState world;
+    auto config = live_test_config();
+    if (mode != 0U) config.file_consistency_environment = std::move(created.environment);
+    goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+    const auto driven = drive_live_initial(stage, transport, remote, epoch, false, false);
+    const auto sequence = driven.last_server_sequence + 1U;
+    transport.queue(remote, server_packet(sequence, false,
+        driven.transition_request.header.sequence.sequence.value(), false,
+        service_envelope(file_consistency_resource_payload(
+            mode == 2U ? "../private.cfg" : "models/missing.mdl", true, true))));
+    transport.queue(remote, server_packet(sequence + 1U, false,
+        driven.transition_request.header.sequence.sequence.value(), false, {std::byte{1U}}));
+    for (std::size_t step = 1U; step <= 8U; ++step)
+      stage.update(driven.now + std::chrono::milliseconds{step});
+    constexpr std::array advertisement{std::byte{5U}, std::byte{0U}, std::byte{0U}};
+    const auto response = require_latest_payload(transport, advertisement);
+    const auto sent_before_ack = transport.sent.size();
+    auto now = driven.now + 9ms;
+    transport.queue(remote, server_packet(sequence + 2U, false,
+        response.header.sequence.sequence.value(), response.header.sequence.flags.reliable));
+    stage.update(now);
+    for (unsigned attempt = 0U; attempt < 2000U && !stage.terminal(); ++attempt) {
+      std::this_thread::sleep_for(1ms);
+      stage.update(now += 1ms);
+    }
+    INFO((stage.error() ? stage.error()->context : std::string{}));
+    REQUIRE(stage.terminal());
+    REQUIRE(stage.error());
+    CHECK(stage.error()->code == goldsrc::LiveRuntimeStageErrorCode::file_consistency_response_failed);
+    if (mode != 0U) {
+      REQUIRE(stage.error()->file_consistency_code);
+      CHECK(stage.error()->context.find(std::string{goldsrc::to_string(*stage.error()->file_consistency_code)}) != std::string::npos);
+    }
+    CHECK_FALSE(stage.result());
+    CHECK_FALSE(world.runtime_observation());
+    for (std::size_t index = sent_before_ack; index < transport.sent.size(); ++index) {
+      const auto packet = decode_sent(transport.sent[index]);
+      CHECK(std::ranges::all_of(packet.payload, [](std::byte value) { return value == std::byte{1U}; }));
+    }
+    while (const auto event = stage.poll_event())
+      CHECK(event->type != goldsrc::LiveRuntimeStageEventType::spawn_request_queued);
+    CHECK(stage.cleanup_count() == 1U);
+    stage.update(now + 1s);
+    CHECK(stage.cleanup_count() == 1U);
+  }
+}
+
 TEST_CASE("Live runtime composition preserves mixed wire encodings through "
           "ClientWorldState",
           "[goldsrc][live-runtime][integration][uncompressed][compressed]["
@@ -3273,10 +4269,11 @@ TEST_CASE("Reference waiting mode delivers each committed clientdata before an e
 }
 
 TEST_CASE("Reference live stage keeps action commands in active history",
-          "[e321][e321-b][e32-lift][d4][goldsrc][live-runtime][integration][reference-actions]") {
+          "[e321][e321-b][e32-lift][d4][goldsrc][live-runtime][integration][reference-actions][lift-start-suffix][82207-camera]") {
   bool brush=false, lift=false, same_time_box=false, lift_top=false;
   bool quantized_boundary=false, post_effect=false;
   bool lift_ack_error=false, lift_ack_reversal=false, lift_ack_negative=false;
+  std::string_view support_replay_case;
   float upward_post_effect_z=0.0F;
   std::shared_ptr<PostMovementEffectTestProbe> post_effect_probe;
   SECTION("unchanged world-only host") {}
@@ -3300,6 +4297,63 @@ TEST_CASE("Reference live stage keeps action commands in active history",
   SECTION("E32 a negative correction on an ascending lift retains its ascending contact pair") {
     brush=true; lift=true; lift_ack_error=true; lift_ack_negative=true;
   }
+  SECTION("E3C ascending lift suffix correction keeps the same-time eye") {
+    brush=true; lift=true; support_replay_case="ascending";
+  }
+  SECTION("E3C descending lift suffix correction keeps the same-time eye") {
+    brush=true; lift=true; support_replay_case="descending";
+  }
+  SECTION("E3C lift presentation correction works with diagnostics disabled") {
+    brush=true; lift=true; support_replay_case="diagnostics_off";
+  }
+  SECTION("E3C repeated lift ACKs cannot extend the visual correction deadline") {
+    brush=true; lift=true; support_replay_case="repeated";
+  }
+  SECTION("E3C a changing same-direction lift speed keeps the original deadline") {
+    brush=true; lift=true; support_replay_case="accelerating";
+  }
+  SECTION("E3C a bounded lift replay removes a fifteen-unit presentation jump") {
+    brush=true; lift=true; support_replay_case="strong_suffix";
+  }
+  SECTION("E3C lift suffix outside the visual envelope still commits authority") {
+    brush=true; lift=true; support_replay_case="long_suffix";
+  }
+  SECTION("E3C new server view angles cancel an active lift bridge") {
+    brush=true; lift=true; support_replay_case="setangle";
+  }
+  SECTION("E3C death cancels an active lift bridge without corpse interpolation") {
+    brush=true; lift=true; support_replay_case="death";
+  }
+  SECTION("E3C an unexplained large lift correction still snaps") {
+    brush=true; lift=true; support_replay_case="large_correction";
+  }
+  SECTION("E3C a newly obstructed lift camera cannot pass through another collider") {
+    brush=true; lift=true; support_replay_case="blocked_candidate";
+  }
+  SECTION("31F lift start with a checked predecessor and one command suffix keeps the eye") {
+    brush=true; lift=true; support_replay_case="start_one_suffix";
+  }
+  SECTION("31F checked lift start works with diagnostics disabled") {
+    brush=true; lift=true; support_replay_case="start_one_suffix_off";
+  }
+  SECTION("31F lift start beyond the checked contact bound still snaps") {
+    brush=true; lift=true; support_replay_case="start_excess_contact";
+  }
+  SECTION("31F a checked but old static predecessor cannot authorize a lift bridge") {
+    brush=true; lift=true; support_replay_case="start_old_predecessor";
+  }
+  SECTION("82207 lift start without an unacknowledged suffix keeps the same-time eye") {
+    brush=true; lift=true; support_replay_case="start_zero_suffix";
+  }
+  SECTION("82207 empty-suffix lift bridge is independent of diagnostics") {
+    brush=true; lift=true; support_replay_case="start_zero_suffix_off";
+  }
+  SECTION("82207 empty-suffix lift bridge cannot use an old predecessor") {
+    brush=true; lift=true; support_replay_case="start_zero_old_predecessor";
+  }
+  SECTION("82207 empty-suffix lift bridge retains the contact bound") {
+    brush=true; lift=true; support_replay_case="start_zero_excess_contact";
+  }
   SECTION("E32 neutral post movement effect traverses the ordinary live command owner") {
     post_effect=true;
   }
@@ -3314,6 +4368,10 @@ TEST_CASE("Reference live stage keeps action commands in active history",
   const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 60s;
   hlclient::client::ClientWorldState world;
   auto config = live_test_config();
+  std::vector<hlclient::core::MovementCorrectionWitness> lift_start_witnesses;
+  const bool lift_start_case=support_replay_case.starts_with("start_");
+  if(lift_start_case)
+    config.movement_correction_sink=[&](const auto& value) { lift_start_witnesses.push_back(value); };
   if (post_effect) {
     post_effect_probe=std::make_shared<PostMovementEffectTestProbe>();
     config.game_client = std::make_shared<hlclient::game_api::GameClientHost>(
@@ -3330,7 +4388,10 @@ TEST_CASE("Reference live stage keeps action commands in active history",
   config.live_visual_input_source = goldsrc::
       LiveVisualControlInputSource::scripted_jump_duck_check;
   config.reference_prediction = true;
-  if (lift_top || lift_ack_error) config.movement_diagnostics = true;
+  if (lift_top || lift_ack_error || !support_replay_case.empty()) config.movement_diagnostics = true;
+  if (support_replay_case=="diagnostics_off" || support_replay_case=="start_one_suffix_off" ||
+      support_replay_case=="start_zero_suffix_off")
+    config.movement_diagnostics=false;
   config.usercmd_scenario.durations = {20ms, 40ms, 20ms, 80ms, 20ms};
   if (post_effect)
     config.usercmd_scenario.durations={2000ms,2000ms,2000ms,2000ms,2000ms};
@@ -3340,7 +4401,7 @@ TEST_CASE("Reference live stage keeps action commands in active history",
   }
   goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
   const auto driven = drive_live_initial(stage, transport, remote, epoch,
-                                         false, false, true, true, same_time_box);
+      false, false, true, true, same_time_box || support_replay_case=="blocked_candidate");
   const auto resource_sequence = driven.last_server_sequence + 1U;
   transport.queue(remote, server_packet(resource_sequence, false,
       driven.transition_request.header.sequence.sequence.value(), false,
@@ -3392,24 +4453,101 @@ TEST_CASE("Reference live stage keeps action commands in active history",
     std::uint32_t server_sequence=resource_sequence+4;
     auto receive=[&](float time,unsigned height,std::chrono::milliseconds delay,
                      std::optional<unsigned> player_z_eighths = {},
-                     std::optional<std::uint32_t> acknowledged_packet = {}) {
+                     std::optional<std::uint32_t> acknowledged_packet = {},
+                     unsigned player_x_eighths=0U) {
       const auto ack=acknowledged_packet.value_or(
           decode_sent(transport.sent.back()).header.sequence.sequence.value());
       transport.queue(remote,server_packet(++server_sequence,false,ack,false,
-          service_envelope(live_prediction_air_record(time,0,0,
+          service_envelope(live_prediction_air_record(time,0,player_x_eighths,
               player_z_eighths.value_or((height+36)*8),100,0,true,height*8,false,
-              same_time_box ? std::optional<unsigned>{256U*8U} : std::nullopt))));
+              same_time_box || support_replay_case=="blocked_candidate"
+                  ? std::optional<unsigned>{256U*8U} : std::nullopt))));
       now+=delay; stage.update(now);
       const auto result=stage.live_reference_prediction_snapshot(now);
       INFO(result.reason); REQUIRE(result.state==goldsrc::LiveReferencePredictionState::active);
       return result;
     };
     receive(102.F,50,20ms,quantized_boundary ? std::optional<unsigned>{(50U+36U)*8U-1U} : std::nullopt);
-    auto moving=receive(102.1F,60,20ms,
+    const bool descending=support_replay_case=="descending";
+    auto moving=receive(102.1F,lift_start_case ? 50U : descending ? 40U : 60U,20ms,
         quantized_boundary ? std::optional<unsigned>{(60U+36U)*8U-1U} : std::nullopt);
     REQUIRE(moving.presented_brush_scene);
     REQUIRE(moving.predicted_origin);
     CHECK(moving.support_policy=="derived_vertical_support_bounded_250ms_v1");
+    if(lift_start_case) {
+      // Independent server endpoints reproduce31F: the accepted support is
+      // stationary, then moves8 units in40ms. The ACK consumes a boundary with
+      // exactly one20ms saved command, while H3 samples halfway through it.
+      if(config.movement_diagnostics) {
+        REQUIRE(moving.support_velocity_z);
+        CHECK(*moving.support_velocity_z==0.0);
+      } else CHECK_FALSE(moving.support_velocity_z);
+      CHECK(moving.predicted_origin->z==Catch::Approx(86.F).margin(.003));
+      auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+      now+=20ms;stage.update(now);
+      const bool zero_suffix=support_replay_case.starts_with("start_zero_");
+      // The latest real carrier consumes every saved command. A checked
+      // predecessor still brackets the same render time; no suffix is invented.
+      if(zero_suffix)carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+      now+=10ms;
+      const auto before=stage.live_reference_prediction_snapshot(now);
+      REQUIRE(before.presented_origin);REQUIRE(before.predicted_origin);
+      CHECK(before.presented_origin->z==Catch::Approx(86.F).margin(.003));
+      const auto commands=stage.live_usercmd_snapshot();REQUIRE(commands);
+      const auto transmissions=transport.sent.size();
+      const bool excessive=support_replay_case=="start_excess_contact" ||
+          support_replay_case=="start_zero_excess_contact";
+      const bool old_predecessor=support_replay_case=="start_old_predecessor" ||
+          support_replay_case=="start_zero_old_predecessor";
+      const auto corrected=receive(excessive ? 102.16F : old_predecessor ? 102.18F : 102.14F,
+          excessive ? 64U : 58U,0ms,{},carrier.outgoing_netchan_sequence);
+      REQUIRE(corrected.canonical_origin);REQUIRE(corrected.predicted_origin);
+      REQUIRE(corrected.presented_origin);REQUIRE(corrected.last_raw_position_error);
+      CHECK(corrected.canonical_origin->z==Catch::Approx(excessive ? 100.F : 94.F).margin(.003));
+      CHECK(*corrected.last_raw_position_error==Catch::Approx(excessive ? 14. : 8.).margin(.003));
+      CHECK(corrected.replayed_commands==before.replayed_commands+(zero_suffix ? 0U : 1U));
+      CHECK(corrected.accepted_corrections==before.accepted_corrections+1U);
+      CHECK(corrected.fallback_count==before.fallback_count);
+      CHECK(corrected.local_steps==before.local_steps);
+      CHECK(transport.sent.size()==transmissions);
+      CHECK(stage.live_usercmd_snapshot()->generated_command_count==commands->generated_command_count);
+      if(config.movement_diagnostics) {
+        REQUIRE_FALSE(lift_start_witnesses.empty());
+        const auto& witness=lift_start_witnesses.back();
+        CHECK(witness.suffix_commands==(zero_suffix ? 0U : 1U));
+        CHECK(witness.suffix_milliseconds==(zero_suffix ? 0U : 20U));
+        CHECK(witness.predecessor_decision==(excessive ? 5U : 4U));
+      }
+      if(excessive || old_predecessor) {
+        CHECK(corrected.presentation_reason!="visual_vertical_support_replay_correction");
+        CHECK(corrected.presented_origin->z-before.presented_origin->z>
+            (zero_suffix ? .25F : excessive ? 12.8F : 8.F));
+        return;
+      }
+      CHECK(corrected.presentation_reason=="visual_vertical_support_replay_correction");
+      CHECK(corrected.presented_origin->z==Catch::Approx(before.presented_origin->z).margin(.003));
+      REQUIRE(corrected.last_camera_correction_jump);
+      CHECK(*corrected.last_camera_correction_jump<.003);
+      if(zero_suffix)CHECK(corrected.predicted_origin->z==Catch::Approx(94.F).margin(.003));
+      else CHECK(corrected.predicted_origin->z>97.9F);
+      const auto first_correction_at=now;
+      for(const unsigned elapsed:{1U,7U,16U,33U,60U,99U,101U}) {
+        const auto frame=stage.live_reference_prediction_snapshot(
+            first_correction_at+std::chrono::milliseconds{elapsed});
+        REQUIRE(frame.presented_origin);REQUIRE(frame.predicted_origin);
+        REQUIRE(frame.presented_brush_scene);
+        CHECK(frame.predicted_origin->z==corrected.predicted_origin->z);
+        CHECK(frame.presented_origin->z-frame.presented_brush_scene->instances().front().transform.translation.z==
+            Catch::Approx(36.F).margin(.003));
+        CHECK(frame.local_steps==corrected.local_steps);
+        CHECK(frame.fallback_count==corrected.fallback_count);
+        if(elapsed==101U)
+          CHECK(frame.presented_origin->z==Catch::Approx(frame.predicted_origin->z).margin(.003));
+      }
+      CHECK(transport.sent.size()==transmissions);
+      CHECK(world.runtime_observation()->receiving_client->origin.z==94.0);
+      return;
+    }
     if (quantized_boundary) {
       REQUIRE(moving.predicted_origin);
       // The 102.0 -> 102.1 support trajectory has already contributed one
@@ -3474,6 +4612,134 @@ TEST_CASE("Reference live stage keeps action commands in active history",
       CHECK(next.presented_origin->z-next.presented_brush_scene->instances().front().transform.translation.z==
           Catch::Approx(36.F).margin(.002));
       CHECK(next.fallback_count==before.fallback_count);
+      return;
+    }
+    if (!support_replay_case.empty()) {
+      // Independently authored server endpoint, not an echo of the latest
+      // render sample. The ACK targets the saved boundary with2/3 later
+      // commands. Updated pusher timing therefore changes the replayed eye
+      // by more than the raw4-unit vertical boundary discrepancy.
+      const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+      const unsigned anchor_height=descending ? 38U : 62U;
+      CHECK(moving.predicted_origin->z==Catch::Approx(anchor_height+36.F).margin(.003));
+      const unsigned suffix=support_replay_case=="long_suffix" ? 6U
+          : support_replay_case=="strong_suffix" ? 4U : descending ? 3U : 2U;
+      now+=std::chrono::milliseconds{20U*suffix};stage.update(now);
+      now+=10ms;
+      const auto before=stage.live_reference_prediction_snapshot(now);
+      REQUIRE(before.state==goldsrc::LiveReferencePredictionState::active);
+      REQUIRE(before.presented_origin);REQUIRE(before.predicted_origin);
+      const auto commands=stage.live_usercmd_snapshot();REQUIRE(commands);
+      const auto sends=transport.sent.size();
+      const auto corrected_height=descending ? anchor_height-4U : anchor_height+
+          (support_replay_case=="large_correction" ? 20U : support_replay_case=="strong_suffix" ? 6U : 4U);
+      const auto corrected=receive(support_replay_case=="strong_suffix" ? 102.135F : 102.14F,corrected_height,0ms,{},
+          carrier.outgoing_netchan_sequence,8U);
+      CAPTURE(support_replay_case,corrected.reason,corrected.presentation_reason);
+      REQUIRE(corrected.canonical_origin);REQUIRE(corrected.predicted_origin);
+      REQUIRE(corrected.presented_origin);REQUIRE(corrected.last_raw_position_error);
+      CHECK(*corrected.last_raw_position_error==Catch::Approx(std::sqrt(
+          support_replay_case=="large_correction" ? 401. : support_replay_case=="strong_suffix" ? 37. : 17.)).margin(.003));
+      CHECK(corrected.canonical_origin->x==1.F);
+      CHECK(corrected.canonical_origin->z==Catch::Approx(corrected_height+36.F).margin(.003));
+      CHECK(corrected.predicted_origin->x==1.F);
+      CHECK(corrected.accepted_corrections==before.accepted_corrections+1U);
+      CHECK(corrected.replayed_commands==before.replayed_commands+suffix);
+      CHECK(corrected.local_steps==before.local_steps);
+      CHECK(corrected.fallback_count==before.fallback_count);
+      CHECK(transport.sent.size()==sends);
+      CHECK(stage.live_usercmd_snapshot()->generated_command_count==commands->generated_command_count);
+      const auto distance=[](const auto& a,const auto& b) {
+        return std::hypot(double(a.x)-b.x,double(a.y)-b.y,double(a.z)-b.z);
+      };
+      if(support_replay_case=="long_suffix" || support_replay_case=="large_correction") {
+        CHECK(corrected.presentation_reason!="visual_vertical_support_replay_correction");
+        CHECK(distance(*corrected.presented_origin,*before.presented_origin)>.25);
+        return;
+      }
+      CHECK(corrected.presentation_reason=="visual_vertical_support_replay_correction");
+      CHECK(distance(*corrected.presented_origin,*before.presented_origin)<.003);
+      if(support_replay_case=="strong_suffix")CHECK(distance(*corrected.predicted_origin,*before.presented_origin)>15.);
+      REQUIRE(corrected.last_camera_correction_jump);
+      CHECK(*corrected.last_camera_correction_jump<.003);
+      REQUIRE(corrected.presented_brush_scene);
+      CHECK(corrected.presented_origin->z-corrected.presented_brush_scene->instances().front().transform.translation.z==
+          Catch::Approx(36.F).margin(.003));
+      if(support_replay_case=="blocked_candidate") {
+        const auto source=world.runtime_observation()->client_metadata.source;
+        // Move an independently owned BBOX into the old visual feet, while
+        // the canonical/latest physical position stays above it. No new
+        // clientdata ACK or simulation may move the box out of the way.
+        transport.queue(remote,server_packet(++server_sequence,false,
+            carrier.outgoing_netchan_sequence,false,service_envelope(
+                live_prediction_air_record(102.14F,1U,0U,(corrected_height+36U)*8U,
+                    100U,0U,true,corrected_height*8U,false,8U,false,{},false,65U*8U))));
+        now+=5ms;stage.update(now);
+        const auto blocked=stage.live_reference_prediction_snapshot(now);
+        REQUIRE(blocked.presented_origin);REQUIRE(blocked.predicted_origin);
+        CHECK(blocked.state==goldsrc::LiveReferencePredictionState::active);
+        CHECK(blocked.presentation_reason!="visual_vertical_support_replay_correction");
+        CHECK(distance(*blocked.presented_origin,*corrected.presented_origin)>.25);
+        CHECK(distance(*blocked.predicted_origin,*corrected.predicted_origin)<.003);
+        CHECK(blocked.accepted_corrections==corrected.accepted_corrections);
+        CHECK(blocked.fallback_count==corrected.fallback_count);
+        CHECK(world.runtime_observation()->client_metadata.source==source);
+        return;
+      }
+      if(support_replay_case=="setangle" || support_replay_case=="death") {
+        const auto source=world.runtime_observation()->client_metadata.source;
+        auto body=support_replay_case=="death"
+            ? service_envelope(live_prediction_air_record(102.14F,1U,0U,
+                (corrected_height+36U)*8U,0U,2U,true,corrected_height*8U))
+            : std::vector<std::byte>{static_cast<std::byte>(goldsrc::RuntimeControlOpcode::svc_setangle)};
+        if(support_replay_case=="setangle")for(unsigned component=0;component<6;++component)body.push_back(std::byte{});
+        transport.queue(remote,server_packet(++server_sequence,false,carrier.outgoing_netchan_sequence,false,std::move(body)));
+        now+=5ms;stage.update(now);
+        const auto cancelled=stage.live_reference_prediction_snapshot(now);
+        CHECK(cancelled.presentation_reason!="visual_vertical_support_replay_correction");
+        if(support_replay_case=="death") {
+          CHECK(cancelled.state!=goldsrc::LiveReferencePredictionState::active);
+          CHECK_FALSE(cancelled.presented_origin);
+        } else {
+          CHECK(cancelled.state==goldsrc::LiveReferencePredictionState::active);
+          CHECK(cancelled.accepted_corrections==corrected.accepted_corrections);
+          CHECK(world.runtime_observation()->client_metadata.source==source);
+        }
+        return;
+      }
+      auto previous=*corrected.presented_origin;
+      const auto first_correction_at=now;
+      for(const unsigned elapsed:{1U,7U,16U,33U,60U,99U,101U}) {
+        const auto at=first_correction_at+std::chrono::milliseconds{elapsed};
+        auto frame=stage.live_reference_prediction_snapshot(at);
+        const bool repeated=support_replay_case=="repeated" || support_replay_case=="accelerating";
+        if(repeated && (elapsed==33U || elapsed==60U)) {
+          // Same authority with a new record. Normal commands may be sampled,
+          // but this must not create a new100ms correction on every packet.
+          now=at;
+          frame=receive(support_replay_case=="accelerating" ? 102.145F : 102.14F,
+              corrected_height+(support_replay_case=="accelerating" ? 1U : 0U),
+              0ms,{},carrier.outgoing_netchan_sequence,8U);
+          REQUIRE(frame.last_camera_correction_jump);
+          CHECK(*frame.last_camera_correction_jump<.003);
+        }
+        REQUIRE(frame.presented_origin);REQUIRE(frame.predicted_origin);
+        REQUIRE(frame.presented_brush_scene);
+        if(!repeated) {
+          CHECK(distance(*frame.predicted_origin,*corrected.predicted_origin)<.003);
+          CHECK(frame.local_steps==corrected.local_steps);
+        } else CHECK(frame.local_steps>=corrected.local_steps);
+        CHECK(frame.fallback_count==corrected.fallback_count);
+        // The selected visual carrier and feet must remain coherent; only
+        // the render scene may move, never the committed server transform.
+        CHECK(frame.presented_origin->z-frame.presented_brush_scene->instances().front().transform.translation.z==
+            Catch::Approx(36.F).margin(.003));
+        CHECK((descending ? frame.presented_origin->z<=previous.z+.003F : frame.presented_origin->z>=previous.z-.003F));
+        previous=*frame.presented_origin;
+        if(elapsed==101U)CHECK(distance(*frame.presented_origin,*frame.predicted_origin)<.003);
+      }
+      CHECK(world.runtime_observation()->receiving_client->origin.z==double(corrected_height+36U+
+          (support_replay_case=="accelerating" ? 1U : 0U)));
       return;
     }
     const auto initial_steps=moving.local_steps;
@@ -4413,7 +5679,10 @@ TEST_CASE("Live keyboard diagnostic limits cover the full CLI session",
 }
 
 TEST_CASE("C fake peer keeps RX TX command identity and reseeds only after a fresh new-life carrier",
-          "[goldsrc][live-runtime][damage-respawn][integration][use][weapon-stall-time]") {
+          "[goldsrc][live-runtime][damage-respawn][e3c-life-wait][integration][use][weapon-stall-time][b080-receipt-counters]") {
+  bool close_while_waiting=false;
+  SECTION("first exact safe carrier resumes the current life") {}
+  SECTION("closing while waiting freezes the diagnostic timer") {close_while_waiting=true;}
   FakeTransport transport;
   const auto remote = network::NetworkAddress::loopback(27851U);
   const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 60s;
@@ -4422,7 +5691,9 @@ TEST_CASE("C fake peer keeps RX TX command identity and reseeds only after a fre
   config.operation_mode = goldsrc::LiveRuntimeOperationMode::live_visual_control;
   config.live_visual_input_source = goldsrc::LiveVisualControlInputSource::keyboard_mouse;
   config.reference_prediction = true;
+  config.movement_diagnostics = true;
   goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+  check_live_receipt_counter_equivalence(stage);
   const auto driven = drive_live_initial(stage,transport,remote,epoch,false,false,true,true);
   const auto resource = driven.last_server_sequence + 1U;
   transport.queue(remote,server_packet(resource,false,
@@ -4463,6 +5734,7 @@ TEST_CASE("C fake peer keeps RX TX command identity and reseeds only after a fre
     now += 20ms;
     stage.update(now);
     REQUIRE_FALSE(stage.terminal());
+    check_live_receipt_counter_equivalence(stage);
     const auto transmitted = decode_sent(transport.sent.back()).header.sequence.sequence.value();
     CHECK(transmitted > last_transport);
     last_transport = transmitted;
@@ -4485,6 +5757,15 @@ TEST_CASE("C fake peer keeps RX TX command identity and reseeds only after a fre
     CHECK(suspended.reason == "local_player_dead");
     CHECK(suspended.history_depth == 0);
     CHECK_FALSE(suspended.presented_origin);
+    CHECK_FALSE(suspended.anchor_command);
+    CHECK_FALSE(suspended.candidate_anchor_command);
+    CHECK_FALSE(suspended.seed_origin);
+    CHECK_FALSE(suspended.previous_valid_origin);
+    CHECK_FALSE(suspended.matched_origin_before_correction);
+    CHECK_FALSE(suspended.matched_velocity_before_correction);
+    CHECK_FALSE(suspended.collision_trace_evidence);
+    CHECK_FALSE(suspended.collision_position_evidence);
+    CHECK_FALSE(suspended.life_wait_started_ns);
     ++input.input_revision; input.pressed_buttons=0U; // stale held E after death
     REQUIRE(stage.submit_live_visual_input(input,now));
     const auto at_death = stage.live_usercmd_snapshot()->use_new_submission_count;
@@ -4510,13 +5791,62 @@ TEST_CASE("C fake peer keeps RX TX command identity and reseeds only after a fre
     // New alive location with old carrier cannot seed the new life.
     feed(100,0,100,old_carrier);
     CHECK(world.runtime_observation()->lifecycle.respawns == cycle);
-    CHECK(stage.live_reference_prediction_snapshot(now).state != goldsrc::LiveReferencePredictionState::active);
+    const auto life_started_at=now;
+    const auto waiting=stage.live_reference_prediction_snapshot(now);
+    CHECK(waiting.state != goldsrc::LiveReferencePredictionState::active);
+    CHECK(waiting.recovery_wait_reason=="carrier_before_life_floor");
+    CHECK_FALSE(waiting.anchor_command);
+    REQUIRE(waiting.candidate_anchor_command);
+    REQUIRE(waiting.canonical_origin);
+    CHECK(waiting.canonical_origin->x==100.F);
+    CHECK_FALSE(waiting.seed_origin);
+    CHECK_FALSE(waiting.previous_valid_origin);
+    CHECK_FALSE(waiting.matched_origin_before_correction);
+    CHECK_FALSE(waiting.collision_trace_evidence);
+    REQUIRE(waiting.life_wait_started_ns);
+    CHECK(waiting.life_wait_duration_ms==0.);
+    if(close_while_waiting) {
+      stage.cancel(now+5ms);
+      const auto ended=stage.live_reference_prediction_snapshot(now+10ms);
+      CHECK(ended.recovery_wait_reason=="session_ended");
+      CHECK(ended.life_wait_duration_ms==5.);
+      CHECK(ended.life_wait_started_ns==waiting.life_wait_started_ns);
+      CHECK(stage.live_reference_prediction_snapshot(now+100ms).life_wait_duration_ms==5.);
+      return;
+    }
+    if(cycle>1U) {
+      // No inherited jump/duck edge may be invented for an empty new-life
+      // history. An exact fresh carrier is necessary but not sufficient.
+      ++input.input_revision;
+      input.held_buttons=hlclient::gameplay_input::gameplay_button_mask(cycle==2U
+          ? hlclient::gameplay_input::GameplayButton::jump
+          : hlclient::gameplay_input::GameplayButton::duck);
+      input.pressed_buttons=input.held_buttons;
+      REQUIRE(stage.submit_live_visual_input(input,now));
+      now+=20ms;stage.update(now);
+      const auto edge_carrier=decode_sent(transport.sent.back()).header.sequence.sequence.value();
+      feed(100,0,100,edge_carrier);
+      const auto edge_wait=stage.live_reference_prediction_snapshot(now);
+      CHECK(edge_wait.state!=goldsrc::LiveReferencePredictionState::active);
+      CHECK(edge_wait.recovery_wait_reason=="jump_duck_history_required");
+      CHECK_FALSE(edge_wait.anchor_command);
+      REQUIRE(edge_wait.candidate_anchor_command);
+      CHECK(edge_wait.candidate_anchor_command>waiting.candidate_anchor_command);
+      ++input.input_revision;input.held_buttons=0;input.pressed_buttons=0;
+      REQUIRE(stage.submit_live_visual_input(input,now));
+    }
     now += 20ms; stage.update(now); // strictly post-boundary neutral carrier
     const auto new_carrier = decode_sent(transport.sent.back()).header.sequence.sequence.value();
     feed(100,0,100,new_carrier);
     const auto reseeded = stage.live_reference_prediction_snapshot(now);
     CAPTURE(reseeded.reason, reseeded.last_seed_status);
     REQUIRE(reseeded.state == goldsrc::LiveReferencePredictionState::active);
+    CHECK(reseeded.recovery_wait_reason=="none");
+    CHECK(reseeded.anchor_command==reseeded.candidate_anchor_command);
+    CHECK(reseeded.life_wait_started_ns==waiting.life_wait_started_ns);
+    CHECK(reseeded.life_wait_duration_ms==Catch::Approx(std::chrono::duration<double,std::milli>{now-life_started_at}.count()));
+    const auto frozen=stage.live_reference_prediction_snapshot(now+3ms);
+    CHECK(frozen.life_wait_duration_ms==reseeded.life_wait_duration_ms);
     REQUIRE(reseeded.presented_origin);
     CHECK(reseeded.presented_origin->x > 99.0F); // no corpse-to-spawn interpolation
     CHECK(world.runtime_observation()->generation == 1);
@@ -4680,6 +6010,7 @@ TEST_CASE("C fake peer keeps RX TX command identity and reseeds only after a fre
   playback.update(cues,&sounds,presentation_now,true); // repeated batch too
   CHECK(output.mixer.statistics().presentation_started==1U);
   stage.cancel(now+1ms);
+  check_live_receipt_counter_equivalence(stage);
 }
 
 TEST_CASE(
@@ -4792,6 +6123,8 @@ struct E32ServerCorrectionFixture {
   bool explicit_setangle{};
   bool grounded{};
   std::optional<unsigned> effects;
+  unsigned view_offset_quarters{112U}, move_type{3U}, use_hull{};
+  bool omit_receiving_entity{};
 };
 
 // Server-side fixture oracle, not a sample of LiveRuntimeStage's predicted
@@ -4827,25 +6160,27 @@ struct E32ServerCorrectionFixture {
   movement.write(signed_eighths((boundary == 1U ? 0.0 : 30.0) + correction.velocity_delta.x), 16U);
   movement.write(signed_eighths(correction.velocity_delta.y), 16U);
   movement.write(signed_eighths(-16.0 * steps + correction.velocity_delta.z), 16U);
-  movement.write(goldsrc_signed_positive(112U), 10U);
+  movement.write(goldsrc_signed_positive(correction.view_offset_quarters), 10U);
   movement.write(x, 16U); movement.write(y, 16U); movement.write(z, 16U);
   movement.write(correction.grounded ? 1U << 9U : 0U, 32U);
   movement.write(3200U, 16U); movement.write(0U, 1U);
   movement.write(0U, 2U); movement.write(correction.dead_flag, 3U);
   movement.write(0U, 1U); movement.align_zero();
   movement.write(goldsrc::kGoldSrcSvcPacketEntitiesOpcode, 8U);
-  movement.write(1U, 16U);
+  movement.write(correction.omit_receiving_entity ? 0U : 1U, 16U);
+  if (!correction.omit_receiving_entity) {
   movement.write(0U, 1U); movement.write(0U, 1U); movement.write(1U, 6U);
   movement.write(0U, 1U); movement.write(0U, 1U);
   movement.write(2U, 3U); movement.write(correction.effects ? 0xffffU : 0x7fffU, 16U);
   movement.write(x, 16U); movement.write(y, 16U); movement.write(z, 16U);
   for (unsigned component = 0U; component < 3U; ++component) movement.write(0U, 16U);
-  movement.write(0U, 16U); movement.write(3U, 4U);
-  movement.write(goldsrc_signed_positive(8U), 16U); movement.write(0U, 1U);
+  movement.write(0U, 16U); movement.write(correction.move_type, 4U);
+  movement.write(goldsrc_signed_positive(8U), 16U); movement.write(correction.use_hull, 1U);
   movement.write(goldsrc_signed_positive(32U), 16U);
   for (unsigned component = 0U; component < 3U; ++component) movement.write(0U, 16U);
   movement.write(0U, 1U);
   if (correction.effects) movement.write(*correction.effects, 8U);
+  }
   movement.write(0U, 16U); movement.align_zero();
 
   // Benign reliable-prefix-shaped control bytes precede ordinary current
@@ -4934,14 +6269,20 @@ struct E321AdvancingAirStart {
 }
 
 [[nodiscard]] std::shared_ptr<const hlclient::collision::CollisionWorldPackage>
-e32_correction_collision(const bool floor) {
+e32_correction_collision(const bool floor, const bool wall = false, const bool ceiling = false,
+    const bool corner = false,
+    const hlclient::assets::AssetVector3 corner_minimum = {20,20,988}) {
   namespace fixture = hlclient::tests;
   namespace literal = fixture::literal_movement_bsp;
   // Both (10.6,0,1023.84) and (-7.4,18,1023.84) are outside this finite
   // solid, but their straight body sweep crosses its expanded convex corner.
-  const std::vector<literal::ConvexVolume> volumes{floor ?
+  std::vector<literal::ConvexVolume> volumes{floor ?
       literal::box({-256,-256,900}, {256,256,988}) :
       literal::box({20,20,900}, {128,128,1100})};
+  if (wall) volumes.push_back(literal::box({30,-128,988}, {64,128,1120}));
+  if (ceiling) volumes.push_back(literal::box({-128,-128,1088}, {128,128,1092}));
+  if (corner) volumes.push_back(literal::box(
+      {corner_minimum.x,corner_minimum.y,corner_minimum.z}, {128,128,1100}));
   std::vector<fixture::SyntheticBspPlane> planes{fixture::SyntheticBspPlane{{0,0,1},0,2}};
   std::vector<fixture::SyntheticBspNode> nodes;
   std::vector<fixture::SyntheticBspClipnode> clipnodes;
@@ -4966,6 +6307,71 @@ e32_correction_collision(const bool floor) {
 }
 
 } // namespace
+
+TEST_CASE("Selected slide stop reaches normal live diagnostics with original source and lifecycle ownership",
+          "[e32][velocity-stop][goldsrc][live-runtime][integration][reference-positive]") {
+  bool change_map=false;
+  SECTION("death invalidates the original event") {}
+  SECTION("same-time map reset invalidates the cache and cannot revive the event") {change_map=true;}
+  for (const bool diagnostics : {false,true}) {
+    CAPTURE(diagnostics);
+    FakeTransport transport;const auto remote=network::NetworkAddress::loopback(27886U);
+    hlclient::client::ClientWorldState world;auto config=e321_advancing_air_config();
+    config.movement_diagnostics=diagnostics;
+    std::array<std::uint64_t,2> generations{7U,9U};
+    config.movement_diagnostic_generations=[&generations] {return generations;};
+    goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+    E32ServerCorrectionFixture initial;initial.grounded=true;initial.velocity_delta={320,0,0};
+    auto route=seed_e321_advancing_air(stage,transport,remote,goldsrc::LiveRuntimeStageTimePoint{}+150s,
+        e32_correction_collision(true,true),initial);
+    const auto stopped=stage.live_reference_prediction_snapshot(route.now);
+    REQUIRE(stopped.state==goldsrc::LiveReferencePredictionState::active);
+    REQUIRE(stopped.predicted_velocity);CHECK(stopped.predicted_velocity->x==0.F);
+    CHECK(stopped.velocity_stop.has_value()==diagnostics);
+    if(diagnostics) {
+      const auto& event=*stopped.velocity_stop;const auto& operation=event.transition;
+      CHECK(event.network_generation==7U);CHECK(event.map_generation==9U);
+      CHECK(event.life_epoch==world.runtime_observation()->lifecycle.life_epoch);
+      CHECK(event.source_sequence==route.server_sequence);
+      CHECK(event.source_record_identity==world.runtime_observation()->client_metadata.source->record_identity);
+      CHECK(event.scene_record_identity==event.source_record_identity);CHECK(event.source_matches_scene);
+      REQUIRE(event.source_server_time);CHECK(*event.source_server_time==102.);
+      CHECK(operation.command_sequence==2U);CHECK(operation.command_msec==20U);
+      REQUIRE(event.command);CHECK(event.command->forward==400);CHECK(event.command->msec==20U);
+      CHECK(operation.simulation_end_ns-operation.simulation_start_ns==20'000'000U);
+      CHECK(operation.before_velocity.x>0.F);CHECK(operation.after_velocity.x==0.F);
+      CHECK(operation.after_velocity.y==0.F);CHECK(operation.after_velocity.z==0.F);
+      // Verify the committed route independently of the captured stop. A
+      // hypothetical equal-progress available step is not this fixture's
+      // observed selection: no step was committed by its two commands.
+      CHECK(stopped.step_selections==0U);
+      CHECK(operation.phase==hlclient::movement::PlayerMovementPhase::direct_slide);
+      CHECK(operation.candidate==goldsrc::movement::VelocityStopCandidate::direct);
+      CHECK(operation.trace.fraction<1.);REQUIRE(operation.trace.hit);REQUIRE(operation.trace.collision_plane);
+      CHECK(operation.trace.hit->kind==hlclient::movement::PlayerMovementHitKind::world);
+      CHECK(operation.clip_plane_count>0U);REQUIRE(operation.collision_identity);
+      CHECK(operation.collision_identity->valid());CHECK(event.history_anchor_command==1U);
+      CHECK(event.history_latest_command==2U);
+      const auto repeated=stage.live_reference_prediction_snapshot(route.now);
+      REQUIRE(repeated.velocity_stop);CHECK(repeated.velocity_stop->capture_ordinal==event.capture_ordinal);
+      if(change_map) {
+        ++generations[1];
+        // Even the same-time cached read must invalidate an old map event.
+        CHECK_FALSE(stage.live_reference_prediction_snapshot(route.now).velocity_stop);
+        --generations[1];
+        CHECK_FALSE(stage.live_reference_prediction_snapshot(route.now).velocity_stop);
+      }
+    }
+    const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+    initial.health=0U;initial.dead_flag=2U;initial.additional_server_seconds=.005F;
+    route.now+=5ms;
+    transport.queue(remote,server_packet(++route.server_sequence,false,carrier.outgoing_netchan_sequence,
+        false,e321_advancing_air_record(1U,E321MovementBodyOrder::current_time_first,initial)));
+    stage.update(route.now);REQUIRE(world.runtime_observation()->lifecycle.dead());
+    CHECK_FALSE(stage.live_reference_prediction_snapshot(route.now).velocity_stop);
+    CHECK_FALSE(stage.live_reference_prediction_snapshot(route.now+1ms).velocity_stop);
+  }
+}
 
 TEST_CASE("E32 a validated large correction keeps exact jump history without waiting for release",
           "[e32][contact-stale-recovery][goldsrc][live-runtime][integration][reference-positive]") {
@@ -5169,6 +6575,869 @@ TEST_CASE("E32 velocity-backed server correction preserves the camera while auth
   }
 }
 
+TEST_CASE("82207 bounded non-collinear ground corrections preserve the camera without claiming velocity cause",
+          "[82207-camera][grounded-position-camera][goldsrc][live-runtime][integration][reference-positive]") {
+  for(const bool diagnostics:{false,true}) for(const unsigned suffix:{1U,2U}) {
+    CAPTURE(diagnostics,suffix);
+    FakeTransport transport;
+    const auto remote=network::NetworkAddress::loopback(27901U);
+    hlclient::client::ClientWorldState world;
+    auto config=e321_advancing_air_config();config.movement_diagnostics=diagnostics;
+    std::vector<hlclient::core::MovementCorrectionWitness> witnesses;
+    config.movement_correction_sink=[&](const auto& event){witnesses.push_back(event);};
+    goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+    E32ServerCorrectionFixture ground;ground.grounded=true;
+    auto route=seed_e321_advancing_air(stage,transport,remote,
+        goldsrc::LiveRuntimeStageTimePoint{}+150s,e32_correction_collision(true),ground);
+    const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+    REQUIRE(carrier.last_new_command_sequence==2U);
+    const auto matched=stage.live_reference_prediction_snapshot(route.now);
+    REQUIRE(matched.predicted_origin);REQUIRE(matched.predicted_velocity);
+    REQUIRE(matched.predicted_origin->x==Catch::Approx(11.28).margin(.001));
+    REQUIRE(matched.predicted_velocity->x==Catch::Approx(64.).margin(.001));
+    route.now+=std::chrono::milliseconds{20U*suffix};stage.update(route.now);
+    route.now+=10ms;
+    const auto before=stage.live_reference_prediction_snapshot(route.now);
+    REQUIRE(before.presented_origin);
+    const auto commands=stage.live_usercmd_snapshot();REQUIRE(commands);
+    const auto sends=transport.sent.size();
+    // Literal independent endpoint/velocity differences from1670, translated
+    // to the fixture. Their perpendicular residual exceeds the2u impulse fit.
+    E32ServerCorrectionFixture correction;correction.grounded=true;
+    correction.position_delta={11.28F-2.320282F-10.6F,-7.4697876F,.16F};
+    correction.velocity_delta={64.F+132.5F-30.F,-115.16815F,16.F};
+    transport.queue(remote,server_packet(++route.server_sequence,false,
+        carrier.outgoing_netchan_sequence,false,e321_advancing_air_record(2U,
+            E321MovementBodyOrder::current_time_first,correction)));
+    stage.update(route.now);
+    const auto after=stage.live_reference_prediction_snapshot(route.now);
+    CAPTURE(after.reason,after.presentation_reason,after.last_raw_position_error);
+    REQUIRE(after.state==goldsrc::LiveReferencePredictionState::active);
+    REQUIRE(after.canonical_origin);REQUIRE(after.predicted_origin);REQUIRE(after.presented_origin);
+    REQUIRE(after.predicted_velocity);REQUIRE(after.last_camera_correction_jump);
+    REQUIRE(after.last_raw_position_error);
+    CHECK(*after.last_raw_position_error==Catch::Approx(7.8219187).margin(.1));
+    CHECK(after.canonical_origin->x==Catch::Approx(11.28-2.320282).margin(.064));
+    CHECK(after.canonical_origin->y==Catch::Approx(-7.4697876).margin(.064));
+    CHECK(after.canonical_origin->z==1024.F);
+    CHECK(after.accepted_corrections==before.accepted_corrections+1U);
+    CHECK(after.replayed_commands==before.replayed_commands+suffix);
+    CHECK(after.fallback_count==before.fallback_count);
+    CHECK(after.local_steps==before.local_steps);
+    CHECK(after.presentation_reason=="visual_grounded_position_correction");
+    CHECK(*after.last_camera_correction_jump<.001);
+    const auto distance=[](const auto& a,const auto& b) {
+      return std::hypot(double(a.x)-b.x,double(a.y)-b.y,double(a.z)-b.z);
+    };
+    CHECK(distance(*after.presented_origin,*before.presented_origin)<.001);
+    CHECK(transport.sent.size()==sends);
+    CHECK(stage.live_usercmd_snapshot()->generated_command_count==commands->generated_command_count);
+    const auto authoritative=world.runtime_observation();REQUIRE(authoritative);
+    CHECK(authoritative->receiving_client->velocity.x==Catch::Approx(196.5).margin(.064));
+    CHECK(authoritative->receiving_client->velocity.y==Catch::Approx(-115.16815).margin(.064));
+    if(diagnostics) {
+      REQUIRE_FALSE(witnesses.empty());
+      const auto& event=witnesses.back();
+      CHECK(event.classification==static_cast<std::uint8_t>(hlclient::core::MovementCorrectionClassification::ordinary_rebase));
+      REQUIRE(event.same_time_camera_delta);CHECK(*event.same_time_camera_delta<.001);
+    }
+    const auto revision=world.runtime_publication_revision();
+    const auto started=route.now;
+    for(const unsigned elapsed:{0U,1U,7U,16U,33U,60U,99U,101U}) {
+      const auto sample=stage.live_reference_prediction_snapshot(started+std::chrono::milliseconds{elapsed});
+      REQUIRE(sample.presented_origin);REQUIRE(sample.predicted_origin);
+      CHECK(distance(*sample.predicted_origin,*after.predicted_origin)==0.);
+      CHECK(distance(*sample.presented_origin,*sample.predicted_origin)<=16.001);
+      CHECK(sample.fallback_count==after.fallback_count);
+      CHECK(sample.local_steps==after.local_steps);
+      if(elapsed==101U)CHECK(distance(*sample.presented_origin,*sample.predicted_origin)<.001);
+    }
+    CHECK(world.runtime_observation()==authoritative);
+    CHECK(world.runtime_publication_revision()==revision);
+    CHECK(transport.sent.size()==sends);
+  }
+}
+
+TEST_CASE("82207 ground position bridge rejects discontinuities and a blocked hull chord",
+          "[82207-camera][grounded-position-camera][goldsrc][live-runtime][integration][reference-negative]") {
+  enum class Invalid {airborne,stale,nointerp,setangle,view_offset,over_bound,blocked_corner};
+  for(const auto kind:{Invalid::airborne,Invalid::stale,Invalid::nointerp,Invalid::setangle,
+      Invalid::view_offset,Invalid::over_bound,Invalid::blocked_corner}) {
+    CAPTURE(static_cast<unsigned>(kind));
+    FakeTransport transport;const auto remote=network::NetworkAddress::loopback(27902U);
+    hlclient::client::ClientWorldState world;auto config=e321_advancing_air_config();
+    goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+    E32ServerCorrectionFixture initial;initial.grounded=kind!=Invalid::airborne;
+    if(kind==Invalid::nointerp)initial.effects=0U;
+    const auto package=kind==Invalid::airborne
+        ? hlclient::tests::collision_brush_fixture::package(false)
+        : e32_correction_collision(true,false,false,kind==Invalid::blocked_corner);
+    auto route=seed_e321_advancing_air(stage,transport,remote,
+        goldsrc::LiveRuntimeStageTimePoint{}+150s,package,initial);
+    const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+    route.now+=20ms;stage.update(route.now);
+    route.now+=kind==Invalid::stale ? 101ms : 10ms;
+    E32ServerCorrectionFixture correction;correction.grounded=initial.grounded;
+    correction.position_delta={11.28F-2.320282F-10.6F,-7.4697876F,.16F};
+    correction.velocity_delta={64.F+132.5F-30.F,-115.16815F,16.F};
+    if(kind==Invalid::airborne) {
+      correction.position_delta={-2.320282F,-7.4697876F,0};
+      correction.velocity_delta={132.5F,-115.16815F,0};
+    }
+    if(kind==Invalid::nointerp)correction.effects=32U;
+    correction.explicit_setangle=kind==Invalid::setangle;
+    if(kind==Invalid::view_offset)correction.view_offset_quarters=108U;
+    if(kind==Invalid::over_bound)correction.position_delta={11.28F-6.F-10.6F,-18.F,.16F};
+    if(kind==Invalid::blocked_corner) {
+      correction.position_delta={-10.6F,11.25F,.16F};
+      correction.velocity_delta={-30.F,0,16.F};
+      goldsrc::movement::WorldOnlyMovementCollision collision{package};
+      hlclient::collision::CollisionQueryScratch scratch;
+      const hlclient::assets::AssetVector3 from{11.28F,0,1024},to{0,11.25F,1024};
+      for(const auto& point:{from,to}) {
+        const auto free=collision.test_position(point,hlclient::movement::PlayerMovementHull::standing,scratch);
+        REQUIRE(free);REQUIRE(free.result);
+        REQUIRE(free.result->status==goldsrc::movement::LocalMovementPositionStatus::free);
+      }
+      const auto chord=collision.trace_hull(from,to,hlclient::movement::PlayerMovementHull::standing,scratch);
+      REQUIRE(chord);REQUIRE(chord.result);REQUIRE(chord.result->fraction<1.);
+    }
+    transport.queue(remote,server_packet(++route.server_sequence,false,
+        carrier.outgoing_netchan_sequence,false,e321_advancing_air_record(2U,
+            E321MovementBodyOrder::current_time_first,correction)));
+    stage.update(route.now);
+    REQUIRE_FALSE(stage.terminal());
+    const auto after=stage.live_reference_prediction_snapshot(route.now);
+    CAPTURE(after.reason,after.presentation_reason);
+    CHECK(after.presentation_reason!="visual_grounded_position_correction");
+    CHECK(after.presentation_reason!="visual_server_velocity_correction");
+    const auto canonical=world.runtime_observation();REQUIRE(canonical);REQUIRE(canonical->receiving_client);
+    CHECK(canonical->receiving_client->origin.x==Catch::Approx(10.6+correction.position_delta.x).margin(.064));
+  }
+}
+
+TEST_CASE("82207 clear authority chord cannot authorize a blocked suffix presentation chord",
+          "[82207-camera][grounded-position-camera][goldsrc][live-runtime][integration][reference-negative]") {
+  for(const bool diagnostics:{false,true}) {
+    CAPTURE(diagnostics);
+    FakeTransport transport;const auto remote=network::NetworkAddress::loopback(27905U);
+    hlclient::client::ClientWorldState world;auto config=e321_advancing_air_config();
+    config.movement_diagnostics=diagnostics;
+    goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+    E32ServerCorrectionFixture ground;ground.grounded=true;
+    // Standing-hull expansion starts at (13,-6). The ACK boundary x=11.28
+    // stays to its left; the replayed/presented chord moves beside the corner.
+    const auto package=e32_correction_collision(true,false,false,true,{29,10,988});
+    auto route=seed_e321_advancing_air(stage,transport,remote,
+        goldsrc::LiveRuntimeStageTimePoint{}+150s,package,ground);
+    const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+    REQUIRE(carrier.last_new_command_sequence==2U);
+    route.now+=20ms;stage.update(route.now);route.now+=10ms;
+    const auto before=stage.live_reference_prediction_snapshot(route.now);
+    REQUIRE(before.presented_origin);REQUIRE(before.predicted_origin);
+    E32ServerCorrectionFixture correction;correction.grounded=true;
+    correction.position_delta={11.25F-10.6F,-7.5F,.16F};
+    correction.velocity_delta={196.5F-30.F,-115.125F,16.F};
+    goldsrc::movement::WorldOnlyMovementCollision collision{package};
+    hlclient::collision::CollisionQueryScratch scratch;
+    const auto boundary=collision.trace_hull({11.25F,-7.5F,1024},{11.28F,0,1024},
+        hlclient::movement::PlayerMovementHull::standing,scratch);
+    REQUIRE(boundary);REQUIRE(boundary.result);REQUIRE(boundary.result->fraction==1.);
+    REQUIRE_FALSE(boundary.result->start_solid);REQUIRE_FALSE(boundary.result->all_solid);
+    transport.queue(remote,server_packet(++route.server_sequence,false,
+        carrier.outgoing_netchan_sequence,false,e321_advancing_air_record(2U,
+            E321MovementBodyOrder::current_time_first,correction)));
+    stage.update(route.now);
+    const auto after=stage.live_reference_prediction_snapshot(route.now);
+    CAPTURE(after.reason,after.presentation_reason);
+    REQUIRE(after.state==goldsrc::LiveReferencePredictionState::active);
+    REQUIRE(after.presented_origin);REQUIRE(after.predicted_origin);REQUIRE(after.canonical_origin);
+    CHECK(after.canonical_origin->x==11.25F);CHECK(after.canonical_origin->y==-7.5F);
+    CHECK(after.replayed_commands==before.replayed_commands+1U);
+    CHECK(after.fallback_count==before.fallback_count);
+    CHECK(after.presentation_reason!="visual_grounded_position_correction");
+    CHECK(after.presentation_reason!="visual_server_velocity_correction");
+    for(const auto& point:{*before.presented_origin,*after.presented_origin}) {
+      const auto free=collision.test_position(point,hlclient::movement::PlayerMovementHull::standing,scratch);
+      REQUIRE(free);REQUIRE(free.result);
+      REQUIRE(free.result->status==goldsrc::movement::LocalMovementPositionStatus::free);
+    }
+    const auto rendered_chord=collision.trace_hull(*after.presented_origin,*before.presented_origin,
+        hlclient::movement::PlayerMovementHull::standing,scratch);
+    REQUIRE(rendered_chord);REQUIRE(rendered_chord.result);
+    REQUIRE(rendered_chord.result->fraction<1.);
+    CHECK_FALSE(rendered_chord.result->start_solid);CHECK_FALSE(rendered_chord.result->all_solid);
+    const auto final=stage.live_reference_prediction_snapshot(route.now+101ms);
+    REQUIRE(final.predicted_origin);REQUIRE(final.presented_origin);
+    CHECK(final.predicted_origin->x==after.predicted_origin->x);
+    CHECK(final.predicted_origin->y==after.predicted_origin->y);
+    CHECK(final.presentation_reason!="visual_grounded_position_correction");
+  }
+}
+
+TEST_CASE("82207 ordinary ground echoes retain the original visual correction deadline",
+          "[82207-camera][grounded-position-camera][goldsrc][live-runtime][integration][reference-positive]") {
+  FakeTransport transport;const auto remote=network::NetworkAddress::loopback(27903U);
+  hlclient::client::ClientWorldState world;auto config=e321_advancing_air_config();
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+  E32ServerCorrectionFixture ground;ground.grounded=true;
+  auto route=seed_e321_advancing_air(stage,transport,remote,goldsrc::LiveRuntimeStageTimePoint{}+150s,
+      e32_correction_collision(true),ground);
+  const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+  route.now+=20ms;stage.update(route.now);route.now+=10ms;
+  E32ServerCorrectionFixture correction;correction.grounded=true;
+  correction.position_delta={11.28F-2.320282F-10.6F,-7.4697876F,.16F};
+  correction.velocity_delta={64.F+132.5F-30.F,-115.16815F,16.F};
+  const auto send=[&] {
+    transport.queue(remote,server_packet(++route.server_sequence,false,carrier.outgoing_netchan_sequence,
+        false,e321_advancing_air_record(2U,E321MovementBodyOrder::current_time_first,correction)));
+    stage.update(route.now);return stage.live_reference_prediction_snapshot(route.now);
+  };
+  const auto initial=send();REQUIRE(initial.presentation_reason=="visual_grounded_position_correction");
+  const auto started=route.now;stage.update(started+10ms);route.now=started+20ms;
+  const auto before=stage.live_reference_prediction_snapshot(route.now);REQUIRE(before.presented_origin);
+  correction.position_delta.x+=1.F;correction.additional_server_seconds=.02F;
+  const auto after=send();REQUIRE(after.presented_origin);
+  REQUIRE(after.presentation_reason=="visual_grounded_position_correction");
+  CHECK(std::hypot(double(after.presented_origin->x)-before.presented_origin->x,
+      double(after.presented_origin->y)-before.presented_origin->y,
+      double(after.presented_origin->z)-before.presented_origin->z)<.001);
+  const auto done=stage.live_reference_prediction_snapshot(started+101ms);
+  REQUIRE(done.presented_origin);REQUIRE(done.predicted_origin);
+  CHECK(std::hypot(double(done.presented_origin->x)-done.predicted_origin->x,
+      double(done.presented_origin->y)-done.predicted_origin->y,
+      double(done.presented_origin->z)-done.predicted_origin->z)<.001);
+}
+
+TEST_CASE("82207 ground position bridge cancels on focus and authoritative lifecycle boundaries",
+          "[82207-camera][grounded-position-camera][goldsrc][live-runtime][integration][reference-negative]") {
+  enum class Boundary {focus,nointerp,setangle,death};
+  for(const auto boundary:{Boundary::focus,Boundary::nointerp,Boundary::setangle,Boundary::death}) {
+    CAPTURE(static_cast<unsigned>(boundary));
+    FakeTransport transport;const auto remote=network::NetworkAddress::loopback(27904U);
+    hlclient::client::ClientWorldState world;auto config=e321_advancing_air_config();
+    goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+    E32ServerCorrectionFixture ground;ground.grounded=true;ground.effects=0U;
+    auto route=seed_e321_advancing_air(stage,transport,remote,goldsrc::LiveRuntimeStageTimePoint{}+150s,
+        e32_correction_collision(true),ground);
+    const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+    route.now+=20ms;stage.update(route.now);route.now+=10ms;
+    E32ServerCorrectionFixture correction;correction.grounded=true;correction.effects=0U;
+    correction.position_delta={11.28F-2.320282F-10.6F,-7.4697876F,.16F};
+    correction.velocity_delta={64.F+132.5F-30.F,-115.16815F,16.F};
+    const auto receive=[&] {
+      transport.queue(remote,server_packet(++route.server_sequence,false,carrier.outgoing_netchan_sequence,
+          false,e321_advancing_air_record(2U,E321MovementBodyOrder::current_time_first,correction)));
+      stage.update(route.now);return stage.live_reference_prediction_snapshot(route.now);
+    };
+    REQUIRE(receive().presentation_reason=="visual_grounded_position_correction");
+    route.now+=1ms;
+    if(boundary==Boundary::focus) {
+      // Same runtime generation as the accepted seed input, newer revision.
+      // A foreign generation is rejected before focus cancellation is applied.
+      goldsrc::LiveVisualControlInput unfocused{1U,2U,0,0,0,0,false,false};
+      REQUIRE(stage.submit_live_visual_input(unfocused,route.now));
+    } else {
+      correction.additional_server_seconds=.02F;
+      if(boundary==Boundary::nointerp)correction.effects=32U;
+      if(boundary==Boundary::setangle)correction.explicit_setangle=true;
+      if(boundary==Boundary::death){correction.health=0U;correction.dead_flag=1U;}
+      (void)receive();
+    }
+    REQUIRE_FALSE(stage.terminal());
+    const auto after=stage.live_reference_prediction_snapshot(route.now);
+    CHECK(after.presentation_reason!="visual_grounded_position_correction");
+    const auto later=stage.live_reference_prediction_snapshot(route.now+30ms);
+    CHECK(later.presentation_reason!="visual_grounded_position_correction");
+  }
+}
+
+TEST_CASE("Strong grounded server velocity corrections preserve the camera through an exact two command suffix",
+          "[de731][strong-server-correction-camera][server-correction-camera][goldsrc][live-runtime][integration][reference-positive]") {
+  // Independently authored displacement/velocity differences from two real
+  // observations. Both have positive dp dot dv (about42ms), despite opposite
+  // world-space directions. No local hit/damage outcome is inferred here.
+  struct Impulse { float dx, dy, dvx, dvy; };
+  for (const bool diagnostics : {false, true})
+  for (const auto impulse : {Impulse{32.348877F,1.1181641F,774.7895F,27.133804F},
+                            Impulse{-34.921875F,-2.2578125F,-836.625F,-53.875F}}) {
+    CAPTURE(diagnostics, impulse.dx, impulse.dy, impulse.dvx, impulse.dvy);
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27884U);
+    hlclient::client::ClientWorldState world;
+    auto config = e321_advancing_air_config(); config.movement_diagnostics = diagnostics;
+    goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+    E32ServerCorrectionFixture ground; ground.grounded = true;
+    auto route = seed_e321_advancing_air(stage, transport, remote,
+        goldsrc::LiveRuntimeStageTimePoint{} + 150s, e32_correction_collision(true), ground);
+    const auto anchor_commands = stage.live_usercmd_snapshot(); REQUIRE(anchor_commands);
+    const auto carrier = anchor_commands->transmit_ranges.back();
+    REQUIRE(carrier.last_new_command_sequence == 2U);
+    const auto matched = stage.live_reference_prediction_snapshot(route.now);
+    REQUIRE(matched.predicted_origin); REQUIRE(matched.predicted_velocity);
+    // Independent ground PM oracle: accel10 * maxspeed320 *20ms=64ups;
+    // origin10 +64*.020=11.28, on the authored floor at1024.
+    REQUIRE(matched.predicted_origin->x == Catch::Approx(11.28).margin(.001));
+    REQUIRE(matched.predicted_origin->z == 1024.F);
+    REQUIRE(matched.predicted_velocity->x == Catch::Approx(64.).margin(.001));
+    REQUIRE(matched.predicted_velocity->z == 0.F);
+    route.now += 40ms; stage.update(route.now);
+    route.now += 10ms;
+    const auto before = stage.live_reference_prediction_snapshot(route.now);
+    REQUIRE(before.state == goldsrc::LiveReferencePredictionState::active);
+    REQUIRE(before.presented_origin); REQUIRE(before.predicted_origin);
+    REQUIRE(before.predicted_mode == hlclient::movement::PlayerMovementMode::walking);
+    while (stage.poll_weapon_command_submission()) {}
+    const auto commands_before = stage.live_usercmd_snapshot(); REQUIRE(commands_before);
+    E32ServerCorrectionFixture correction; correction.grounded = true;
+    correction.position_delta = {11.28F + impulse.dx - 10.6F, impulse.dy, .16F};
+    correction.velocity_delta = {64.F + impulse.dvx - 30.F, impulse.dvy, 16.F};
+    transport.queue(remote, server_packet(++route.server_sequence, false,
+        carrier.outgoing_netchan_sequence, false,
+        e321_advancing_air_record(2U, E321MovementBodyOrder::current_time_first, correction)));
+    stage.update(route.now);
+    const auto after = stage.live_reference_prediction_snapshot(route.now);
+    CAPTURE(after.reason, after.presentation_reason, after.last_raw_position_error,
+        after.last_camera_correction_jump);
+    REQUIRE_FALSE(stage.terminal());
+    REQUIRE(after.state == goldsrc::LiveReferencePredictionState::active);
+    REQUIRE(after.presented_origin); REQUIRE(after.predicted_origin); REQUIRE(after.canonical_origin);
+    REQUIRE(after.last_raw_position_error); REQUIRE(after.last_camera_correction_jump);
+    CHECK(*after.last_raw_position_error == Catch::Approx(std::hypot(impulse.dx, impulse.dy)).margin(.09));
+    CHECK(*after.last_raw_position_error > 32.);
+    CHECK(after.canonical_origin->x == Catch::Approx(11.28 + impulse.dx).margin(.064));
+    CHECK(after.canonical_origin->y == Catch::Approx(impulse.dy).margin(.064));
+    CHECK(after.canonical_origin->z == 1024.F);
+    CHECK(after.replayed_commands == before.replayed_commands + 2U);
+    CHECK(after.fallback_count == before.fallback_count);
+    CHECK(after.accepted_corrections == before.accepted_corrections + 1U);
+    CHECK(after.anchor_command == 2U);
+    const auto distance = [](const auto& a, const auto& b) {
+      return std::hypot(double(a.x)-b.x, double(a.y)-b.y, double(a.z)-b.z);
+    };
+    CHECK(distance(*before.presented_origin, *after.predicted_origin) > 32.);
+    CHECK(distance(*after.presented_origin, *before.presented_origin) < .001);
+    CHECK(*after.last_camera_correction_jump < .001);
+    CHECK(after.presentation_reason == "visual_server_velocity_correction");
+    const auto authoritative = world.runtime_observation(); REQUIRE(authoritative);
+    REQUIRE(authoritative->receiving_client);
+    CHECK(authoritative->receiving_client->velocity.x == Catch::Approx(64. + impulse.dvx).margin(.064));
+    CHECK(authoritative->receiving_client->velocity.y == Catch::Approx(impulse.dvy).margin(.064));
+    const auto authority_revision = world.runtime_publication_revision();
+    const auto sends_after = transport.sent.size();
+    const auto commands_after = stage.live_usercmd_snapshot(); REQUIRE(commands_after);
+    CHECK(commands_after->generated_command_count == commands_before->generated_command_count);
+    CHECK_FALSE(stage.poll_weapon_command_submission());
+    for (const unsigned elapsed : {0U, 1U, 7U, 16U, 33U, 60U, 99U, 101U}) {
+      const auto at = route.now + std::chrono::milliseconds{elapsed};
+      const auto sample = stage.live_reference_prediction_snapshot(at);
+      REQUIRE(sample.presented_origin); REQUIRE(sample.predicted_origin);
+      CHECK(distance(*sample.predicted_origin, *after.predicted_origin) == 0.);
+      CHECK(distance(*sample.presented_origin, *sample.predicted_origin) <= 96.);
+      CHECK(sample.local_steps == after.local_steps);
+      CHECK(sample.replayed_commands == after.replayed_commands);
+      CHECK(sample.fallback_count == after.fallback_count);
+      const auto repeat = stage.live_reference_prediction_snapshot(at);
+      REQUIRE(repeat.presented_origin);
+      CHECK(distance(*repeat.presented_origin, *sample.presented_origin) == 0.);
+      CHECK(repeat.presentation_trace_queries_total == sample.presentation_trace_queries_total);
+      if (elapsed == 101U) CHECK(distance(*sample.presented_origin, *sample.predicted_origin) < .001);
+    }
+    CHECK(world.runtime_observation() == authoritative);
+    CHECK(world.runtime_publication_revision() == authority_revision);
+    CHECK(transport.sent.size() == sends_after);
+    CHECK(stage.live_usercmd_snapshot()->generated_command_count == commands_before->generated_command_count);
+    CHECK_FALSE(stage.poll_weapon_command_submission());
+    std::cout << "[strong-server-correction-camera] diagnostics=" << diagnostics
+        << " dx=" << impulse.dx << " raw=" << *after.last_raw_position_error
+        << " suffix_commands=" << after.replayed_commands-before.replayed_commands
+        << " before_to_endpoint=" << distance(*before.presented_origin,*after.predicted_origin)
+        << " same_time_jump=" << *after.last_camera_correction_jump << '\n';
+  }
+}
+
+TEST_CASE("Native server grounded upward impulse passes the live ACK owner then departs on the next command",
+          "[de731][de731-ground-runtime][goldsrc][live-runtime][integration][reference-positive]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27888U);
+  hlclient::client::ClientWorldState world;
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,e321_advancing_air_config()};
+  E32ServerCorrectionFixture ground; ground.grounded = true;
+  auto route = seed_e321_advancing_air(stage,transport,remote,
+      goldsrc::LiveRuntimeStageTimePoint{}+150s,e32_correction_collision(true),ground);
+  const auto commands_before = stage.live_usercmd_snapshot(); REQUIRE(commands_before);
+  const auto carrier = commands_before->transmit_ranges.back();
+  REQUIRE(carrier.last_new_command_sequence == 2U);
+  const auto before = stage.live_reference_prediction_snapshot(route.now);
+  REQUIRE(before.state == goldsrc::LiveReferencePredictionState::active);
+  REQUIRE(before.predicted_origin); REQUIRE(before.predicted_velocity);
+  REQUIRE(before.predicted_origin->x == Catch::Approx(11.28).margin(.001));
+  REQUIRE(before.predicted_origin->z == 1024.F);
+  REQUIRE(before.predicted_velocity->z == 0.F);
+  while (stage.poll_weapon_command_submission()) {}
+  // The server publishes a coherent post-PM ONGROUND endpoint with an
+  // external upward impulse. There is no local Gauss/jump/weapon witness.
+  E32ServerCorrectionFixture impulse; impulse.grounded = true;
+  impulse.position_delta = {11.28F-10.6F,0,.16F};
+  impulse.velocity_delta = {-702.625F-30.F,-454.375F,547.375F+16.F};
+  route.now += 10ms;
+  transport.queue(remote,server_packet(++route.server_sequence,false,
+      carrier.outgoing_netchan_sequence,false,
+      e321_advancing_air_record(2U,E321MovementBodyOrder::current_time_first,impulse)));
+  stage.update(route.now);
+  const auto accepted = stage.live_reference_prediction_snapshot(route.now);
+  CAPTURE(accepted.reason,accepted.last_ground_status);
+  REQUIRE_FALSE(stage.terminal());
+  REQUIRE(accepted.state == goldsrc::LiveReferencePredictionState::active);
+  REQUIRE(accepted.predicted_origin); REQUIRE(accepted.predicted_velocity);
+  REQUIRE(accepted.local_grounded); CHECK(*accepted.local_grounded);
+  CHECK(accepted.anchor_command == 2U);
+  CHECK(accepted.history_depth == 0U);
+  CHECK(accepted.accepted_corrections == before.accepted_corrections+1U);
+  CHECK(accepted.fallback_count == before.fallback_count);
+  CHECK(accepted.predicted_origin->z == 1024.F);
+  CHECK(accepted.predicted_velocity->x == -702.625F);
+  CHECK(accepted.predicted_velocity->y == -454.375F);
+  CHECK(accepted.predicted_velocity->z == 547.375F);
+  const auto authority = world.runtime_observation(); REQUIRE(authority); REQUIRE(authority->receiving_client);
+  CHECK(authority->receiving_client->origin.x == Catch::Approx(11.25).margin(.001));
+  CHECK(authority->receiving_client->origin.z == 1024.);
+  CHECK(authority->receiving_client->velocity.x == -702.625);
+  CHECK(authority->receiving_client->velocity.y == -454.375);
+  CHECK(authority->receiving_client->velocity.z == 547.375);
+  REQUIRE(authority->receiving_client->flags);
+  CHECK((*authority->receiving_client->flags & (1U<<9U)) != 0U);
+  const auto authority_revision = world.runtime_publication_revision();
+  CHECK(stage.live_usercmd_snapshot()->generated_command_count == commands_before->generated_command_count);
+  CHECK_FALSE(stage.poll_weapon_command_submission());
+  route.now += 20ms; stage.update(route.now);
+  const auto airborne = stage.live_reference_prediction_snapshot(route.now);
+  CAPTURE(airborne.reason);
+  REQUIRE(airborne.state == goldsrc::LiveReferencePredictionState::active);
+  REQUIRE(airborne.local_grounded); CHECK_FALSE(*airborne.local_grounded);
+  CHECK(airborne.predicted_mode == hlclient::movement::PlayerMovementMode::airborne);
+  REQUIRE(airborne.predicted_origin); REQUIRE(airborne.predicted_velocity);
+  CHECK(airborne.predicted_velocity->z == Catch::Approx(547.375-800.*.020).margin(.001));
+  CHECK(airborne.predicted_origin->z == Catch::Approx(1024.+(547.375-400.*.020)*.020).margin(.002));
+  CHECK(airborne.local_steps == accepted.local_steps+1U);
+  CHECK(airborne.fallback_count == before.fallback_count);
+  CHECK(airborne.accepted_corrections == accepted.accepted_corrections);
+  CHECK(world.runtime_observation() == authority);
+  CHECK(world.runtime_publication_revision() == authority_revision);
+  const auto commands_after = stage.live_usercmd_snapshot(); REQUIRE(commands_after);
+  CHECK(commands_after->generated_command_count == commands_before->generated_command_count+1U);
+  CHECK(commands_after->last_new_command_sequence == 3U);
+  CHECK(commands_after->jump_generated_count == 0U);
+  CHECK(commands_after->jump_new_submission_count == 0U);
+  CHECK(commands_after->attack_generated_count == 0U);
+  CHECK(commands_after->attack_new_submission_count == 0U);
+  // The host receives every newly transmitted immutable command, not only
+  // attacks. This is the real forward-only command3, not an invented effect.
+  const auto submitted = stage.poll_weapon_command_submission(); REQUIRE(submitted);
+  CHECK(submitted->generation == 1U);
+  CHECK(submitted->command_sequence == 3U);
+  CHECK(submitted->buttons == goldsrc::kReferenceGoldSrcButtonForward);
+  CHECK((submitted->buttons & (goldsrc::kReferenceGoldSrcButtonAttack |
+      goldsrc::kReferenceGoldSrcButtonAttack2 | goldsrc::kReferenceGoldSrcButtonJump)) == 0U);
+  CHECK(submitted->command_end_nanoseconds == commands_after->scheduler_next_sample_time_nanoseconds-20'000'000);
+  CHECK_FALSE(stage.poll_weapon_command_submission());
+  stage.update(route.now);
+  CHECK_FALSE(stage.poll_weapon_command_submission());
+  CHECK(stage.live_usercmd_snapshot()->generated_command_count == commands_after->generated_command_count);
+}
+
+TEST_CASE("Strong server correction visual state ends on real input or owning pose discontinuities",
+          "[de731][strong-server-correction-guards][server-correction-camera][goldsrc][live-runtime][integration][reference-negative]") {
+  enum class Boundary { focus, capture, setangle, hull, view_offset, mode, death, nointerp, pvs };
+  auto boundary = Boundary::focus;
+  SECTION("focus loss") { boundary = Boundary::focus; }
+  SECTION("capture loss") { boundary = Boundary::capture; }
+  SECTION("new server view angles") { boundary = Boundary::setangle; }
+  SECTION("different collision hull") { boundary = Boundary::hull; }
+  SECTION("different view offset") { boundary = Boundary::view_offset; }
+  SECTION("different movement mode") { boundary = Boundary::mode; }
+  SECTION("new death") { boundary = Boundary::death; }
+  SECTION("server no interpolation flag") { boundary = Boundary::nointerp; }
+  SECTION("receiving entity leaves the published set") { boundary = Boundary::pvs; }
+  CAPTURE(static_cast<unsigned>(boundary));
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27885U);
+  hlclient::client::ClientWorldState world;
+  goldsrc::LiveRuntimeStage stage{transport, remote, world, e321_advancing_air_config()};
+  E32ServerCorrectionFixture initial; initial.grounded = true; initial.effects = 0U;
+  auto route = seed_e321_advancing_air(stage, transport, remote,
+      goldsrc::LiveRuntimeStageTimePoint{} + 150s, e32_correction_collision(true), initial);
+  const auto carrier = stage.live_usercmd_snapshot()->transmit_ranges.back();
+  route.now += 40ms; stage.update(route.now); route.now += 10ms;
+  E32ServerCorrectionFixture correction; correction.grounded = true; correction.effects = 0U;
+  correction.position_delta = {11.28F + 34.F - 10.6F, 1.F, .16F};
+  correction.velocity_delta = {64.F + 816.F - 30.F,24.F,16.F};
+  transport.queue(remote, server_packet(++route.server_sequence, false,
+      carrier.outgoing_netchan_sequence, false,
+      e321_advancing_air_record(2U,E321MovementBodyOrder::current_time_first,correction)));
+  stage.update(route.now);
+  const auto active = stage.live_reference_prediction_snapshot(route.now);
+  CAPTURE(active.reason, active.presentation_reason);
+  REQUIRE(active.state == goldsrc::LiveReferencePredictionState::active);
+  REQUIRE(active.presentation_reason == "visual_server_velocity_correction");
+  REQUIRE(active.presented_origin); REQUIRE(active.predicted_origin);
+  CHECK(std::abs(active.presented_origin->x-active.predicted_origin->x) > 32.F);
+  const auto commands = stage.live_usercmd_snapshot(); REQUIRE(commands);
+  while (stage.poll_weapon_command_submission()) {}
+  route.now += 1ms;
+  if (boundary == Boundary::focus || boundary == Boundary::capture) {
+    const auto authority = world.runtime_observation();
+    // The normalized input owner publishes neutral axes with no held keys
+    // on focus/capture release; inconsistent axes are rightly rejected.
+    goldsrc::LiveVisualControlInput input{1U,2U,0.F,0,0,0,
+        boundary != Boundary::focus,false};
+    REQUIRE(stage.submit_live_visual_input(input,route.now));
+    CHECK(world.runtime_observation() == authority);
+  } else {
+    correction.additional_server_seconds = .001F;
+    if (boundary == Boundary::setangle) correction.explicit_setangle = true;
+    if (boundary == Boundary::hull) correction.use_hull = 1U;
+    if (boundary == Boundary::view_offset) correction.view_offset_quarters = 48U;
+    if (boundary == Boundary::mode) correction.move_type = 8U;
+    if (boundary == Boundary::death) { correction.health = 0U; correction.dead_flag = 2U; }
+    if (boundary == Boundary::nointerp) correction.effects = 32U;
+    if (boundary == Boundary::pvs) correction.omit_receiving_entity = true;
+    transport.queue(remote,server_packet(++route.server_sequence,false,
+        carrier.outgoing_netchan_sequence,false,
+        e321_advancing_air_record(2U,E321MovementBodyOrder::current_time_first,correction)));
+    stage.update(route.now);
+  }
+  const auto after = stage.live_reference_prediction_snapshot(route.now);
+  CAPTURE(after.reason, after.presentation_reason);
+  REQUIRE_FALSE(stage.terminal());
+  CHECK(after.presentation_reason != "visual_server_velocity_correction");
+  const auto later = stage.live_reference_prediction_snapshot(route.now+5ms);
+  CHECK(later.presentation_reason != "visual_server_velocity_correction");
+  CHECK(stage.live_usercmd_snapshot()->generated_command_count == commands->generated_command_count);
+  CHECK_FALSE(stage.poll_weapon_command_submission());
+  if (boundary == Boundary::death) {
+    REQUIRE(world.runtime_observation()->lifecycle.dead()); CHECK_FALSE(after.presented_origin);
+  }
+  if (boundary == Boundary::pvs) CHECK(world.runtime_observation()->packet_entities.empty());
+}
+
+TEST_CASE("Strong server correction ACK refinements cannot renew the original camera deadline",
+          "[de731][strong-server-correction-guards][server-correction-camera][goldsrc][live-runtime][integration][reference-positive]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27886U);
+  hlclient::client::ClientWorldState world;
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,e321_advancing_air_config()};
+  E32ServerCorrectionFixture ground; ground.grounded = true;
+  auto route = seed_e321_advancing_air(stage,transport,remote,
+      goldsrc::LiveRuntimeStageTimePoint{}+150s,e32_correction_collision(true),ground);
+  const auto carrier = stage.live_usercmd_snapshot()->transmit_ranges.back();
+  route.now += 40ms; stage.update(route.now); route.now += 10ms;
+  const auto started = route.now;
+  E32ServerCorrectionFixture correction; correction.grounded = true;
+  correction.position_delta = {11.28F+34.F-10.6F,1.F,.16F};
+  correction.velocity_delta = {64.F+816.F-30.F,24.F,16.F};
+  transport.queue(remote,server_packet(++route.server_sequence,false,
+      carrier.outgoing_netchan_sequence,false,
+      e321_advancing_air_record(2U,E321MovementBodyOrder::current_time_first,correction)));
+  stage.update(route.now);
+  const auto initial = stage.live_reference_prediction_snapshot(route.now);
+  REQUIRE(initial.presentation_reason == "visual_server_velocity_correction");
+  const auto commands = stage.live_usercmd_snapshot(); REQUIRE(commands);
+  while (stage.poll_weapon_command_submission()) {}
+  for (const unsigned elapsed : {1U,3U,5U}) {
+    route.now = started+std::chrono::milliseconds{elapsed};
+    const auto before = stage.live_reference_prediction_snapshot(route.now); REQUIRE(before.presented_origin);
+    correction.additional_server_seconds = static_cast<float>(elapsed)*.001F;
+    // Small position-only refinement is not a second damage/impulse claim.
+    if (elapsed == 5U) correction.position_delta.x += .125F;
+    transport.queue(remote,server_packet(++route.server_sequence,false,
+        carrier.outgoing_netchan_sequence,false,
+        e321_advancing_air_record(2U,E321MovementBodyOrder::current_time_first,correction)));
+    stage.update(route.now);
+    const auto after = stage.live_reference_prediction_snapshot(route.now);
+    CAPTURE(elapsed,after.reason,after.presentation_reason);
+    REQUIRE(after.presented_origin); REQUIRE(after.predicted_origin);
+    CHECK(after.state == goldsrc::LiveReferencePredictionState::active);
+    CHECK(after.presentation_reason == "visual_server_velocity_correction");
+    CHECK(std::hypot(double(after.presented_origin->x)-before.presented_origin->x,
+        double(after.presented_origin->y)-before.presented_origin->y,
+        double(after.presented_origin->z)-before.presented_origin->z) < .001);
+    CHECK(after.fallback_count == initial.fallback_count);
+    CHECK(std::abs(after.presented_origin->x-after.predicted_origin->x) <= 96.F);
+    const auto immutable = world.runtime_observation();
+    const auto repeat = stage.live_reference_prediction_snapshot(route.now);
+    CHECK(repeat.presentation_trace_queries_total == after.presentation_trace_queries_total);
+    CHECK(repeat.replayed_commands == after.replayed_commands);
+    CHECK(world.runtime_observation() == immutable);
+  }
+  const auto at_deadline = stage.live_reference_prediction_snapshot(started+101ms);
+  REQUIRE(at_deadline.presented_origin); REQUIRE(at_deadline.predicted_origin);
+  CHECK(std::hypot(double(at_deadline.presented_origin->x)-at_deadline.predicted_origin->x,
+      double(at_deadline.presented_origin->y)-at_deadline.predicted_origin->y,
+      double(at_deadline.presented_origin->z)-at_deadline.predicted_origin->z) < .001);
+  CHECK(at_deadline.accepted_corrections == initial.accepted_corrections+3U);
+  CHECK(stage.live_usercmd_snapshot()->generated_command_count == commands->generated_command_count);
+  CHECK_FALSE(stage.poll_weapon_command_submission());
+}
+
+TEST_CASE("Strong upward server correction cannot bypass a real ceiling occupancy failure",
+          "[de731][strong-server-correction-guards][server-correction-camera][goldsrc][live-runtime][integration][reference-negative]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27887U);
+  hlclient::client::ClientWorldState world;
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,e321_advancing_air_config()};
+  auto route = seed_e321_advancing_air(stage,transport,remote,
+      goldsrc::LiveRuntimeStageTimePoint{}+150s,e32_correction_collision(false,false,true));
+  const auto carrier = stage.live_usercmd_snapshot()->transmit_ranges.back();
+  const auto before = stage.live_reference_prediction_snapshot(route.now);
+  REQUIRE(before.state == goldsrc::LiveReferencePredictionState::active);
+  E32ServerCorrectionFixture correction;
+  correction.position_delta.z = 38.F; correction.velocity_delta.z = 475.F;
+  route.now += 10ms;
+  transport.queue(remote,server_packet(++route.server_sequence,false,
+      carrier.outgoing_netchan_sequence,false,
+      e321_advancing_air_record(2U,E321MovementBodyOrder::current_time_first,correction)));
+  stage.update(route.now);
+  const auto after = stage.live_reference_prediction_snapshot(route.now);
+  REQUIRE_FALSE(stage.terminal());
+  CHECK(after.state != goldsrc::LiveReferencePredictionState::active);
+  CHECK_FALSE(after.presented_origin);
+  CHECK(after.presentation_reason != "visual_server_velocity_correction");
+  CHECK(after.accepted_corrections == before.accepted_corrections);
+  CHECK(after.fallback_count == before.fallback_count+1U);
+  CHECK(stage.movement_diagnostics_snapshot().replayed_commands == 0U);
+  REQUIRE(after.canonical_origin);
+  CHECK(after.canonical_origin->z == Catch::Approx(1023.84+38.).margin(.064));
+}
+
+TEST_CASE("B080 two corrections in one update retain the earlier critical producer evidence",
+          "[b080][correction-witness][goldsrc][live-runtime][integration][reference-positive]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27880U);
+  hlclient::client::ClientWorldState world;
+  auto config = e321_advancing_air_config();
+  config.movement_diagnostics = true;
+  std::vector<hlclient::core::MovementCorrectionWitness> producer_events;
+  config.movement_correction_sink=[&](const hlclient::core::MovementCorrectionWitness& value) {
+    producer_events.push_back(value);
+  };
+  goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+  auto route = seed_e321_advancing_air(stage, transport, remote,
+      goldsrc::LiveRuntimeStageTimePoint{} + 150s);
+  const auto carrier = stage.live_usercmd_snapshot()->transmit_ranges.back();
+  const auto before = stage.live_reference_prediction_snapshot(route.now);
+  const auto commands_before = stage.live_usercmd_snapshot()->generated_command_count;
+  producer_events.clear();
+  route.now += 10ms;
+  E32ServerCorrectionFixture first;
+  first.position_delta.x = 30.F;
+  E32ServerCorrectionFixture second;
+  second.position_delta.x = 30.125F;
+  second.additional_server_seconds = .001F;
+  transport.queue(remote, server_packet(++route.server_sequence, false,
+      carrier.outgoing_netchan_sequence, false,
+      e321_advancing_air_record(carrier.last_new_command_sequence,
+          E321MovementBodyOrder::current_time_first, first)));
+  transport.queue(remote, server_packet(++route.server_sequence, false,
+      carrier.outgoing_netchan_sequence, false,
+      e321_advancing_air_record(carrier.last_new_command_sequence,
+          E321MovementBodyOrder::current_time_first, second)));
+  stage.update(route.now);
+  const auto after = stage.live_reference_prediction_snapshot(route.now);
+  REQUIRE(after.state == goldsrc::LiveReferencePredictionState::active);
+  CHECK(after.accepted_corrections == before.accepted_corrections + 2U);
+  REQUIRE(after.last_raw_position_error); REQUIRE(after.maximum_raw_position_error);
+  CHECK(*after.last_raw_position_error == Catch::Approx(.125).margin(.001));
+  CHECK(*after.maximum_raw_position_error > 29.9);
+  CHECK(*after.maximum_raw_position_error < 30.1);
+  CHECK(stage.live_usercmd_snapshot()->generated_command_count == commands_before);
+  // Production now emits before either owning matched state can be replaced.
+  // This synthetic ordering control is not the historical31.56 case.
+  std::vector<double> producer_errors;
+  for(const auto& event:producer_events)if(event.raw_position_error)producer_errors.push_back(*event.raw_position_error);
+  CHECK(producer_errors.size() == 2U);
+  REQUIRE(producer_events.size()==2U);
+  const auto& critical=producer_events.front();const auto& latest=producer_events.back();
+  REQUIRE(critical.matched_origin);REQUIRE(critical.matched_velocity);REQUIRE(critical.rebase_origin);
+  REQUIRE(critical.raw_position_error);REQUIRE(critical.position_delta);REQUIRE(critical.velocity_delta);
+  double expected{};
+  for(std::size_t axis=0;axis<3;++axis) {
+    const double delta=(*critical.rebase_origin)[axis]-static_cast<double>((*critical.matched_origin)[axis]);
+    expected+=delta*delta;
+    CHECK((*critical.position_delta)[axis]==Catch::Approx(critical.authoritative_origin[axis]-(*critical.matched_origin)[axis]).margin(.0001));
+    CHECK((*critical.velocity_delta)[axis]==Catch::Approx(critical.authoritative_velocity[axis]-(*critical.matched_velocity)[axis]).margin(.0001));
+  }
+  CHECK(*critical.raw_position_error==Catch::Approx(std::sqrt(expected)).margin(.000001));
+  CHECK(*critical.raw_position_error==*after.maximum_raw_position_error);
+  CHECK(critical.authoritative_origin[0]==40.625);
+  CHECK(latest.authoritative_origin[0]==40.75);
+  REQUIRE(latest.raw_position_error);CHECK(*latest.raw_position_error==Catch::Approx(.125).margin(.001));
+  CHECK(critical.event_ordinal+1U==latest.event_ordinal);
+  CHECK(critical.source_record_identity!=latest.source_record_identity);
+  CHECK(critical.source_sequence+1U==latest.source_sequence);
+  CHECK(critical.boundary_command==carrier.last_new_command_sequence);
+  CHECK(latest.boundary_command==critical.boundary_command);
+  CHECK(critical.carrier_outgoing_sequence==carrier.outgoing_netchan_sequence);
+  CHECK(critical.accepted);CHECK(latest.accepted);
+  CHECK(critical.classification==static_cast<std::uint8_t>(hlclient::core::MovementCorrectionClassification::hard_unclassified_snap));
+  REQUIRE(critical.observed_ns);REQUIRE(critical.source_commit_ns);
+  CHECK(*critical.observed_ns>=*critical.source_commit_ns);
+  CHECK(critical.camera_status==static_cast<std::uint8_t>(hlclient::core::MovementCorrectionCameraStatus::different_time_samples));
+  CHECK_FALSE(critical.same_time_camera_delta);
+  CHECK(critical.history_latest_command==critical.boundary_command);
+  CHECK(critical.suffix_commands==0U);CHECK(critical.replayed_commands==0U);
+  CHECK(critical.source_freshness==static_cast<std::uint8_t>(hlclient::core::MovementWitnessFreshness::observed_in_record));
+  // A requested time before retained history selects the real command endpoint,
+  // not a fictional observation at that earlier requested time.
+  const auto early=stage.live_reference_prediction_snapshot(route.now-100ms);
+  CHECK(early.presentation_reason=="anchor_before_history");
+  REQUIRE(early.presentation_selected_time_ns);REQUIRE(early.render_sample_time_ns);
+  CHECK(early.presentation_selected_time_ns==latest.command_sample_ns);
+  CHECK(*early.presentation_selected_time_ns>*early.render_sample_time_ns);
+  REQUIRE(early.predicted_origin);REQUIRE(after.predicted_origin);
+  CHECK(early.predicted_origin->x==after.predicted_origin->x);
+  CHECK(early.predicted_origin->z==after.predicted_origin->z);
+  const auto accepted = after.accepted_corrections;
+  stage.update(route.now);
+  CHECK(stage.live_reference_prediction_snapshot(route.now).accepted_corrections == accepted);
+  CHECK(producer_events.size()==2U);
+  transport.queue(remote, server_packet(route.server_sequence, false,
+      carrier.outgoing_netchan_sequence, false,
+      e321_advancing_air_record(carrier.last_new_command_sequence,
+          E321MovementBodyOrder::current_time_first, second)));
+  stage.update(route.now);
+  CHECK(producer_events.size()==2U);
+}
+
+TEST_CASE("B080 owning alive collision failure survives a later death in the same update",
+          "[b080][correction-witness][goldsrc][live-runtime][integration][reference-negative]") {
+  FakeTransport transport;
+  const auto remote=network::NetworkAddress::loopback(27883U);
+  hlclient::client::ClientWorldState world;
+  auto config=e321_advancing_air_config();
+  std::vector<hlclient::core::MovementCorrectionWitness> events;
+  config.movement_correction_sink=[&](const hlclient::core::MovementCorrectionWitness& value){events.push_back(value);};
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+  auto route=seed_e321_advancing_air(stage,transport,remote,goldsrc::LiveRuntimeStageTimePoint{}+150s,
+      e32_correction_collision(false,true));
+  const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+  events.clear();
+  E32ServerCorrectionFixture blocked;blocked.position_delta.x=6.F;
+  E32ServerCorrectionFixture dead;dead.health=0U;dead.dead_flag=1U;dead.additional_server_seconds=.001F;
+  const auto blocked_sequence=++route.server_sequence;
+  transport.queue(remote,server_packet(blocked_sequence,false,carrier.outgoing_netchan_sequence,false,
+      e321_advancing_air_record(carrier.last_new_command_sequence,E321MovementBodyOrder::current_time_first,blocked)));
+  transport.queue(remote,server_packet(++route.server_sequence,false,carrier.outgoing_netchan_sequence,false,
+      e321_advancing_air_record(carrier.last_new_command_sequence,E321MovementBodyOrder::current_time_first,dead)));
+  route.now+=10ms;stage.update(route.now);
+  const auto after=stage.live_reference_prediction_snapshot(route.now);
+  CHECK(after.reason=="local_player_dead");
+  CHECK(after.state==goldsrc::LiveReferencePredictionState::suspended);
+  REQUIRE(events.size()==1U);const auto& failure=events.front();
+  CHECK_FALSE(failure.accepted);CHECK(failure.alive==true);
+  CHECK(failure.source_sequence==blocked_sequence);
+  CHECK(std::string_view{failure.reason.data()}=="solid_start");
+  REQUIRE(failure.raw_position_error);CHECK(*failure.raw_position_error>0.);CHECK(*failure.raw_position_error<8.);
+  CHECK_FALSE(failure.rebase_origin);CHECK(failure.collision_stage==1U);
+  CHECK(failure.collision_freshness==static_cast<std::uint8_t>(hlclient::core::MovementWitnessFreshness::derived_current_operation));
+  CHECK(failure.hull==0U);REQUIRE(failure.query_start);CHECK(failure.query_end==failure.query_start);
+  CHECK_FALSE(failure.trace_fraction);CHECK_FALSE(failure.plane_normal);
+  REQUIRE(after.canonical_source_record_identity);
+  CHECK(failure.source_record_identity!=*after.canonical_source_record_identity);
+  CHECK(stage.movement_diagnostics_snapshot().committed_records==2U);
+  CHECK(stage.movement_diagnostics_snapshot().replayed_commands==0U);
+}
+
+TEST_CASE("B080 correction sink failure and disabled capture preserve production movement",
+          "[b080][correction-witness][goldsrc][live-runtime][integration][reference-positive]") {
+  std::optional<std::array<float,6>> physical_baseline;
+  for(const bool diagnostics:{false,true})for(const bool fail_sink:{false,true}) {
+    CAPTURE(diagnostics,fail_sink);
+    FakeTransport transport;
+    const auto remote=network::NetworkAddress::loopback(27881U);
+    hlclient::client::ClientWorldState world;
+    auto config=e321_advancing_air_config();config.movement_diagnostics=diagnostics;
+    std::vector<hlclient::core::MovementCorrectionWitness> events;
+    std::size_t calls{};
+    config.movement_correction_sink=[&](const hlclient::core::MovementCorrectionWitness& value) {
+      ++calls;if(fail_sink)throw std::bad_alloc{};events.push_back(value);
+    };
+    goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+    auto route=seed_e321_advancing_air(stage,transport,remote,goldsrc::LiveRuntimeStageTimePoint{}+150s);
+    const auto carrier=stage.live_usercmd_snapshot()->transmit_ranges.back();
+    route.now+=40ms;stage.update(route.now);
+    events.clear();const auto calls_before=calls;
+    const auto before=stage.live_reference_prediction_snapshot(route.now);
+    E32ServerCorrectionFixture correction;correction.position_delta.x=6.5F;correction.velocity_delta.x=81.25F;
+    route.now+=10ms;
+    transport.queue(remote,server_packet(++route.server_sequence,false,carrier.outgoing_netchan_sequence,false,
+        e321_advancing_air_record(carrier.last_new_command_sequence,E321MovementBodyOrder::current_time_first,correction)));
+    stage.update(route.now);
+    const auto after=stage.live_reference_prediction_snapshot(route.now);
+    REQUIRE(after.state==goldsrc::LiveReferencePredictionState::active);
+    REQUIRE(after.predicted_origin);REQUIRE(after.predicted_velocity);REQUIRE(after.canonical_origin);
+    CHECK(after.accepted_corrections==before.accepted_corrections+1U);
+    CHECK(after.replayed_commands==before.replayed_commands+2U);
+    const std::array physical{after.predicted_origin->x,after.predicted_origin->y,after.predicted_origin->z,
+        after.predicted_velocity->x,after.predicted_velocity->y,after.predicted_velocity->z};
+    if(!physical_baseline)physical_baseline=physical;else CHECK(physical==*physical_baseline);
+    CHECK(after.canonical_origin->x==17.125F);
+    CHECK(calls-calls_before==(diagnostics?1U:0U));
+    if(diagnostics && !fail_sink) {
+      REQUIRE(events.size()==1U);const auto& event=events.front();
+      CHECK(event.accepted);CHECK(event.suffix_commands==2U);CHECK(event.replayed_commands==2U);
+      CHECK(event.suffix_first_command==3U);CHECK(event.suffix_last_command==4U);CHECK(event.suffix_milliseconds==40U);
+      CHECK(event.classification==static_cast<std::uint8_t>(hlclient::core::MovementCorrectionClassification::verified_velocity_visual));
+      CHECK(event.camera_status==static_cast<std::uint8_t>(hlclient::core::MovementCorrectionCameraStatus::same_time_samples));
+      REQUIRE(event.same_time_camera_delta);CHECK(*event.same_time_camera_delta<.001);
+      REQUIRE(event.presentation_before_ns);CHECK(event.presentation_before_ns==event.presentation_after_ns);
+      CHECK(event.presentation_before_ns==event.presentation_requested_ns);
+    } else CHECK(events.empty());
+    if(diagnostics && fail_sink)CHECK(after.correction_sink_failures>0U);
+    else CHECK(after.correction_sink_failures==0U);
+    const auto repeat=stage.live_reference_prediction_snapshot(route.now);
+    CHECK(repeat.presentation_trace_queries_total==after.presentation_trace_queries_total);
+    CHECK(repeat.local_steps==after.local_steps);CHECK(repeat.replayed_commands==after.replayed_commands);
+    CHECK(calls-calls_before==(diagnostics?1U:0U));
+  }
+}
+
+TEST_CASE("B080 rejected stale correction owns its failure without invented matched state",
+          "[b080][correction-witness][goldsrc][live-runtime][integration][reference-negative]") {
+  FakeTransport transport;
+  const auto remote=network::NetworkAddress::loopback(27882U);
+  hlclient::client::ClientWorldState world;
+  auto config=e321_advancing_air_config();
+  std::vector<hlclient::core::MovementCorrectionWitness> events;
+  config.movement_correction_sink=[&](const hlclient::core::MovementCorrectionWitness& value){events.push_back(value);};
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+  auto route=seed_e321_advancing_air(stage,transport,remote,goldsrc::LiveRuntimeStageTimePoint{}+150s);
+  const auto old=stage.live_usercmd_snapshot()->transmit_ranges.back();
+  for(unsigned tick=0;tick<20;++tick){route.now+=20ms;stage.update(route.now);}
+  const auto before=stage.live_reference_prediction_snapshot(route.now);
+  REQUIRE(before.state!=goldsrc::LiveReferencePredictionState::active);
+  const auto fresh=stage.live_usercmd_snapshot()->transmit_ranges.back();events.clear();
+  transport.queue(remote,server_packet(++route.server_sequence,false,old.outgoing_netchan_sequence,false,
+      e321_advancing_air_record(old.last_new_command_sequence)));
+  route.now+=1ms;stage.update(route.now);
+  REQUIRE(events.size()==1U);const auto rejected=events.front();
+  CHECK_FALSE(rejected.accepted);CHECK(rejected.classification==static_cast<std::uint8_t>(hlclient::core::MovementCorrectionClassification::rejected));
+  CHECK(std::string_view{rejected.reason.data()}=="reference_seed_horizon_exceeded");
+  CHECK_FALSE(rejected.matched_origin);CHECK_FALSE(rejected.matched_velocity);CHECK_FALSE(rejected.rebase_origin);
+  CHECK_FALSE(rejected.raw_position_error);CHECK_FALSE(rejected.same_time_camera_delta);
+  CHECK(rejected.replayed_commands==0U);CHECK(rejected.collision_freshness==0U);
+  CHECK(rejected.prediction_owner_state==static_cast<std::uint8_t>(goldsrc::LiveReferencePredictionState::suspended));
+  CHECK(stage.movement_diagnostics_snapshot().replayed_commands==0U);
+  transport.queue(remote,server_packet(++route.server_sequence,false,fresh.outgoing_netchan_sequence,false,
+      e321_advancing_air_record(fresh.last_new_command_sequence)));
+  route.now+=1ms;stage.update(route.now);
+  REQUIRE(events.size()==2U);const auto& recovered=events.back();
+  CHECK(recovered.accepted);CHECK(recovered.classification==static_cast<std::uint8_t>(hlclient::core::MovementCorrectionClassification::initial_seed));
+  CHECK(recovered.event_ordinal==rejected.event_ordinal+1U);
+  CHECK(recovered.source_record_identity!=rejected.source_record_identity);
+  CHECK(stage.live_reference_prediction_snapshot(route.now).state==goldsrc::LiveReferencePredictionState::active);
+}
+
 TEST_CASE("E32 fresh ACKs preserve one bounded server correction fade without accumulating offsets",
           "[e32][server-correction-camera][goldsrc][live-runtime][integration][reference-positive]") {
   FakeTransport transport;
@@ -5331,22 +7600,24 @@ TEST_CASE("E32 unclassified discontinuities never receive the server impulse cam
           "[e32][server-correction-camera][goldsrc][live-runtime][integration][reference-positive]") {
   enum class InvalidCorrection { position_only, over_bound, sideways_velocity, opposite_velocity,
       perpendicular_miss, insufficient_velocity, stale_anchor, blocked_corner, setangle, nointerp };
+  for (const float displacement : {18.F, 38.F})
   for (const auto kind : {InvalidCorrection::position_only, InvalidCorrection::over_bound,
       InvalidCorrection::sideways_velocity, InvalidCorrection::opposite_velocity,
       InvalidCorrection::perpendicular_miss, InvalidCorrection::insufficient_velocity,
       InvalidCorrection::stale_anchor, InvalidCorrection::blocked_corner, InvalidCorrection::setangle,
       InvalidCorrection::nointerp}) {
-    CAPTURE(static_cast<unsigned>(kind));
+    CAPTURE(static_cast<unsigned>(kind), displacement);
     E32ServerCorrectionFixture correction;
-    correction.position_delta.x = 18.F; correction.velocity_delta.x = 225.F;
+    correction.position_delta.x = displacement; correction.velocity_delta.x = displacement * 12.5F;
     if (kind == InvalidCorrection::position_only) correction.velocity_delta = {};
-    if (kind == InvalidCorrection::over_bound) { correction.position_delta.x = 33.F; correction.velocity_delta.x = 412.5F; }
-    if (kind == InvalidCorrection::sideways_velocity) correction.velocity_delta = {0,225,0};
-    if (kind == InvalidCorrection::opposite_velocity) correction.velocity_delta.x = -225.F;
+    if (kind == InvalidCorrection::over_bound) { correction.position_delta.x = 65.F; correction.velocity_delta.x = 812.5F; }
+    if (kind == InvalidCorrection::sideways_velocity) correction.velocity_delta = {0,displacement * 12.5F,0};
+    if (kind == InvalidCorrection::opposite_velocity) correction.velocity_delta.x *= -1.F;
     if (kind == InvalidCorrection::perpendicular_miss) correction.position_delta.y = 4.F;
     if (kind == InvalidCorrection::insufficient_velocity) correction.velocity_delta.x = 16.F;
     if (kind == InvalidCorrection::blocked_corner) {
-      correction.position_delta = {-18,18,0}; correction.velocity_delta = {-225,225,0};
+      correction.position_delta = {-displacement,displacement,0};
+      correction.velocity_delta = {-displacement * 12.5F,displacement * 12.5F,0};
     }
     correction.explicit_setangle = kind == InvalidCorrection::setangle;
     if (kind == InvalidCorrection::nointerp) correction.effects = 32U;
@@ -5355,7 +7626,8 @@ TEST_CASE("E32 unclassified discontinuities never receive the server impulse cam
     if (kind == InvalidCorrection::blocked_corner) {
       goldsrc::movement::WorldOnlyMovementCollision collision{package};
       hlclient::collision::CollisionQueryScratch scratch;
-      constexpr hlclient::assets::AssetVector3 from{10.625F,0,1023.875F}, to{-7.375F,18,1023.875F};
+      const hlclient::assets::AssetVector3 from{10.625F,0,1023.875F},
+          to{10.625F-displacement,displacement,1023.875F};
       for (const auto& point : {from,to}) {
         const auto occupied = collision.test_position(point, hlclient::movement::PlayerMovementHull::standing, scratch);
         REQUIRE(occupied); CHECK(occupied.result->status == goldsrc::movement::LocalMovementPositionStatus::free);
@@ -5437,6 +7709,13 @@ TEST_CASE("E32 recovery retains the existing exact 250ms horizon and rejects occ
       CHECK(stage.movement_diagnostics_snapshot().replayed_commands == 12U);
       REQUIRE(stage.movement_diagnostics_snapshot().replayed_simulation_ms);
       CHECK(*stage.movement_diagnostics_snapshot().replayed_simulation_ms == 240.0);
+      const auto work=stage.movement_diagnostics_snapshot();
+      CHECK(work.prediction_work.trace_queries>0U);
+      CHECK(work.prediction_work.contents_queries>0U);
+      CHECK(std::isfinite(work.prediction_work.collision_query_ms));
+      CHECK(work.prediction_work.collision_query_ms>=0.);
+      CHECK(work.prediction_work.collision_query_ms<=
+          work.prediction_command_ms+work.prediction_replay_ms);
     } else {
       CHECK(result.state != goldsrc::LiveReferencePredictionState::active);
       CHECK(result.reason == "reference_seed_horizon_exceeded");
@@ -5585,7 +7864,7 @@ TEST_CASE("E32 death clears an active server impulse camera fade before a new li
 }
 
 TEST_CASE("Normal keyboard sessions roll diagnostic windows without losing exact ACK replay",
-          "[e32][usercmd-retention][goldsrc][live-runtime][integration][reference-positive]") {
+          "[e32][usercmd-retention][goldsrc][live-runtime][integration][reference-positive][b080-receipt-counters]") {
   for (const std::size_t capacity : {1U, 3U}) {
     CAPTURE(capacity);
     FakeTransport transport;
@@ -5613,6 +7892,7 @@ TEST_CASE("Normal keyboard sessions roll diagnostic windows without losing exact
       CHECK(prediction.accepted_corrections == initial.accepted_corrections + tick + 1U);
       CHECK(prediction.fallback_count == initial.fallback_count);
       const auto accounting = stage.live_usercmd_snapshot(); REQUIRE(accounting);
+      check_live_receipt_counter_equivalence(stage);
       CHECK(accounting->transmitted_packet_count == boundary + 1U);
       CHECK(accounting->new_command_submission_count == boundary + 1U);
       CHECK(accounting->first_new_command_sequence == 1U);
@@ -5641,6 +7921,7 @@ TEST_CASE("Normal keyboard sessions roll diagnostic windows without losing exact
       CHECK(prediction.predicted_velocity->z == Catch::Approx(-16.0 * steps).margin(.001));
       stage.update(route.now); // No new sample, send, eviction or correction on repeated update.
       const auto repeated = stage.live_usercmd_snapshot(); REQUIRE(repeated);
+      check_live_receipt_counter_equivalence(stage);
       CHECK(repeated->transmitted_packet_count == accounting->transmitted_packet_count);
       CHECK(repeated->server_sample_count == accounting->server_sample_count);
       CHECK(repeated->transmit_ranges_evicted == accounting->transmit_ranges_evicted);
@@ -5677,7 +7958,146 @@ TEST_CASE("Normal keyboard sessions roll diagnostic windows without losing exact
     stage.update(route.now);
     CHECK(stage.live_usercmd_snapshot()->server_sample_count == count);
     CHECK(stage.live_reference_prediction_snapshot(route.now).accepted_corrections == after_ack.accepted_corrections);
+    check_live_receipt_counter_equivalence(stage);
   }
+}
+
+TEST_CASE("Receipt counter view keeps full-snapshot availability without diagnostic copies",
+          "[b080][b080-receipt-counters][goldsrc][live-runtime][integration]") {
+  STATIC_REQUIRE(std::is_trivially_copyable_v<goldsrc::LiveUserCmdReceiptCounters>);
+  STATIC_REQUIRE(sizeof(goldsrc::LiveUserCmdReceiptCounters) == 3U * sizeof(std::size_t));
+  STATIC_REQUIRE(noexcept(std::declval<const goldsrc::LiveRuntimeStage&>().live_usercmd_receipt_counters()));
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27869U);
+  const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 130s;
+  hlclient::client::ClientWorldState world;
+  auto config = live_test_config();
+  config.operation_mode = goldsrc::LiveRuntimeOperationMode::live_visual_control;
+  config.live_visual_input_source = goldsrc::LiveVisualControlInputSource::keyboard_mouse;
+  config.usercmd_scenario.maximum_transmit_ranges = 3U;
+  config.usercmd_scenario.maximum_samples = 3U;
+  goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+  CHECK_FALSE(stage.live_usercmd_receipt_counters());
+  check_live_receipt_counter_equivalence(stage);
+  auto route = drive_live_visual_ready(stage, transport, remote, epoch);
+  CHECK_FALSE(stage.live_usercmd_receipt_counters());
+  check_live_receipt_counter_equivalence(stage);
+  auto now = route.ready_at + 1ms;
+  CHECK_FALSE(stage.activate_live_visual_control(now)); // Keyboard input is required, even when neutral.
+  const goldsrc::LiveVisualControlInput input{1U, 1U, 0.F, 0.F, 0.F, 0.F, true, true};
+  REQUIRE(stage.submit_live_visual_input(input, now));
+  REQUIRE(stage.activate_live_visual_control(now));
+  check_live_receipt_counter_equivalence(stage);
+  const auto initial = stage.live_usercmd_receipt_counters(); REQUIRE(initial);
+  CHECK(initial->new_command_submission_count == 0U);
+  CHECK(initial->transmitted_packet_count == 0U);
+  CHECK(initial->server_sample_count == 0U);
+  for (unsigned tick = 0U; tick < 12U; ++tick) {
+    now += 20ms; stage.update(now);
+    REQUIRE_FALSE(stage.terminal());
+    check_live_receipt_counter_equivalence(stage);
+    const auto before_receive = stage.live_usercmd_receipt_counters(); REQUIRE(before_receive);
+    CHECK(before_receive->new_command_submission_count == tick + 1U);
+    CHECK(before_receive->transmitted_packet_count == tick + 1U);
+    CHECK(before_receive->server_sample_count == tick);
+    const auto sent = decode_sent(transport.sent.back());
+    transport.queue(remote, server_packet(route.next_server_sequence++, false,
+        sent.header.sequence.sequence.value(), false,
+        service_envelope(live_runtime_record(102.F + static_cast<float>(tick), 90U, 96U))));
+    stage.update(now);
+    REQUIRE_FALSE(stage.terminal());
+    check_live_receipt_counter_equivalence(stage);
+    CHECK(stage.live_usercmd_receipt_counters()->server_sample_count == tick + 1U);
+    stage.update(now); // Repeated observation must not advance any lifetime total.
+    check_live_receipt_counter_equivalence(stage);
+    while (stage.poll_event()) {}
+  }
+  const auto final_snapshot = stage.live_usercmd_snapshot(); REQUIRE(final_snapshot);
+  CHECK(final_snapshot->transmit_ranges.size() == 3U);
+  CHECK(final_snapshot->server_samples.size() == 3U);
+  CHECK(final_snapshot->transmit_ranges_evicted == 9U);
+  CHECK(final_snapshot->server_samples_evicted == 9U);
+  const auto before_cancel = stage.live_usercmd_receipt_counters(); REQUIRE(before_cancel);
+  stage.cancel(now + 1ms);
+  check_live_receipt_counter_equivalence(stage);
+  const auto cancelled = stage.live_usercmd_receipt_counters(); REQUIRE(cancelled);
+  CHECK(cancelled->new_command_submission_count == before_cancel->new_command_submission_count);
+  CHECK(cancelled->transmitted_packet_count == before_cancel->transmitted_packet_count);
+  CHECK(cancelled->server_sample_count == before_cancel->server_sample_count);
+}
+
+// Explicitly selected offline comparison. The immutable live owner and retained
+// arrays are identical for both readers; setup, correctness checks and output
+// are outside the timed scopes. No historical frame-time inference is made.
+TEST_CASE("Offline receipt readers compare owning snapshot and scalar view",
+          "[.][b080-receipt-counter-benchmark][goldsrc][live-runtime][integration]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27870U);
+  const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 130s;
+  hlclient::client::ClientWorldState world;
+  auto config = live_test_config();
+  config.operation_mode = goldsrc::LiveRuntimeOperationMode::live_visual_control;
+  config.live_visual_input_source = goldsrc::LiveVisualControlInputSource::keyboard_mouse;
+  goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+  auto route = drive_live_visual_ready(stage, transport, remote, epoch);
+  auto now = route.ready_at + 1ms;
+  const goldsrc::LiveVisualControlInput input{1U, 1U, 0.F, 0.F, 0.F, 0.F, true, true};
+  REQUIRE(stage.submit_live_visual_input(input, now));
+  REQUIRE(stage.activate_live_visual_control(now));
+  constexpr unsigned retained_records = 4096U;
+  for (unsigned tick = 0U; tick < retained_records; ++tick) {
+    now += 20ms; stage.update(now);
+    REQUIRE_FALSE(stage.terminal());
+    const auto sent = decode_sent(transport.sent.back());
+    transport.queue(remote, server_packet(route.next_server_sequence++, false,
+        sent.header.sequence.sequence.value(), false,
+        service_envelope(live_runtime_record(102.F + static_cast<float>(tick) * .02F, 90U, 96U))));
+    stage.update(now);
+    REQUIRE_FALSE(stage.terminal());
+    while (stage.poll_event()) {}
+  }
+  check_live_receipt_counter_equivalence(stage);
+  const auto snapshot = stage.live_usercmd_snapshot(); REQUIRE(snapshot);
+  REQUIRE(snapshot->transmit_ranges.size() == retained_records);
+  REQUIRE(snapshot->server_samples.size() == retained_records);
+  const auto copied_elements_bytes = snapshot->history_command_count * sizeof(goldsrc::GoldSrcUserCmdHistoryEntry) +
+      snapshot->transmit_ranges.size() * sizeof(goldsrc::LiveUserCmdTransmitRange) +
+      snapshot->server_samples.size() * sizeof(goldsrc::LiveUserCmdServerSample);
+  constexpr unsigned reads = 64U;
+  volatile std::size_t result_sink{};
+  const auto read = [&](const bool full, const unsigned count) {
+    const auto start = std::chrono::steady_clock::now();
+    for (unsigned index = 0U; index < count; ++index) {
+      if (full) {
+        const auto counters = stage.live_usercmd_snapshot();
+        result_sink = result_sink + counters->new_command_submission_count +
+            counters->transmitted_packet_count + counters->server_sample_count;
+      } else {
+        const auto counters = stage.live_usercmd_receipt_counters();
+        result_sink = result_sink + counters->new_command_submission_count +
+            counters->transmitted_packet_count + counters->server_sample_count;
+      }
+    }
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - start).count();
+  };
+  (void)read(true, 16U); (void)read(false, 16U);
+  for (unsigned round = 0U; round < 8U; ++round) {
+    const bool full_first = round % 2U == 0U;
+    const auto first = read(full_first, reads);
+    const auto second = read(!full_first, reads);
+    std::cout << "[b080-receipt-counter-benchmark] round=" << round
+              << " order=" << (full_first ? "full_then_counters" : "counters_then_full")
+              << " reads=" << reads << " retained_samples=" << snapshot->server_samples.size()
+              << " retained_ranges=" << snapshot->transmit_ranges.size()
+              << " history_entries=" << snapshot->history_command_count
+              << " full_copied_element_bytes_per_read=" << copied_elements_bytes
+              << " counter_view_bytes=" << sizeof(goldsrc::LiveUserCmdReceiptCounters)
+              << " counter_copied_elements=0 full_ns=" << (full_first ? first : second)
+              << " counters_ns=" << (full_first ? second : first) << '\n';
+  }
+  CHECK(result_sink > 0U);
+  check_live_receipt_counter_equivalence(stage);
 }
 
 TEST_CASE("Scripted checks keep complete evidence and report typed retention exhaustion",
@@ -7457,4 +9877,241 @@ TEST_CASE("E24 normal accepted TX stream delivers quick LMB release and delayed 
     CHECK(transport.sent.size()==sent_count);CHECK(stage.live_usercmd_snapshot()->new_command_submission_count==commands);
     CHECK_FALSE(stage.poll_weapon_command_submission());
   }
+}
+
+TEST_CASE("Resource response consumes one exact director envelope before its first transmission",
+          "[goldsrc][resource-response][stage][director-signon][ordering][security][regression]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27'895U);
+  const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 20s;
+  goldsrc::ResourceClientResponseStage stage{transport, remote,
+                                             live_response_config()};
+  const auto driven =
+      drive_to_transition_request(stage, transport, remote, epoch);
+  const auto request_sequence = driven.request.header.sequence.sequence.value();
+  const std::vector<std::byte> director{
+      std::byte{51U}, std::byte{4U}, std::byte{11U},
+      std::byte{43U}, std::byte{45U}, std::byte{58U}};
+
+  transport.queue(remote, server_packet(
+      2U, false, request_sequence, false,
+      service_envelope(resource_semantic_payload())));
+  transport.queue(remote, server_packet(
+      3U, false, request_sequence, false, director));
+  stage.update(epoch + 4ms);
+
+  REQUIRE_FALSE(stage.terminal());
+  CHECK(stage.response_queue_count() == 1U);
+  CHECK(stage.response_build_count() == 1U);
+  CHECK(stage.response_transmitted());
+  CHECK_FALSE(stage.response_acknowledged());
+  REQUIRE(stage.payload_diagnostic());
+  const auto &diagnostic = *stage.payload_diagnostic();
+  CHECK(diagnostic.classification ==
+        goldsrc::ResourceResponsePayloadClassification::pre_transmit_control);
+  CHECK(diagnostic.receive_position ==
+        goldsrc::ResourceResponseReceivePosition::
+            before_first_response_transmit);
+  CHECK(diagnostic.wire_encoding ==
+        goldsrc::ResourceResponseWireEncodingKind::wire_uncompressed);
+  CHECK(diagnostic.actual_opcode == 51U);
+  CHECK(diagnostic.cursor_byte_offset == 0U);
+  CHECK(diagnostic.wire_byte_count == director.size());
+  CHECK(diagnostic.decoded_byte_count == director.size());
+  CHECK(diagnostic.consumed_control_message_count == 1U);
+  CHECK(diagnostic.last_successful_handoff_cursor == director.size());
+  CHECK_FALSE(diagnostic.response_transmitted);
+
+  const auto events = drain_events(stage);
+  CHECK(event_count(events,
+                    goldsrc::ResourceClientResponseStageEventType::
+                        pre_transmit_control_consumed) == 1U);
+  std::size_t director_events = 0U;
+  for (const auto &event : events) {
+    if (event.type ==
+        goldsrc::ResourceClientResponseStageEventType::
+            pre_transmit_control_consumed) {
+      REQUIRE(event.opcode);
+      CHECK(*event.opcode == 51U);
+      CHECK(event.payload_byte_count == director.size());
+      ++director_events;
+    }
+  }
+  CHECK(director_events == 1U);
+  for (const auto &sent : transport.sent) {
+    const auto packet = decode_sent(sent);
+    if (packet.payload.empty())
+      continue;
+    const auto opcode = std::to_integer<unsigned>(packet.payload.front());
+    CHECK(opcode != 10U);
+    CHECK(opcode != 11U);
+  }
+
+  constexpr std::array empty_response{
+      std::byte{5U}, std::byte{0U}, std::byte{0U}};
+  const auto response = require_response_packet(transport, empty_response);
+  transport.queue(remote, server_packet(
+      4U, false, response.header.sequence.sequence.value(),
+      response.header.sequence.flags.reliable));
+  stage.update(epoch + 5ms);
+  REQUIRE(stage.result());
+  CHECK(stage.result()->reliable_lifecycle().transmit_count() == 1U);
+}
+
+TEST_CASE("Resource response rejects truncated director envelopes before any response transmission",
+          "[goldsrc][resource-response][stage][director-signon][negative][security][regression]") {
+  const std::array malformed{
+      std::vector<std::byte>{std::byte{51U}},
+      std::vector<std::byte>{
+          std::byte{51U}, std::byte{4U}, std::byte{11U},
+          std::byte{43U}, std::byte{45U}}};
+  for (std::size_t index = 0U; index < malformed.size(); ++index) {
+    DYNAMIC_SECTION("truncated-director-variant=" << index) {
+      FakeTransport transport;
+      const auto remote = network::NetworkAddress::loopback(27'896U);
+      const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 21s;
+      goldsrc::ResourceClientResponseStage stage{
+          transport, remote, live_response_config()};
+      const auto driven =
+          drive_to_transition_request(stage, transport, remote, epoch);
+      const auto request_sequence =
+          driven.request.header.sequence.sequence.value();
+
+      transport.queue(remote, server_packet(
+          2U, false, request_sequence, false,
+          service_envelope(resource_semantic_payload())));
+      transport.queue(remote, server_packet(
+          3U, false, request_sequence, false, malformed[index]));
+      stage.update(epoch + 4ms);
+
+      REQUIRE(stage.state() ==
+              goldsrc::ResourceClientResponseStageState::protocol_error);
+      REQUIRE(stage.error());
+      CHECK(stage.error()->code ==
+            goldsrc::ResourceClientResponseStageErrorCode::
+                pre_transmit_control_decode_failed);
+      REQUIRE(stage.error()->payload_diagnostic);
+      const auto &diagnostic = *stage.error()->payload_diagnostic;
+      CHECK(diagnostic.actual_opcode == 51U);
+      CHECK(diagnostic.cursor_byte_offset == 0U);
+      CHECK(diagnostic.control_code ==
+            goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+      CHECK(diagnostic.consumed_control_message_count == 0U);
+      CHECK_FALSE(diagnostic.last_successful_handoff_cursor);
+      CHECK(stage.response_queue_count() == 1U);
+      CHECK(stage.response_build_count() == 1U);
+      CHECK_FALSE(stage.response_transmitted());
+      CHECK_FALSE(stage.result());
+      const auto events = drain_events(stage);
+      CHECK(event_count(
+                events,
+                goldsrc::ResourceClientResponseStageEventType::
+                    pre_transmit_control_consumed) == 0U);
+      CHECK(event_count(
+                events,
+                goldsrc::ResourceClientResponseStageEventType::
+                    resource_response_transmitted) == 0U);
+    }
+  }
+}
+
+TEST_CASE("Resource response keeps the director allowlist closed to adjacent unknown opcodes",
+          "[goldsrc][resource-response][stage][director-signon][unknown-opcode][security][regression]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27'897U);
+  const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 22s;
+  goldsrc::ResourceClientResponseStage stage{transport, remote,
+                                             live_response_config()};
+  const auto driven =
+      drive_to_transition_request(stage, transport, remote, epoch);
+  const auto request_sequence = driven.request.header.sequence.sequence.value();
+  const std::vector<std::byte> unknown{
+      std::byte{50U}, std::byte{4U}, std::byte{11U},
+      std::byte{43U}, std::byte{45U}, std::byte{58U}};
+
+  transport.queue(remote, server_packet(
+      2U, false, request_sequence, false,
+      service_envelope(resource_semantic_payload())));
+  transport.queue(remote, server_packet(
+      3U, false, request_sequence, false, unknown));
+  stage.update(epoch + 4ms);
+
+  REQUIRE(stage.state() ==
+          goldsrc::ResourceClientResponseStageState::protocol_error);
+  REQUIRE(stage.error());
+  CHECK(stage.error()->code ==
+        goldsrc::ResourceClientResponseStageErrorCode::
+            pre_transmit_control_decode_failed);
+  REQUIRE(stage.error()->payload_diagnostic);
+  const auto &diagnostic = *stage.error()->payload_diagnostic;
+  CHECK(diagnostic.actual_opcode == 50U);
+  CHECK(diagnostic.cursor_byte_offset == 0U);
+  CHECK(diagnostic.control_code ==
+        goldsrc::RuntimeControlDecodeErrorCode::unsupported_opcode);
+  CHECK(diagnostic.consumed_control_message_count == 0U);
+  CHECK_FALSE(diagnostic.last_successful_handoff_cursor);
+  CHECK(stage.response_queue_count() == 1U);
+  CHECK(stage.response_build_count() == 1U);
+  CHECK_FALSE(stage.response_transmitted());
+  CHECK_FALSE(stage.result());
+  const auto events = drain_events(stage);
+  CHECK(event_count(events,
+                    goldsrc::ResourceClientResponseStageEventType::
+                        pre_transmit_control_consumed) == 0U);
+  CHECK(event_count(events,
+                    goldsrc::ResourceClientResponseStageEventType::
+                        resource_response_transmitted) == 0U);
+}
+
+TEST_CASE("Director signon traffic consumes the existing bounded response-control budget",
+          "[goldsrc][resource-response][stage][director-signon][bounds][security][regression]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27'898U);
+  const auto epoch = goldsrc::ResourceClientResponseStageTimePoint{} + 23s;
+  auto config = live_response_config();
+  config.maximum_pre_transmit_control_payloads = 1U;
+  config.maximum_pre_transmit_control_bytes = 12U;
+  goldsrc::ResourceClientResponseStage stage{transport, remote, config};
+  const auto driven =
+      drive_to_transition_request(stage, transport, remote, epoch);
+  const auto request_sequence = driven.request.header.sequence.sequence.value();
+  const std::vector<std::byte> director{
+      std::byte{51U}, std::byte{4U}, std::byte{11U},
+      std::byte{43U}, std::byte{45U}, std::byte{58U}};
+
+  transport.queue_send_status(network::DatagramSendStatus::would_block);
+  transport.queue(remote, server_packet(
+      2U, false, request_sequence, false,
+      service_envelope(resource_semantic_payload())));
+  transport.queue(remote, server_packet(
+      3U, false, request_sequence, false, director));
+  stage.update(epoch + 4ms);
+
+  REQUIRE_FALSE(stage.terminal());
+  CHECK(stage.response_queue_count() == 1U);
+  CHECK_FALSE(stage.response_transmitted());
+  REQUIRE(stage.payload_diagnostic());
+  CHECK(stage.payload_diagnostic()->consumed_control_message_count == 1U);
+
+  transport.queue_send_status(network::DatagramSendStatus::would_block);
+  transport.queue(remote, server_packet(
+      4U, false, request_sequence, false, director));
+  stage.update(epoch + 5ms);
+
+  REQUIRE(stage.state() ==
+          goldsrc::ResourceClientResponseStageState::backpressure);
+  REQUIRE(stage.error());
+  CHECK(stage.error()->code ==
+        goldsrc::ResourceClientResponseStageErrorCode::
+            pre_transmit_control_overflow);
+  CHECK(stage.response_queue_count() == 1U);
+  CHECK_FALSE(stage.response_transmitted());
+  CHECK_FALSE(stage.result());
+  const auto events = drain_events(stage);
+  CHECK(event_count(events,
+                    goldsrc::ResourceClientResponseStageEventType::
+                        pre_transmit_control_consumed) == 1U);
+  CHECK(event_count(events,
+                    goldsrc::ResourceClientResponseStageEventType::
+                        resource_response_transmitted) == 0U);
 }

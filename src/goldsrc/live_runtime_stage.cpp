@@ -2,9 +2,13 @@
 
 #include <hlclient/goldsrc/client_message.hpp>
 #include <hlclient/goldsrc/disconnect_request.hpp>
+#include <hlclient/core/log.hpp>
+#include <hlclient/core/movement_correction_witness.hpp>
+#include <hlclient/core/multiplayer_diagnostics.hpp>
 #include <hlclient/goldsrc/reference_prediction_command.hpp>
 #include <hlclient/goldsrc/reference_prediction_reconciliation.hpp>
 #include <hlclient/goldsrc/reference_brush_collision.hpp>
+#include <hlclient/goldsrc/movement/measured_movement_collision.hpp>
 #include <hlclient/goldsrc/surface_texture_query.hpp>
 #include <hlclient/prediction/local_prediction.hpp>
 #include <hlclient/prediction/prediction_visual_correction.hpp>
@@ -16,9 +20,12 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <exception>
+#include <future>
 #include <limits>
 #include <new>
 #include <ranges>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -28,6 +35,86 @@ namespace {
 
 constexpr std::uint64_t kLiveRuntimeGeneration = 1U;
 constexpr std::size_t kDiagnosticTextLimit = 256U;
+
+enum class PredictionAuthorityVisualSource : std::uint8_t {
+  none,
+  server_velocity,
+  vertical_support_replay,
+  grounded_position,
+};
+
+class RetainedBrushCollisionRoles final
+    : public collision::IBrushCollisionRoleProvider {
+public:
+  explicit RetainedBrushCollisionRoles(
+      const collision::BrushCollisionRoleProviderProfile profile) noexcept
+      : profile_{profile} {}
+
+  std::vector<collision::SyntheticBrushCollisionRoleBinding> bindings;
+
+  [[nodiscard]] collision::BrushCollisionRoleProviderProfile profile()
+      const noexcept override {
+    return profile_;
+  }
+
+  [[nodiscard]] collision::BrushCollisionRole role_for(
+      const collision::BrushCollisionInstanceIdentity& identity)
+      const noexcept override {
+    const auto found = std::find_if(bindings.begin(), bindings.end(),
+        [&](const auto& binding) { return binding.identity == identity; });
+    return found == bindings.end()
+        ? collision::BrushCollisionRole::evidence_pending
+        : found->role;
+  }
+
+private:
+  collision::BrushCollisionRoleProviderProfile profile_;
+};
+
+// Rebuild one bounded render/collision view while retaining every role. A
+// displacement transports only the exact support; nullopt omits that support
+// for the independent full physical-to-visual body sweep.
+[[nodiscard]] std::shared_ptr<const collision::BrushCollisionScene>
+rebuild_visual_support_scene(
+    const std::shared_ptr<const collision::BrushCollisionScene>& source,
+    const hlclient::movement::PlayerMovementHitIdentity& support,
+    const std::optional<double> displacement_z) {
+  if (!source || !source->model_library() ||
+      support.kind != hlclient::movement::PlayerMovementHitKind::brush_entity ||
+      !support.source_entity_index || !support.stable_instance_ordinal ||
+      (displacement_z && (!std::isfinite(*displacement_z) ||
+          std::abs(*displacement_z) > 44.0)))
+    return {};
+  if (displacement_z && *displacement_z == 0.0) return source;
+
+  std::vector<collision::BrushCollisionInstanceDefinition> definitions;
+  definitions.reserve(source->instances().size());
+  RetainedBrushCollisionRoles roles{source->role_provider_profile()};
+  roles.bindings.reserve(source->instances().size());
+  bool shifted{};
+  for (const auto& instance : source->instances()) {
+    auto transform = instance.transform;
+    const bool selected =
+        instance.identity.source_entity_index == *support.source_entity_index &&
+        instance.identity.source_model_index == support.source_model_index &&
+        instance.identity.stable_instance_ordinal ==
+            *support.stable_instance_ordinal;
+    if (selected) {
+      if (shifted || instance.role != collision::BrushCollisionRole::solid)
+        return {};
+      shifted = true;
+      if (!displacement_z) continue;
+      transform.translation.z = static_cast<float>(
+          static_cast<double>(transform.translation.z) + *displacement_z);
+      if (!std::isfinite(transform.translation.z)) return {};
+    }
+    definitions.push_back({instance.identity, transform});
+    roles.bindings.push_back({instance.identity, instance.role});
+  }
+  if (!shifted) return {};
+  return collision::build_brush_collision_scene(
+      source->model_library(), definitions, roles).scene;
+}
 
 [[nodiscard]] std::optional<std::uint64_t> actual_monotonic_ns() noexcept {
   const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -384,6 +471,11 @@ make_live_visual_intent(const game_api::GameMovementPolicy& policy,
     if (control.focused && control.captured &&
         (control.held_buttons & gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::use)) != 0U)
       press_action(tracker, policy, gameplay_input::GameplayInputAction::use);
+    if (control.focused &&
+        policy.button_policy == GoldSrcReferenceButtonPolicy::jump_duck_primary_secondary_reload_use &&
+        (control.held_buttons & gameplay_input::gameplay_button_mask(
+            gameplay_input::GameplayButton::scoreboard)) != 0U)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::scoreboard);
     const auto snapshot = tracker.publish_snapshot();
     if (!policy.bindings) return std::nullopt;
     auto intent = gameplay_input::GameplayInputIntentBuilder{}.build(
@@ -894,6 +986,99 @@ public:
     return true;
   }
 
+  [[nodiscard]] bool multiplayer_enabled() const noexcept {
+    return config_.multiplayer_diagnostics && config_.multiplayer_diagnostics->enabled();
+  }
+  [[nodiscard]] std::array<std::uint64_t,2> multiplayer_generations() const noexcept {
+    if(config_.movement_diagnostic_generations) {
+      try {return config_.movement_diagnostic_generations();} catch(...) {}
+    }
+    return {};
+  }
+  void observe_multiplayer(core::MultiplayerDiagnosticEvent event) noexcept {
+    if(!multiplayer_enabled()) return;
+    const auto index=static_cast<std::size_t>(event.identity.producer);
+    if(index>=multiplayer_event_ids_.size()) return;
+    event.identity.producer_event_id=++multiplayer_event_ids_[index];
+    const auto generations=multiplayer_generations();
+    event.identity.network_generation=generations[0];event.identity.map_generation=generations[1];
+    event.identity.local_life=prediction_life_epoch_;
+    if(!event.local_steady_ns)event.local_steady_ns=core::multiplayer_diagnostic_now_ns();
+    if(event.provenance==core::MultiplayerProvenance::unknown)
+      event.provenance=core::MultiplayerProvenance::runtime_observed;
+    static_cast<void>(config_.multiplayer_diagnostics->observe(event));
+  }
+  void observe_multiplayer_record(const core::MultiplayerNetworkPhase phase,
+      const RuntimeReplayRecord& record,const RuntimeReplayApplyEvent* applied=nullptr) noexcept {
+    if(!multiplayer_enabled()) return;
+    core::MultiplayerDiagnosticEvent event;
+    event.identity.producer=core::MultiplayerDiagnosticProducer::runtime_commit;
+    event.identity.source_record=record.record_identity;
+    event.identity.source_sequence=record.payload.source_sequence;
+    event.edge=core::MultiplayerEdgeConfidence::exact;
+    core::MultiplayerNetworkPayload value;
+    value.phase=phase;value.bytes=static_cast<std::uint32_t>(record.payload.bytes.size());
+    if(phase==core::MultiplayerNetworkPhase::committed) {
+      value.atomic_commit=true;value.commit_ns=core::multiplayer_diagnostic_now_ns();
+      value.record_count=1U;
+      if(applied && applied->server_time_observed && target_.runtime_observation()) {
+        const auto& observation=*target_.runtime_observation();
+        const auto& metadata=observation.server_time_metadata;
+        // A retained svc_time belongs to its original record, not to a later
+        // sound/control-only commit. This is an observed server clock value,
+        // never a synchronization estimate for the local commit timestamp.
+        if(metadata.generation==record.generation &&
+            metadata.freshness==client::RuntimeObservationFreshness::observed_in_record &&
+            metadata.source && observation.server_time_seconds) {
+          const auto& source=*metadata.source;
+          if(source.record_identity==record.record_identity &&
+              source.record_ordinal==record.record_ordinal &&
+              source.source_transport_sequence==record.payload.source_sequence &&
+              source.carrier_acknowledgement==record.payload.source_acknowledgement &&
+              source.source_reliable==record.payload.source_reliable &&
+              source.reassembled==record.payload.reassembled &&
+              source.contemporaneous_fragment_suffix==record.payload.contemporaneous_fragment_suffix) {
+            event.server_seconds=observation.server_time_seconds;
+            event.server_time_domain=core::MultiplayerTimeDomain::server_simulation_seconds;
+          }
+        }
+      }
+    } else if(phase==core::MultiplayerNetworkPhase::rollback) value.atomic_commit=false;
+    event.payload=value;observe_multiplayer(event);
+  }
+  void observe_multiplayer_command(const core::MultiplayerCommandPhase phase,
+      const GoldSrcUserCmdSampleRequest& request,const GoldSrcWireUserCmd* wire,
+      const std::optional<std::uint64_t> build_ns={}) noexcept {
+    if(!multiplayer_enabled()) return;
+    core::MultiplayerDiagnosticEvent event;
+    event.identity.producer=core::MultiplayerDiagnosticProducer::command_scheduler;
+    event.identity.command_id=request.command_sequence.value();
+    // The adapter rebuilds an internal intent tracker. Its snapshot sequence
+    // is not the application's accepted input revision.
+    event.identity.input_sequence=live_visual_input_ ? live_visual_input_->input_revision
+        : request.source_input_sequence;
+    event.edge=core::MultiplayerEdgeConfidence::exact;
+    core::MultiplayerCommandPayload value;value.phase=phase;
+    if(wire) {
+      value.angle_turns=wire->angle_turns;value.movement={wire->forward,wire->side,wire->up};
+      value.buttons=wire->buttons;value.msec=wire->msec;value.lerp_msec=wire->lerp_msec;
+      value.impulse=wire->impulse;
+    }
+    value.owner_time_ns=request.sample_time_nanoseconds;
+    if(request.sample_time_nanoseconds>=0)
+      value.deadline_ns=static_cast<std::uint64_t>(request.sample_time_nanoseconds);
+    value.build_ns=build_ns;
+    if(phase==core::MultiplayerCommandPhase::history_inserted)
+      value.history_insert_ns=core::multiplayer_diagnostic_now_ns();
+    if(config_.game_client) value.configured_interpolation_seconds=
+        config_.game_client->remote_player_policy().interpolation_delay_seconds;
+    if(live_visual_input_) {
+      value.input_sample_ns=live_visual_input_->input_sample_ns;
+      value.effective_interpolation_seconds=live_visual_input_->effective_interpolation_seconds;
+    }
+    event.payload=value;observe_multiplayer(event);
+  }
+
   void reset_movement_update_diagnostics() noexcept {
     if (config_.movement_diagnostics) {
       movement_diagnostics_.enabled = true;
@@ -902,6 +1087,7 @@ public:
       movement_diagnostics_.collision_scene_ms = 0.0;
       movement_diagnostics_.prediction_command_ms = 0.0;
       movement_diagnostics_.prediction_replay_ms = 0.0;
+      movement_diagnostics_.prediction_work = {};
       movement_diagnostics_.driver_queue_before = 0U;
       movement_diagnostics_.driver_queue_after = 0U;
       movement_diagnostics_.processed_driver_events = 0U;
@@ -971,7 +1157,13 @@ public:
            "Live runtime continuation lost its retained driver", now);
       return;
     }
+    poll_file_consistency_response(*driver, now);
+    if (terminal_state(state_)) return;
     driver->set_movement_diagnostics_enabled(config_.movement_diagnostics);
+    const auto diagnostic_generations=multiplayer_enabled() ? multiplayer_generations()
+        : std::array<std::uint64_t,2>{};
+    driver->set_multiplayer_diagnostics(config_.multiplayer_diagnostics,
+        diagnostic_generations[0],diagnostic_generations[1]);
     if (config_.movement_diagnostics)
       movement_diagnostics_.driver_queue_before = driver->pending_event_count();
     if (state_ == LiveRuntimeStageState::running_usercmd_scenario ||
@@ -1195,6 +1387,18 @@ public:
   [[nodiscard]] bool submit_live_visual_input(
       const LiveVisualControlInput &input,
       const LiveRuntimeStageTimePoint now) noexcept {
+    // This is the presentation owner's actual reserve, not an inferred actor
+    // sample age. Reject invalid metadata before accepting the input snapshot;
+    // never let a floating-point conversion invent a wrapped wire duration.
+    if (input.effective_interpolation_seconds) {
+      if (!config_.game_client) return false;
+      const auto policy = config_.game_client->remote_player_policy();
+      const auto reserve = *input.effective_interpolation_seconds;
+      if (!std::isfinite(reserve) || reserve < 0.0 || reserve > 0.511 ||
+          !std::isfinite(policy.interpolation_delay_seconds) ||
+          reserve > policy.interpolation_delay_seconds ||
+          (!policy.enabled && reserve != 0.0)) return false;
+    }
     if (graceful_close_.requested || config_.operation_mode !=
             LiveRuntimeOperationMode::live_visual_control ||
         (state_ != LiveRuntimeStageState::waiting_for_live_visual_input &&
@@ -1217,6 +1421,13 @@ public:
     scoped_button_gate_.filter(scoped, input_active,
         live_visual_input_->held_buttons, live_visual_input_->pressed_buttons, input.released_buttons);
     if (!input_active) button_latch_.clear(scoped);
+    if (!input_active && prediction_authority_visual_source_ !=
+            PredictionAuthorityVisualSource::none) {
+      prediction_visual_correction_.reset();
+      clear_prediction_authority_visual_metadata();
+      prediction_exterior_correction_source_.reset();
+      prediction_presentation_cache_.reset();
+    }
     if (!input.focused) {
       live_visual_input_->forward_axis = 0.0F;
       live_visual_input_->side_axis = 0.0F;
@@ -1248,6 +1459,15 @@ public:
     // One application queue operation per physical input edge. Netchan owns
     // retransmission of retained reliable bytes after would_block/packet loss.
     return static_cast<bool>(driver->queue_reliable(*built.bytes));
+  }
+
+  [[nodiscard]] bool request_console_command(const ConsoleServerCommandRequest& request) {
+    if(graceful_close_.requested || config_.operation_mode!=LiveRuntimeOperationMode::live_visual_control ||
+        state_!=LiveRuntimeStageState::running_live_visual_control || !target_.runtime_observation())return false;
+    const auto built=encode_console_server_command(request);
+    if(!built || !built.bytes)return false;
+    auto* driver=response_stage_.retained_driver();
+    return driver && !driver->terminal() && static_cast<bool>(driver->queue_reliable(*built.bytes));
   }
 
   [[nodiscard]] bool activate_live_visual_control(
@@ -1407,7 +1627,59 @@ public:
         x.x == y.x && x.y == y.y && x.z == y.z;
   }
 
+  static bool compatible_vertical_support_replay_pose(
+      const hlclient::movement::LocalPlayerMovementState& a,
+      const hlclient::movement::LocalPlayerMovementState& b) noexcept {
+    using hlclient::movement::PlayerMovementHitKind;
+    using hlclient::movement::PlayerMovementMode;
+    if (a.mode() != PlayerMovementMode::walking ||
+        b.mode() != PlayerMovementMode::walking || a.hull() != b.hull() ||
+        a.in_duck_transition() || b.in_duck_transition())
+      return false;
+    const auto& a_offset = a.view_offset();
+    const auto& b_offset = b.view_offset();
+    if (a_offset.x != b_offset.x || a_offset.y != b_offset.y ||
+        a_offset.z != b_offset.z)
+      return false;
+    const auto& a_ground = a.ground_state();
+    const auto& b_ground = b.ground_state();
+    if (!a_ground.grounded() || !a_ground.walkable() ||
+        !b_ground.grounded() || !b_ground.walkable() ||
+        !a_ground.hit() || !b_ground.hit() ||
+        a_ground.hit()->kind != PlayerMovementHitKind::brush_entity ||
+        !a_ground.hit()->source_entity_index ||
+        !a_ground.hit()->stable_instance_ordinal ||
+        *a_ground.hit() != *b_ground.hit() ||
+        !a_ground.plane().source_plane_index ||
+        a_ground.plane().source_plane_index !=
+            b_ground.plane().source_plane_index ||
+        a_ground.plane().normal.x != b_ground.plane().normal.x ||
+        a_ground.plane().normal.y != b_ground.plane().normal.y ||
+        a_ground.plane().normal.z != b_ground.plane().normal.z ||
+        a_ground.plane().normal.z <= 0.0F)
+      return false;
+    return true;
+  }
+
+  static bool compatible_grounded_position_pose(
+      const hlclient::movement::LocalPlayerMovementState& a,
+      const hlclient::movement::LocalPlayerMovementState& b) noexcept {
+    const auto& ag = a.ground_state();
+    const auto& bg = b.ground_state();
+    return a.mode() == hlclient::movement::PlayerMovementMode::walking &&
+        b.mode() == hlclient::movement::PlayerMovementMode::walking &&
+        compatible_velocity_correction_pose(a, b) &&
+        ag.grounded() && ag.walkable() && bg.grounded() && bg.walkable() &&
+        ag.hit() && bg.hit() &&
+        ag.hit()->kind == hlclient::movement::PlayerMovementHitKind::world &&
+        ag.hit() == bg.hit() && ag.plane().source_plane_index &&
+        ag.plane() == bg.plane() && ag.plane().normal.z > 0.F &&
+        std::abs(double(a.origin().z) - b.origin().z) <= .25;
+  }
+
   bool velocity_correction_context_continuous(const std::uint32_t receiving_entity_number) const {
+    if (config_.live_visual_input_source == LiveVisualControlInputSource::keyboard_mouse &&
+        (!live_visual_input_ || !live_visual_input_->focused || !live_visual_input_->captured)) return false;
     const auto& observation = target_.runtime_observation();
     if (!observation || observation->lifecycle.dead()) return false;
     // The spawn setangle slot persists. Only a NEW source is a discontinuity.
@@ -1420,16 +1692,110 @@ public:
     return false;
   }
 
+  bool authority_visual_context_continuous() const {
+    if (prediction_authority_visual_source_ ==
+        PredictionAuthorityVisualSource::none)
+      return false;
+    if (!prediction_history_ || !prediction_authority_visual_pose_ ||
+        !velocity_correction_context_continuous(
+            prediction_authority_visual_entity_))
+      return false;
+    const auto& current = *prediction_history_->current_predicted_state();
+    if (prediction_authority_visual_source_ ==
+        PredictionAuthorityVisualSource::server_velocity)
+      return compatible_velocity_correction_pose(
+          *prediction_authority_visual_pose_, current);
+
+    if (prediction_authority_visual_source_ ==
+        PredictionAuthorityVisualSource::grounded_position)
+      return prediction_life_epoch_ == prediction_authority_visual_life_epoch_ &&
+          prediction_life_deaths_ == prediction_authority_visual_life_deaths_ &&
+          prediction_brush_context_.generation ==
+              prediction_authority_visual_brush_generation_ &&
+          compatible_grounded_position_pose(
+              *prediction_authority_visual_pose_, current);
+
+    if (prediction_life_epoch_ != prediction_authority_visual_life_epoch_ ||
+        prediction_life_deaths_ != prediction_authority_visual_life_deaths_ ||
+        prediction_brush_context_.generation !=
+            prediction_authority_visual_brush_generation_ ||
+        !prediction_authority_visual_support_ ||
+        !prediction_support_motion_ || !prediction_support_motion_->active() ||
+        !compatible_vertical_support_replay_pose(
+            *prediction_authority_visual_pose_, current) ||
+        !current.ground_state().hit() ||
+        *current.ground_state().hit() !=
+            *prediction_authority_visual_support_)
+      return false;
+    const auto velocity = prediction_support_motion_->velocity_z_for(
+        *prediction_authority_visual_support_);
+    return velocity && std::isfinite(*velocity) && *velocity != 0.0 &&
+        std::abs(*velocity) <= 256.0 &&
+        std::isfinite(prediction_authority_visual_support_velocity_z_) &&
+        *velocity * prediction_authority_visual_support_velocity_z_ > 0.0;
+  }
+
+  void clear_prediction_authority_visual_metadata() const noexcept {
+    prediction_authority_visual_source_ =
+        PredictionAuthorityVisualSource::none;
+    prediction_authority_visual_maximum_offset_ = 32.0;
+    prediction_authority_visual_pose_.reset();
+    prediction_authority_visual_support_.reset();
+    prediction_authority_visual_support_velocity_z_ = 0.0;
+    prediction_authority_visual_entity_ = 0U;
+    prediction_authority_visual_life_epoch_ = 0U;
+    prediction_authority_visual_life_deaths_ = 0U;
+    prediction_authority_visual_brush_generation_ = 0U;
+  }
+
+  [[nodiscard]] bool prior_support_replay_proof_matches(
+      const hlclient::movement::LocalPlayerMovementState& state,
+      const double velocity_z) const noexcept {
+    return prediction_support_replay_proof_ &&
+        prediction_support_replay_proof_life_epoch_ == prediction_life_epoch_ &&
+        prediction_support_replay_proof_life_deaths_ == prediction_life_deaths_ &&
+        prediction_support_replay_proof_brush_generation_ ==
+            prediction_brush_context_.generation &&
+        state.ground_state().hit() &&
+        *state.ground_state().hit() == *prediction_support_replay_proof_ &&
+        std::isfinite(velocity_z) && velocity_z != 0.0 &&
+        std::isfinite(prediction_support_replay_proof_velocity_z_) &&
+        velocity_z * prediction_support_replay_proof_velocity_z_ > 0.0;
+  }
+
+  void update_support_replay_proof() noexcept {
+    prediction_support_replay_proof_.reset();
+    prediction_support_replay_proof_velocity_z_ = 0.0;
+    if (!prediction_history_ || !prediction_support_motion_ ||
+        !prediction_support_motion_->active())
+      return;
+    const auto& state = *prediction_history_->current_predicted_state();
+    if (!compatible_vertical_support_replay_pose(state, state) ||
+        !state.ground_state().hit())
+      return;
+    const auto velocity = prediction_support_motion_->velocity_z_for(
+        *state.ground_state().hit());
+    if (!velocity || !std::isfinite(*velocity) || *velocity == 0.0 ||
+        std::abs(*velocity) > 256.0)
+      return;
+    prediction_support_replay_proof_ = *state.ground_state().hit();
+    prediction_support_replay_proof_velocity_z_ = *velocity;
+    prediction_support_replay_proof_life_epoch_ = prediction_life_epoch_;
+    prediction_support_replay_proof_life_deaths_ = prediction_life_deaths_;
+    prediction_support_replay_proof_brush_generation_ =
+        prediction_brush_context_.generation;
+  }
+
   bool verified_server_velocity_correction(
       const hlclient::movement::LocalPlayerMovementState& matched,
       const hlclient::movement::LocalPlayerMovementState& corrected,
       const ReferencePredictionSeed& seed, const LiveRuntimeStageTimePoint now,
       const double raw_error) const {
-    // Local-compatible visual policy, not an inferred damage event. A modest
+    // Local-compatible visual policy, not an inferred damage event. A bounded
     // position discrepancy must be explained by a newly observed velocity in
     // at most 100 ms, in the same direction (2 units of quantization/contact
     // tolerance). Unclassified large corrections keep the existing snap gate.
-    if (!(raw_error > .25 && raw_error <= 32.) || !prediction_last_anchor_at_ ||
+    if (!(raw_error > .25 && raw_error <= 64.) || !prediction_last_anchor_at_ ||
         now < *prediction_last_anchor_at_ || now - *prediction_last_anchor_at_ > std::chrono::milliseconds{100} ||
         !compatible_velocity_correction_pose(matched, corrected) ||
         !velocity_correction_context_continuous(seed.receiving_entity_number) ||
@@ -1465,8 +1831,73 @@ public:
         traced.result->fraction >= 1. && prediction_eye_clear(eye.start, eye.end);
   }
 
+  bool checked_grounded_position_correction(
+      const hlclient::movement::LocalPlayerMovementState& matched,
+      const hlclient::movement::LocalPlayerMovementState& corrected,
+      const ReferencePredictionSeed& seed, const LiveRuntimeStageTimePoint now,
+      const double raw_error) const {
+    // This is bounded presentation continuity, not a velocity/damage inference.
+    // A non-collinear ground correction may include contact response. Require
+    // the same static BSP plane and a clear full-body route in the current
+    // authoritative scene; free endpoints alone cannot authorize wall crossing.
+    if (!(raw_error > .25 && raw_error <= 16.) || !prediction_last_anchor_at_ ||
+        now < *prediction_last_anchor_at_ ||
+        now - *prediction_last_anchor_at_ > std::chrono::milliseconds{100} ||
+        matched.source_command_sequence() != corrected.source_command_sequence() ||
+        prediction_brush_context_.record != seed.record_identity ||
+        !compatible_grounded_position_pose(matched, corrected) ||
+        !velocity_correction_context_continuous(seed.receiving_entity_number) ||
+        !prediction_collision_ || !prediction_camera_collision_query_)
+      return false;
+    return checked_grounded_presentation_route(corrected.origin(), matched.origin(),
+        corrected.hull(), corrected.view_offset());
+  }
+
+  bool checked_grounded_presentation_route(const assets::AssetVector3& from,
+      const assets::AssetVector3& to, const hlclient::movement::PlayerMovementHull hull,
+      const assets::AssetVector3& offset) const {
+    if (!prediction_collision_ || !prediction_camera_collision_query_) return false;
+    const auto route = prediction_collision_->trace_hull(from, to, hull,
+        prediction_presentation_scratch_, prediction_movement_config_.collision_query);
+    ++prediction_presentation_trace_queries_;
+    if (!route || !route.result || route.result->start_solid || route.result->all_solid ||
+        route.result->fraction < 1.) return false;
+    const auto endpoint = prediction_collision_->test_position(to, hull,
+        prediction_presentation_scratch_, prediction_movement_config_.collision_query);
+    ++prediction_presentation_trace_queries_;
+    if (!endpoint || !endpoint.result ||
+        endpoint.result->status != movement::LocalMovementPositionStatus::free) return false;
+    hlclient::collision::CollisionTraceRequest eye;
+    eye.start = {from.x+offset.x,from.y+offset.y,from.z+offset.z};
+    eye.end = {to.x+offset.x,to.y+offset.y,to.z+offset.z};
+    eye.hull = hlclient::collision::CollisionHullOrdinal::point;
+    eye.limits = prediction_movement_config_.collision_query.query_limits;
+    const auto traced = prediction_camera_collision_query_->trace_line(
+        eye, prediction_presentation_scratch_);
+    ++prediction_presentation_trace_queries_;
+    return traced && traced.result && !traced.result->start_solid &&
+        !traced.result->all_solid && traced.result->fraction >= 1. &&
+        prediction_eye_clear(eye.start, eye.end);
+  }
+
   [[nodiscard]] LiveReferencePredictionSnapshot
   live_reference_prediction_snapshot(const LiveRuntimeStageTimePoint now) const {
+    if (config_.movement_diagnostics && prediction_velocity_stop_) {
+      bool continuous = prediction_state_ == LiveReferencePredictionState::active &&
+          prediction_velocity_stop_->life_epoch == prediction_life_epoch_ &&
+          prediction_velocity_stop_->life_deaths == prediction_life_deaths_;
+      if (continuous && config_.movement_diagnostic_generations) {
+        try {
+          const auto generations = config_.movement_diagnostic_generations();
+          continuous = prediction_velocity_stop_->network_generation == generations[0] &&
+              prediction_velocity_stop_->map_generation == generations[1];
+        } catch (...) { continuous = false; }
+      }
+      if (!continuous) {
+        prediction_velocity_stop_.reset();
+        prediction_presentation_cache_.reset();
+      }
+    }
     const auto world_revision = target_.runtime_publication_revision();
     if (prediction_presentation_cache_ && prediction_presentation_cache_at_ == now &&
         prediction_presentation_cache_history_ == prediction_history_.get() &&
@@ -1480,16 +1911,13 @@ public:
     const auto publish = [&](LiveReferencePredictionSnapshot snapshot) {
       // Local commands and control-only server publications can change pose or
       // continuity before another clientdata ACK reaches the rebase owner.
-      if (prediction_server_velocity_visual_ &&
-          (!prediction_history_ || !prediction_server_velocity_pose_ ||
-           !compatible_velocity_correction_pose(*prediction_server_velocity_pose_,
-               *prediction_history_->current_predicted_state()) ||
-           !velocity_correction_context_continuous(prediction_server_velocity_entity_)))
+      if (prediction_authority_visual_source_ !=
+              PredictionAuthorityVisualSource::none &&
+          !authority_visual_context_continuous())
         prediction_visual_correction_.reset();
       if(!prediction_visual_correction_ || !prediction_visual_correction_->active()) {
         prediction_exterior_correction_source_.reset();
-        prediction_server_velocity_visual_ = false;
-        prediction_server_velocity_pose_.reset();
+        clear_prediction_authority_visual_metadata();
       }
       if (prediction_visual_correction_ &&
           prediction_visual_correction_->active() &&
@@ -1518,12 +1946,98 @@ public:
             const assets::AssetVector3 candidate{eye.x - offset.x,
                                                  eye.y - offset.y,
                                                  eye.z - offset.z};
-            const auto checked = (presentation_collision ? presentation_collision.get() : prediction_collision_.get())->trace_hull(
-                base, candidate,
-                prediction_history_->current_predicted_state()->hull(),
-                prediction_presentation_scratch_,
-                prediction_movement_config_.collision_query);
-            ++prediction_presentation_trace_queries_;
+            const auto authority_source = prediction_authority_visual_source_;
+            const bool support_authority = authority_source ==
+                PredictionAuthorityVisualSource::vertical_support_replay;
+            const auto hull =
+                prediction_history_->current_predicted_state()->hull();
+            movement::LocalMovementTraceQueryResult checked;
+            bool support_path_valid = !support_authority;
+            std::shared_ptr<const collision::BrushCollisionScene>
+                shifted_support_scene;
+            assets::AssetVector3 eye_route_start = camera_info.position;
+            if (support_authority && prediction_authority_visual_support_) {
+              // A vertical carrier bridge transports the exact supporting BSP
+              // with the player. The independent untransported sweep omits
+              // only that support, retaining world, other brushes and boxes;
+              // the transported sweep/contact checks use the shifted scene.
+              try {
+                const auto physical_scene = snapshot.presented_brush_scene;
+                const double displacement_z =
+                    static_cast<double>(candidate.z) - base.z;
+                const auto without_support = rebuild_visual_support_scene(
+                    physical_scene, *prediction_authority_visual_support_,
+                    std::nullopt);
+                shifted_support_scene = rebuild_visual_support_scene(
+                    physical_scene, *prediction_authority_visual_support_,
+                    displacement_z);
+                if (without_support && shifted_support_scene) {
+                  movement::BrushSceneMovementCollision outside_support{
+                      without_support, prediction_brush_context_.boxes};
+                  movement::BrushSceneMovementCollision shifted_support{
+                      shifted_support_scene, prediction_brush_context_.boxes};
+                  checked = outside_support.trace_hull(
+                      base, candidate, hull, prediction_presentation_scratch_,
+                      prediction_movement_config_.collision_query);
+                  ++prediction_presentation_trace_queries_;
+                  auto transported_start = base;
+                  transported_start.z = static_cast<float>(
+                      static_cast<double>(transported_start.z) + displacement_z);
+                  const auto transported = shifted_support.trace_hull(
+                      transported_start, candidate, hull,
+                      prediction_presentation_scratch_,
+                      prediction_movement_config_.collision_query);
+                  const auto position = shifted_support.test_position(
+                      candidate, hull, prediction_presentation_scratch_,
+                      prediction_movement_config_.collision_query);
+                  auto down_end = candidate;
+                  down_end.z = static_cast<float>(static_cast<double>(down_end.z) -
+                      prediction_movement_config_.ground_probe_distance);
+                  const auto contact = shifted_support.trace_hull(
+                      candidate, down_end, hull,
+                      prediction_presentation_scratch_,
+                      prediction_movement_config_.collision_query);
+                  prediction_presentation_trace_queries_ += 3U;
+                  const auto& ground = prediction_history_->
+                      current_predicted_state()->ground_state();
+                  support_path_valid = checked && checked.result &&
+                      !checked.result->start_solid &&
+                      !checked.result->all_solid &&
+                      checked.result->fraction >= 1.0 && transported &&
+                      transported.result && !transported.result->start_solid &&
+                      !transported.result->all_solid &&
+                      transported.result->fraction >= 1.0 && position &&
+                      position.result && position.result->status ==
+                          movement::LocalMovementPositionStatus::free &&
+                      contact && contact.result &&
+                      !contact.result->start_solid &&
+                      !contact.result->all_solid &&
+                      contact.result->fraction < 1.0 &&
+                      contact.result->hit ==
+                          prediction_authority_visual_support_ &&
+                      contact.result->collision_plane &&
+                      contact.result->collision_plane->source_plane_index ==
+                          ground.plane().source_plane_index &&
+                      contact.result->collision_plane->normal.x ==
+                          ground.plane().normal.x &&
+                      contact.result->collision_plane->normal.y ==
+                          ground.plane().normal.y &&
+                      contact.result->collision_plane->normal.z ==
+                          ground.plane().normal.z;
+                  eye_route_start.z = static_cast<float>(
+                      static_cast<double>(eye_route_start.z) + displacement_z);
+                }
+              } catch (...) {
+                support_path_valid = false;
+                shifted_support_scene.reset();
+              }
+            } else {
+              checked = (presentation_collision ? presentation_collision.get()
+                  : prediction_collision_.get())->trace_hull(
+                  base, candidate, hull, prediction_presentation_scratch_,
+                  prediction_movement_config_.collision_query);
+              ++prediction_presentation_trace_queries_;
+            }
             if(config_.movement_diagnostics && snapshot.collision_query_purpose!="present_command_body" && checked && checked.result &&
                 (checked.result->start_solid || checked.result->all_solid || checked.result->fraction<1.0)) {
               snapshot.collision_position_evidence.reset();
@@ -1539,15 +2053,27 @@ public:
                 sample_seconds<prediction_visual_correction_->start_monotonic_time_seconds()+
                     prediction_visual_correction_->duration_seconds();
             bool presented=false;
-            if (!route_selected && checked && checked.result && !checked.result->start_solid &&
+            if (!route_selected && support_path_valid && checked && checked.result && !checked.result->start_solid &&
                 !checked.result->all_solid && checked.result->fraction >= 1.0 &&
-                prediction_eye_clear(camera_info.position, eye, presentation_scene)) {
+                prediction_eye_clear(eye_route_start, eye,
+                    support_authority ? shifted_support_scene : presentation_scene)) {
               snapshot.presented_origin = candidate;
-              snapshot.presentation_reason = prediction_server_velocity_visual_
-                  ? "visual_server_velocity_correction" : "visual_correction";
+              if (support_authority) {
+                snapshot.presented_brush_scene = shifted_support_scene;
+                snapshot.presentation_reason =
+                    "visual_vertical_support_replay_correction";
+              } else if (authority_source ==
+                  PredictionAuthorityVisualSource::server_velocity) {
+                snapshot.presentation_reason =
+                    "visual_server_velocity_correction";
+              } else if (authority_source ==
+                  PredictionAuthorityVisualSource::grounded_position) {
+                snapshot.presentation_reason =
+                    "visual_grounded_position_correction";
+              } else snapshot.presentation_reason = "visual_correction";
               prediction_visual_correction_.emplace(std::move(*sample.correction));
               prediction_exterior_correction_source_.reset();presented=true;
-            } else if(!prediction_server_velocity_visual_ && prediction_history_->current_predicted_state()->mode()==
+            } else if(authority_source == PredictionAuthorityVisualSource::none && prediction_history_->current_predicted_state()->mode()==
                 hlclient::movement::PlayerMovementMode::walking) {
               const auto& visual=*prediction_visual_correction_;
               const auto initial=visual.initial_position_offset();
@@ -1555,13 +2081,13 @@ public:
               const auto effective_seconds=std::max(sample_seconds,visual.last_sample_monotonic_time_seconds());
               const auto alpha=visual.duration_seconds()>0 ? std::clamp((effective_seconds-
                   visual.start_monotonic_time_seconds())/visual.duration_seconds(),0.0,1.0):1.0;
-              const auto hull=prediction_history_->current_predicted_state()->hull();
-              const auto ordinal=movement::local_movement_collision_hull(hull);
+              const auto corner_hull=prediction_history_->current_predicted_state()->hull();
+              const auto ordinal=movement::local_movement_collision_hull(corner_hull);
               const auto profile=ordinal?hlclient::collision::standard_collision_hull_profile(*ordinal):std::nullopt;
               const bool eye_inside=profile && offset.x>=profile->clip_mins.x&&offset.x<=profile->clip_maxs.x&&
                   offset.y>=profile->clip_mins.y&&offset.y<=profile->clip_maxs.y&&
                   offset.z>=profile->clip_mins.z&&offset.z<=profile->clip_maxs.z;
-              const auto route=eye_inside ? sample_reference_exterior_corner_presentation(route_from,base,alpha,hull,
+              const auto route=eye_inside ? sample_reference_exterior_corner_presentation(route_from,base,alpha,corner_hull,
                   *(presentation_collision?presentation_collision.get():prediction_collision_.get()),
                   prediction_presentation_scratch_,prediction_movement_config_,4.0,&prediction_presentation_trace_queries_):std::nullopt;
               if(route && prediction_epoch_>=visual.new_prediction_revision()) {
@@ -1584,15 +2110,18 @@ public:
             if(!presented) {
               snapshot.presentation_reason = "visual_correction_blocked";
               prediction_visual_correction_.reset();
+              clear_prediction_authority_visual_metadata();
               prediction_exterior_correction_source_.reset();
             }
           } else {
             snapshot.presentation_reason = "visual_correction_failed";
             prediction_visual_correction_.reset();
+            clear_prediction_authority_visual_metadata();
             prediction_exterior_correction_source_.reset();
           }
         } else {
           prediction_visual_correction_.reset();
+          clear_prediction_authority_visual_metadata();
           prediction_exterior_correction_source_.reset();
         }
         if (prediction_presentation_scratch_.retained_bytes() > scratch_before)
@@ -1650,6 +2179,8 @@ public:
     out.accepted_corrections = prediction_accepted_corrections_;
     out.replayed_commands = prediction_replayed_commands_;
     out.fallback_count = prediction_fallback_count_;
+    out.correction_events_published = prediction_correction_events_published_;
+    out.correction_sink_failures = prediction_correction_sink_failures_;
     out.history_depth = prediction_history_ ? prediction_history_->size() : 0U;
     out.last_raw_position_error = prediction_last_error_;
     out.maximum_raw_position_error = prediction_maximum_error_;
@@ -1661,7 +2192,19 @@ public:
     out.last_seed_status = prediction_last_seed_status_;
     out.last_seed_field = prediction_last_seed_field_;
     out.last_ground_status = prediction_last_ground_status_;
+    out.candidate_anchor_command = prediction_candidate_anchor_command_;
+    out.recovery_wait_reason = prediction_recovery_wait_reason_;
+    if (prediction_life_wait_started_at_) {
+      out.life_wait_started_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          prediction_life_wait_started_at_->time_since_epoch()).count();
+      out.life_wait_duration_ms = std::max(0.0, std::chrono::duration<double, std::milli>{
+          prediction_life_wait_ended_at_.value_or(now) - *prediction_life_wait_started_at_}.count());
+    }
     if (config_.movement_diagnostics) {
+      if (prediction_state_ == LiveReferencePredictionState::active && prediction_velocity_stop_ &&
+          prediction_velocity_stop_->life_epoch == prediction_life_epoch_ &&
+          prediction_velocity_stop_->life_deaths == prediction_life_deaths_)
+        out.velocity_stop = prediction_velocity_stop_;
       out.support_observation_seconds = prediction_brush_context_.server_time;
       out.collision_position_evidence = prediction_collision_position_evidence_;
       out.collision_trace_evidence = prediction_collision_trace_evidence_;
@@ -1711,10 +2254,12 @@ public:
         !prediction_history_)
       return publish(out);
     const auto& latest = prediction_history_->current_predicted_state();
+    // Owner sample times also guard visual continuity with logging OFF. This
+    // reuses the caller's time; it performs no diagnostic clock read or I/O.
+    out.render_sample_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        (now - config_.usercmd_scenario.command_interval).time_since_epoch()).count();
     if (config_.movement_diagnostics) {
       out.command_simulation_seconds = static_cast<double>(latest->simulation_time_nanoseconds()) * 1e-9;
-      out.render_sample_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-          (now - config_.usercmd_scenario.command_interval).time_since_epoch()).count();
       if (prediction_support_motion_ && latest->ground_state().hit())
         out.support_velocity_z = prediction_support_motion_->velocity_z_for(*latest->ground_state().hit());
     }
@@ -1729,6 +2274,11 @@ public:
     out.predicted_in_duck_transition = latest->in_duck_transition();
     out.presented_origin = latest->origin();
     out.presented_view_offset = latest->view_offset();
+    {
+      const auto sequence=latest->source_command_sequence();
+      const auto& time=command_sample_times_[sequence%command_sample_times_.size()];
+      if(time.sequence==sequence)out.presentation_selected_time_ns=time.end_nanoseconds;
+    }
     if (prediction_support_motion_ && prediction_support_motion_->active()) {
       presentation_scene = prediction_support_motion_->sample(
           static_cast<double>(latest->simulation_time_nanoseconds()) * 1e-9);
@@ -1771,6 +2321,8 @@ public:
       } else {
         out.presented_origin = anchor->origin();
         out.presentation_reason = "anchor_before_history";
+        out.presentation_selected_time_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
+            from_at->time_since_epoch()).count();
         return publish(out);
       }
     }
@@ -1806,6 +2358,7 @@ public:
             to_at->time_since_epoch()).count();
         out.presented_origin = to_state->origin();
         out.presented_view_offset = to_state->view_offset();
+        out.presentation_selected_time_ns=out.presentation_to_time_ns;
         out.presentation_reason = "command_wall_time_gap";
         return publish(out);
       }
@@ -1825,6 +2378,8 @@ public:
       out.presentation_to_time_ns = std::chrono::duration_cast<
           std::chrono::nanoseconds>(to_at->time_since_epoch()).count();
       out.presentation_alpha = fraction;
+      out.presentation_selected_time_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
+          sample_at.time_since_epoch()).count();
       const auto& from = from_state->origin();
       const auto& to = to_state->origin();
       const auto& from_offset = from_state->view_offset();
@@ -1850,6 +2405,7 @@ public:
         out.presented_origin = support_sample.trace_start;
         out.presented_view_offset = from_offset;
         out.presentation_reason = "hull_transition_discrete";
+        out.presentation_selected_time_ns=out.presentation_from_time_ns;
         if (from_state->hull() == hlclient::movement::PlayerMovementHull::standing &&
             to_state->hull() == hlclient::movement::PlayerMovementHull::ducked &&
             from_state->ground_state().grounded() &&
@@ -1877,6 +2433,8 @@ public:
             out.presented_view_offset = assets::AssetVector3{
                 eye.x - from.x, eye.y - from.y, eye.z - from.z};
             out.presentation_reason = "duck_eye_transition";
+            out.presentation_selected_time_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
+                sample_at.time_since_epoch()).count();
           } else {
             out.presentation_reason = "duck_eye_transition_blocked";
           }
@@ -1887,6 +2445,7 @@ public:
       if (fraction == 0.0 || fraction == 1.0) {
         out.presented_origin = candidate;
         out.presented_view_offset = fraction == 0.0 ? from_offset : to_offset;
+        out.presentation_selected_time_ns=fraction==0.0 ? out.presentation_from_time_ns : out.presentation_to_time_ns;
         out.presentation_reason = "pair_endpoint";
         return publish(out);
       }
@@ -1971,12 +2530,14 @@ public:
           out.presented_origin = from;
           out.presented_view_offset = from_offset;
           out.presentation_reason = "collision_blocked";
+          out.presentation_selected_time_ns=out.presentation_from_time_ns;
         }
       }
     } catch (const std::exception&) {
       out.presented_origin = from;
       out.presented_view_offset = from_offset;
       out.presentation_reason = "collision_query_failed";
+      out.presentation_selected_time_ns=out.presentation_from_time_ns;
     }
       out.presentation_scratch_bytes = prediction_presentation_scratch_.retained_bytes();
       return publish(out);
@@ -2124,6 +2685,7 @@ public:
 
   void queue_spawn_request(NetchanDriver &driver,
                            const LiveRuntimeStageTimePoint now) {
+    if (spawn_request_ || spawn_request_queue_count_ != 0U) return;
     auto built = StockSpawnRequestBuilder::build(server_count_, world_map_crc_);
     if (!built || !built.encoding) {
       fail(LiveRuntimeStageErrorCode::spawn_request_build_failed,
@@ -2137,9 +2699,89 @@ public:
       return;
     }
     spawn_request_.emplace(std::move(*built.encoding));
+    const auto& resources = response_stage_.result()->resource_list().resource_list();
+    if (resources.file_consistency_required()) {
+      if (!config_.file_consistency_environment) {
+        fail(LiveRuntimeStageErrorCode::file_consistency_response_failed,
+             LiveRuntimeStageState::protocol_error,
+             "Requested file consistency has no approved local resource environment", now);
+        return;
+      }
+      try {
+        std::promise<FileConsistencyResponseBuildResult> promise;
+        file_consistency_future_ = promise.get_future();
+        // The worker owns all inputs. It cannot access the stage/driver and
+        // can only publish a complete response; no partial hash is transmitted.
+        file_consistency_worker_ = std::jthread{
+            [list = resources, environment = config_.file_consistency_environment,
+             count = server_count_, policy = config_.file_consistency_read_policy,
+             promise = std::move(promise)](std::stop_token stop) mutable {
+              try {
+                promise.set_value(build_file_consistency_response(list, *environment, count, stop, policy));
+              } catch (...) {
+                promise.set_exception(std::current_exception());
+              }
+            }};
+      } catch (...) {
+        fail(LiveRuntimeStageErrorCode::file_consistency_response_failed,
+             LiveRuntimeStageState::protocol_error,
+             "Unable to start bounded file-consistency preparation", now);
+      }
+      return;
+    }
+    try {
+      const auto bytes = spawn_request_->semantic_bytes();
+      spawn_wire_bytes_.assign(bytes.begin(), bytes.end());
+    } catch (...) {
+      fail(LiveRuntimeStageErrorCode::spawn_request_build_failed,
+           LiveRuntimeStageState::protocol_error,
+           "Unable to retain typed stock spawn bytes", now);
+      return;
+    }
+    queue_spawn_wire(driver, now);
+  }
+
+  void poll_file_consistency_response(NetchanDriver& driver,
+                                      const LiveRuntimeStageTimePoint now) {
+    if (!file_consistency_future_.valid() || spawn_request_queue_count_ != 0U ||
+        file_consistency_future_.wait_for(std::chrono::milliseconds{0}) !=
+            std::future_status::ready) return;
+    try {
+      auto built = file_consistency_future_.get();
+      if (!built || built.semantic_bytes.empty() ||
+          built.semantic_bytes.front() != std::byte{7U}) {
+        const auto code = built.error
+            ? std::optional{built.error->code} : std::nullopt;
+        const auto context = built.error
+            ? std::string{"File-consistency check failed: "} +
+                  std::string{to_string(built.error->code)} + " " + built.error->context
+            : std::string{"File-consistency builder returned no complete response"};
+        fail(LiveRuntimeStageErrorCode::file_consistency_response_failed,
+             LiveRuntimeStageState::protocol_error,
+             context, now);
+        if (error_ && error_->code == LiveRuntimeStageErrorCode::file_consistency_response_failed)
+          error_->file_consistency_code = code;
+        return;
+      }
+      // One owning reliable generation: opcode 7 and its exact body precede
+      // the original typed spawn command, including on every retransmission.
+      const auto spawn_bytes = spawn_request_->semantic_bytes();
+      built.semantic_bytes.insert(built.semantic_bytes.end(), spawn_bytes.begin(), spawn_bytes.end());
+      spawn_wire_bytes_ = std::move(built.semantic_bytes);
+      queue_spawn_wire(driver, now);
+    } catch (...) {
+      fail(LiveRuntimeStageErrorCode::file_consistency_response_failed,
+           LiveRuntimeStageState::protocol_error,
+           "Bounded file-consistency preparation failed before spawn", now);
+    }
+  }
+
+  void queue_spawn_wire(NetchanDriver& driver,
+                        const LiveRuntimeStageTimePoint now) {
+    if (spawn_request_queue_count_ != 0U) return;
     NetchanDriverOperationResult queued;
     try {
-      queued = driver.queue_reliable(spawn_request_->semantic_bytes());
+      queued = driver.queue_reliable(spawn_wire_bytes_);
     } catch (...) {
       fail(LiveRuntimeStageErrorCode::spawn_request_queue_failed,
            LiveRuntimeStageState::network_error,
@@ -2160,14 +2802,14 @@ public:
     ++spawn_request_queue_count_;
     const auto event = LiveRuntimeStageEvent{
         .type = LiveRuntimeStageEventType::spawn_request_queued,
-        .payload_byte_count = spawn_request_->semantic_bytes().size(),
+        .payload_byte_count = spawn_wire_bytes_.size(),
         .occurred_at = now};
     push_event(event);
     emit_trace(event);
   }
 
   void observe_spawn_request_transmit(const LiveRuntimeStageTimePoint now) {
-    if (!spawn_request_ || spawn_request_acknowledged_) {
+    if (spawn_request_queue_count_ == 0U || spawn_request_acknowledged_) {
       return;
     }
     auto *const driver = response_stage_.retained_driver();
@@ -2179,45 +2821,83 @@ public:
     if (!in_flight || !transfer) {
       return;
     }
-    if (!std::ranges::equal(in_flight->bytes,
-                            spawn_request_->semantic_bytes()) ||
-        !std::ranges::equal(transfer->canonical_bytes,
-                            spawn_request_->semantic_bytes()) ||
-        !transfer->transfer_id.valid()) {
+    observe_spawn_fragment(*transfer, *in_flight, now);
+  }
+
+  void observe_spawn_fragment(const NetchanOutgoingFragmentTransfer& transfer,
+                              const InFlightReliablePayload& in_flight,
+                              const LiveRuntimeStageTimePoint now) {
+    const auto count = spawn_wire_bytes_.empty() ? 0U :
+        1U + (spawn_wire_bytes_.size() - 1U) / kStockProtocol48NormalFragmentChunkSize;
+    if (!std::ranges::equal(transfer.canonical_bytes, spawn_wire_bytes_) ||
+        !transfer.transfer_id.valid() || count == 0U ||
+        transfer.fragment_count != count || transfer.current_fragment_index == 0U ||
+        transfer.current_fragment_index > transfer.fragment_count ||
+        in_flight.send_count == 0U) {
       fail(LiveRuntimeStageErrorCode::spawn_request_transmit_mismatch,
            LiveRuntimeStageState::protocol_error,
            "Unexpected reliable payload became in-flight before stock spawn",
            now);
       return;
     }
+    const auto offset = static_cast<std::size_t>(transfer.current_fragment_index - 1U) *
+        kStockProtocol48NormalFragmentChunkSize;
+    const auto length = (std::min)(kStockProtocol48NormalFragmentChunkSize,
+                                   spawn_wire_bytes_.size() - offset);
+    if (!std::ranges::equal(in_flight.bytes,
+            std::span<const std::byte>{spawn_wire_bytes_}.subspan(offset, length)) ||
+        (compare_sequences(in_flight.most_recent_sent_sequence, in_flight.first_sent_sequence) !=
+            NetchanSequenceComparison::equal &&
+         compare_sequences(in_flight.most_recent_sent_sequence, in_flight.first_sent_sequence) !=
+            NetchanSequenceComparison::newer)) {
+      fail(LiveRuntimeStageErrorCode::spawn_request_transmit_mismatch,
+           LiveRuntimeStageState::protocol_error,
+           "Stock spawn fragment bytes or transmit sequence contradict its canonical transfer", now);
+      return;
+    }
+    const bool first_observation = !spawn_request_transmitted_;
     if (spawn_request_transmitted_) {
+      const bool same_fragment = spawn_fragment_index_ == transfer.current_fragment_index;
+      const auto advanced_fragments = static_cast<unsigned>(transfer.current_fragment_index) -
+          static_cast<unsigned>(spawn_fragment_index_);
+      const bool expected_toggle = spawn_reliable_toggle_ != ((advanced_fragments & 1U) != 0U);
       if (!spawn_reliable_generation_ ||
-          *spawn_reliable_generation_ != transfer->transfer_id.value() ||
+          *spawn_reliable_generation_ != transfer.transfer_id.value() ||
           !spawn_first_transmit_sequence_ ||
-          *spawn_first_transmit_sequence_ != in_flight->first_sent_sequence ||
-          spawn_reliable_toggle_ != in_flight->toggle ||
-          in_flight->send_count < spawn_transmit_count_) {
+          !spawn_most_recent_transmit_sequence_ ||
+          transfer.current_fragment_index < spawn_fragment_index_ ||
+          in_flight.toggle != expected_toggle ||
+          (same_fragment &&
+              (*spawn_first_transmit_sequence_ != in_flight.first_sent_sequence ||
+               in_flight.send_count < spawn_transmit_count_ ||
+               (in_flight.send_count == spawn_transmit_count_ &&
+                   in_flight.most_recent_sent_sequence != *spawn_most_recent_transmit_sequence_) ||
+               (in_flight.send_count > spawn_transmit_count_ &&
+                   compare_sequences(in_flight.most_recent_sent_sequence,
+                       *spawn_most_recent_transmit_sequence_) != NetchanSequenceComparison::newer))) ||
+          (!same_fragment &&
+              compare_sequences(in_flight.first_sent_sequence,
+                  *spawn_most_recent_transmit_sequence_) != NetchanSequenceComparison::newer)) {
         fail(LiveRuntimeStageErrorCode::spawn_request_transmit_mismatch,
              LiveRuntimeStageState::protocol_error,
-             "Stock spawn reliable generation changed outside driver "
-             "retransmission",
+             "Stock spawn fragment generation changed outside driver ACK or retransmission",
              now);
         return;
       }
-      spawn_most_recent_transmit_sequence_ =
-          in_flight->most_recent_sent_sequence;
-      spawn_transmit_count_ = in_flight->send_count;
-      return;
     }
     spawn_request_transmitted_ = true;
-    spawn_reliable_generation_ = transfer->transfer_id.value();
-    spawn_reliable_toggle_ = in_flight->toggle;
-    spawn_first_transmit_sequence_ = in_flight->first_sent_sequence;
-    spawn_most_recent_transmit_sequence_ = in_flight->most_recent_sent_sequence;
-    spawn_transmit_count_ = in_flight->send_count;
+    spawn_reliable_generation_ = transfer.transfer_id.value();
+    spawn_fragment_index_ = transfer.current_fragment_index;
+    // These are per-fragment facts, not constants for the entire transfer.
+    // A later fragment has a new first sequence/toggle and a fresh send count.
+    spawn_reliable_toggle_ = in_flight.toggle;
+    spawn_first_transmit_sequence_ = in_flight.first_sent_sequence;
+    spawn_most_recent_transmit_sequence_ = in_flight.most_recent_sent_sequence;
+    spawn_transmit_count_ = in_flight.send_count;
+    if (!first_observation) return;
     const auto event = LiveRuntimeStageEvent{
         .type = LiveRuntimeStageEventType::spawn_request_transmitted,
-        .payload_byte_count = spawn_request_->semantic_bytes().size(),
+        .payload_byte_count = spawn_wire_bytes_.size(),
         .occurred_at = now};
     push_event(event);
     emit_trace(event);
@@ -2352,8 +3032,10 @@ public:
     }
     ++service_envelopes_decoded_;
     auto service = std::move(decoded.envelope->payload);
-    const auto terminal_notice = inspect_disconnect_notice(service.bytes);
+    std::string_view disconnect_reason;
+    const auto terminal_notice = inspect_disconnect_notice(service.bytes,&disconnect_reason);
     if (terminal_notice == DisconnectNoticeStatus::observed) {
+      core::log_server_text("Server disconnected: "+std::string{disconnect_reason},core::LogLevel::error);
       if (auto* driver = response_stage_.close_driver()) {
         driver->confirm_server_disconnect(now);
         graceful_close_ = driver->graceful_close_snapshot();
@@ -2380,6 +3062,8 @@ public:
   void process_service_payload(OwnedServicePayload payload,
                                StockRuntimeSourceCursor cursor,
                                const LiveRuntimeStageTimePoint now) {
+    std::optional<game_api::GameClientHost::ConsolePublicationBatch> console_publication;
+    if(runtime_session_)console_publication.emplace(config_.game_client.get());
     if (cursor.absolute_bit_offset() >= payload.bytes.size() * 8U) {
       return;
     }
@@ -2479,6 +3163,30 @@ public:
                      .transition().user_info().messages())
               initialization.initial_player_identities.push_back(
                   std::make_shared<const UserInfoUpdateState>(identity));
+            // Directory observations can race sendres and the resource ACK.
+            // Apply each later stage's latest typed slot update in order before
+            // publishing the initial runtime roster; disconnects remove it.
+            const auto apply_signon_identities = [&](const SignonUserInfoUpdates& updates) {
+              for (const auto& update : updates) {
+                if (!update) continue;
+                if (update->client_index >= max_clients_) return false;
+                std::erase_if(initialization.initial_player_identities, [&](const auto& identity) {
+                  return identity->client_index() == update->client_index;
+                });
+                if (update->present) {
+                  if (!update->identity) return false;
+                  initialization.initial_player_identities.push_back(update->identity);
+                }
+              }
+              return true;
+            };
+            if (!apply_signon_identities(response_stage_.result()->resource_list().transition().user_info_updates()) ||
+                !apply_signon_identities(response_stage_.result()->user_info_updates())) {
+              fail(LiveRuntimeStageErrorCode::runtime_session_initialize_failed,
+                   LiveRuntimeStageState::protocol_error,
+                   "Signon player identity update exceeds the server client-slot bounds", now);
+              return;
+            }
             initialization.baselines =
                 std::make_shared<const EntityBaselineRegistryState>(
                     std::move(*baseline.registry));
@@ -2503,6 +3211,7 @@ public:
             return;
           }
           runtime_session_ = std::move(initialized.session);
+          console_publication.emplace(config_.game_client.get());
           for (auto &pending : pending_hud_messages_) {
             runtime_record_ordinal_ = std::max(
                 runtime_record_ordinal_ + 1U, pending.source_ordinal);
@@ -2512,8 +3221,11 @@ public:
                     runtime_record_ordinal_, std::move(pending.payload),
                     pending.cursor};
             retained_record.received_at=pending.received_at;
+            observe_multiplayer_record(core::MultiplayerNetworkPhase::decode_begin,retained_record);
             auto applied = runtime_session_->apply_record(retained_record);
+            observe_multiplayer_record(core::MultiplayerNetworkPhase::decode_end,retained_record);
             if (!applied) {
+              observe_multiplayer_record(core::MultiplayerNetworkPhase::rollback,retained_record);
               fail(LiveRuntimeStageErrorCode::runtime_record_failed,
                    LiveRuntimeStageState::protocol_error,
                    "Retained pre-baseline HUD message failed replay", now);
@@ -2522,6 +3234,7 @@ public:
               return;
             }
             ++applied_runtime_record_count_;
+            observe_multiplayer_record(core::MultiplayerNetworkPhase::committed,retained_record,&*applied.event);
           }
           pending_hud_messages_.clear();
           pending_hud_bytes_ = 0U;
@@ -2561,6 +3274,8 @@ public:
         if (control.event->kind == RuntimeControlMessageKind::user_message ||
             control.event->kind == RuntimeControlMessageKind::user_info_update ||
             control.event->kind == RuntimeControlMessageKind::view_angles ||
+            control.event->opcode == RuntimeControlOpcode::svc_print ||
+            control.event->opcode == RuntimeControlOpcode::svc_centerprint ||
             control.event->opcode == RuntimeControlOpcode::svc_weaponanim ||
             (audio_control && config_.sound_events)) {
           const auto end = control.event->provenance.end_cursor.byte_offset();
@@ -2595,6 +3310,7 @@ public:
     if (cursor.absolute_bit_offset() < payload.bytes.size() * 8U) {
       apply_runtime_record(std::move(payload), cursor, now);
     }
+    if(console_publication && !error_)console_publication->accept();
   }
 
   void apply_runtime_record(OwnedServicePayload payload,
@@ -2615,12 +3331,15 @@ public:
                             runtime_record_ordinal_,
                             std::move(payload), cursor};
     sound_timed_record.received_at=now;
+    observe_multiplayer_record(core::MultiplayerNetworkPhase::decode_begin,sound_timed_record);
     auto applied = [&] {
       const MovementCostScope parse_cost{config_.movement_diagnostics,
           movement_diagnostics_.network_parse_commit_ms};
       return runtime_session_->apply_record(sound_timed_record);
     }();
+    observe_multiplayer_record(core::MultiplayerNetworkPhase::decode_end,sound_timed_record);
     if (!applied || !applied.event) {
+      observe_multiplayer_record(core::MultiplayerNetworkPhase::rollback,sound_timed_record);
       fail(LiveRuntimeStageErrorCode::runtime_record_failed,
            LiveRuntimeStageState::protocol_error,
            applied.error
@@ -2635,6 +3354,7 @@ public:
       return;
     }
     ++applied_runtime_record_count_;
+    observe_multiplayer_record(core::MultiplayerNetworkPhase::committed,sound_timed_record,&*applied.event);
     if (config_.movement_diagnostics) {
       movement_diagnostics_.atomic_commit_ns = actual_monotonic_ns();
       if (applied.event->clientdata_observed && applied.event->entities_observed)
@@ -2735,6 +3455,39 @@ public:
       prediction_last_anchor_at_.reset();
       prediction_last_record_identity_.reset();
       prediction_life_command_floor_ = generated_usercmd_count_;
+      // The wire ledger remains immutable. Only accepted prediction evidence
+      // belongs to the old life: it must not label a fresh canonical spawn as
+      // an old seed/anchor or an old collision failure while we wait safely.
+      prediction_last_command_boundary_.reset();
+      prediction_candidate_anchor_command_.reset();
+      prediction_last_seed_status_.reset();
+      prediction_last_seed_field_.reset();
+      prediction_last_ground_status_.reset();
+      prediction_last_anchor_status_.reset();
+      prediction_anchor_coherent_reliable_frame_ = false;
+      prediction_seed_origin_.reset();
+      prediction_previous_valid_origin_.reset();
+      prediction_matched_origin_before_correction_.reset();
+      prediction_matched_velocity_before_correction_.reset();
+      prediction_collision_position_evidence_.reset();
+      prediction_collision_trace_evidence_.reset();
+      prediction_collision_query_hull_.reset();
+      prediction_collision_query_start_.reset();
+      prediction_collision_query_end_.reset();
+      prediction_collision_query_purpose_ = "unavailable";
+      prediction_last_simulation_error_.reset();
+      prediction_rebase_reason_ = "not_attempted";
+      prediction_last_error_.reset();
+      prediction_last_camera_correction_jump_.reset();
+      prediction_last_command_error_.reset();
+      prediction_life_wait_started_at_.reset();
+      prediction_life_wait_ended_at_.reset();
+      prediction_recovery_wait_reason_ = "none";
+      if (config_.reference_prediction && !observation->lifecycle.dead() &&
+          observation->lifecycle.respawns > 0U) {
+        prediction_life_wait_started_at_ = now;
+        prediction_recovery_wait_reason_ = "waiting_for_carrier";
+      }
       button_latch_.clear();
       const auto scoped = config_.game_client->movement_policy().capture_life_scoped_buttons;
       scoped_button_gate_.invalidate(scoped);
@@ -2897,6 +3650,12 @@ public:
     transmission_config.maximum_events = 1'024U;
     transmission_config.maximum_transmission_phases_per_update = 2U;
     transmission_config.externally_owned_driver_update = true;
+    transmission_config.multiplayer_diagnostics=config_.multiplayer_diagnostics;
+    if(multiplayer_enabled()) {
+      const auto generations=multiplayer_generations();
+      transmission_config.diagnostic_network_generation=generations[0];
+      transmission_config.diagnostic_map_generation=generations[1];
+    }
     transmission_config.timeout = std::chrono::seconds{15};
     usercmd_stage_ = std::make_unique<GoldSrcUserCmdTransmissionStage>(
         *driver, *binding.binding,
@@ -3095,6 +3854,7 @@ public:
       return;
     }
     for (const auto &request : scheduled.requests) {
+      observe_multiplayer_command(core::MultiplayerCommandPhase::scheduler_due,request,nullptr);
       const auto interval_start =
           request.sample_time_nanoseconds -
           static_cast<std::int64_t>(request.sample_duration_nanoseconds);
@@ -3176,6 +3936,12 @@ public:
       context.command_sample_duration_nanoseconds =
           request.sample_duration_nanoseconds;
       context.command_sample_time_nanoseconds = request.sample_time_nanoseconds;
+      // Sample once into the immutable command, independently of diagnostics.
+      // An unavailable presentation reserve remains the existing zero/unknown
+      // contract; a configured maximum is not evidence of an actual buffer.
+      if (keyboard && live_visual_input_->effective_interpolation_seconds)
+        context.lerp_msec = static_cast<std::uint16_t>(
+            *live_visual_input_->effective_interpolation_seconds * 1000.0);
       const auto &command_intent =
           keyboard ? *live_intent : fire_reload_check || life_check
               ? *weapon_intent : scenario_intents_[phase_index];
@@ -3217,6 +3983,8 @@ public:
         context.reference_button_policy =
             GoldSrcReferenceButtonPolicy::jump_duck;
       }
+      const auto command_build_ns=multiplayer_enabled()
+          ? std::optional{core::multiplayer_diagnostic_now_ns()} : std::nullopt;
       auto built = usercmd_adapter_.build_reference_wire(
           command_intent, command_camera, context);
       if (!built || !built.command) {
@@ -3231,6 +3999,7 @@ public:
         return;
       }
       last_sampled_forward_axis_ = command_intent.forward_axis();
+      observe_multiplayer_command(core::MultiplayerCommandPhase::built,request,&*built.command,command_build_ns);
       last_sampled_side_axis_ = command_intent.side_axis();
       if (built.command->side != 0)
         ++nonzero_side_generated_count_;
@@ -3253,6 +4022,7 @@ public:
         movement_diagnostics_.latest_command_sequence=request.command_sequence.value();
         movement_diagnostics_.latest_command_sample_time_ns=request.sample_time_nanoseconds;
       }
+      observe_multiplayer_command(core::MultiplayerCommandPhase::history_inserted,request,&*built.command,command_build_ns);
       // Command identity counts generated physics steps, not wall-clock
       // slots. A bounded scheduler recovery skips unsampled wall time while
       // retaining contiguous IDs. Preserve the actual sample deadline until
@@ -3530,12 +4300,23 @@ public:
     prediction_state_ = LiveReferencePredictionState::suspended;
     prediction_last_fallback_reason_ = reason;
     prediction_reason_ = reason;
+    prediction_recovery_wait_reason_ = reason == "local_player_dead"
+        ? "none" : "seed_or_collision";
     prediction_history_.reset();
+    prediction_velocity_stop_.reset();
+    prediction_scratch_.first_velocity_stop.reset();
     prediction_pre_anchor_.reset();
+    prediction_support_replay_proof_.reset();
+    prediction_support_replay_proof_velocity_z_ = 0.0;
     prediction_visual_correction_.reset();
-    prediction_server_velocity_visual_ = false;
-    prediction_server_velocity_pose_.reset();
+    clear_prediction_authority_visual_metadata();
     prediction_exterior_correction_source_.reset();
+  }
+
+  void finish_prediction_life_wait(const LiveRuntimeStageTimePoint now) noexcept {
+    if (prediction_life_wait_started_at_ && !prediction_life_wait_ended_at_)
+      prediction_life_wait_ended_at_ = now;
+    prediction_recovery_wait_reason_ = "none";
   }
 
   void publish_movement_audio(
@@ -3604,6 +4385,71 @@ public:
     } else config_.game_client->observe_movement_audio(event,replay);
   }
 
+  void begin_velocity_stop_capture() noexcept {
+    prediction_scratch_.capture_velocity_stops = config_.movement_diagnostics;
+    prediction_scratch_.first_velocity_stop.reset();
+  }
+
+  void publish_velocity_stop_capture(const bool replay,
+      const std::uint8_t predecessor_decision = 0U) noexcept {
+    if (!config_.movement_diagnostics || !prediction_history_ ||
+        !prediction_scratch_.first_velocity_stop || prediction_velocity_stop_ordinal_ == UINT64_MAX)
+      return;
+    LiveVelocityStopDiagnostic value;
+    value.transition = *prediction_scratch_.first_velocity_stop;
+    value.capture_ordinal = ++prediction_velocity_stop_ordinal_;
+    value.prediction_epoch = prediction_epoch_;
+    value.network_generation = kLiveRuntimeGeneration;
+    value.map_generation = prediction_brush_context_.generation;
+    value.life_epoch = prediction_life_epoch_;
+    value.life_deaths = prediction_life_deaths_;
+    if (config_.movement_diagnostic_generations) {
+      try {
+        const auto generations = config_.movement_diagnostic_generations();
+        value.network_generation = generations[0];value.map_generation = generations[1];
+      } catch (...) { prediction_velocity_stop_.reset();return; }
+    }
+    // Publication observation, not an invented timestamp for the nested query.
+    value.observed_ns = actual_monotonic_ns();
+    value.replay = replay;
+    value.predecessor_decision = predecessor_decision;
+    value.scene_record_identity = prediction_brush_context_.record;
+    value.scene_revision = prediction_brush_context_.revision;
+    value.scene_server_time = prediction_brush_context_.server_time;
+    value.history_anchor_command = prediction_history_->anchor().movement_state()->source_command_sequence();
+    value.history_latest_command = prediction_history_->current_predicted_state()->source_command_sequence();
+    const auto& sampled = command_sample_times_[value.transition.command_sequence % command_sample_times_.size()];
+    if (sampled.sequence == value.transition.command_sequence)
+      value.command_sample_ns = sampled.end_nanoseconds;
+    if (usercmd_stage_) {
+      const auto history = usercmd_stage_->history();
+      if (const auto sequence = GoldSrcUserCmdSequence::create(value.transition.command_sequence))
+        if (const auto* entry = history.find(*sequence); entry && entry->reference_command)
+          value.command = *entry->reference_command;
+    }
+    if (const auto& observation = target_.runtime_observation(); observation) {
+      value.source_freshness = static_cast<std::uint8_t>(observation->client_metadata.freshness);
+      if (observation->client_metadata.source) {
+        value.source_record_identity = observation->client_metadata.source->record_identity;
+        value.source_sequence = observation->client_metadata.source->source_transport_sequence;
+        value.source_matches_scene = value.source_record_identity == value.scene_record_identity;
+        if (observation->server_time_metadata.generation == observation->client_metadata.generation &&
+            observation->server_time_metadata.source) {
+          const auto& time = *observation->server_time_metadata.source;
+          const auto& data = *observation->client_metadata.source;
+          // Offsets belong to distinct svc messages, not distinct carriers.
+          if (time.record_identity == data.record_identity && time.record_ordinal == data.record_ordinal &&
+              time.source_transport_sequence == data.source_transport_sequence &&
+              time.carrier_acknowledgement == data.carrier_acknowledgement && time.source_reliable == data.source_reliable &&
+              time.reassembled == data.reassembled && time.contemporaneous_fragment_suffix == data.contemporaneous_fragment_suffix)
+            value.source_server_time = observation->server_time_seconds;
+        }
+      }
+    }
+    prediction_velocity_stop_ = value;
+    prediction_presentation_cache_.reset();
+  }
+
   [[nodiscard]] bool append_reference_prediction_command(
       std::shared_ptr<const prediction::LocalPredictionHistoryState>& candidate,
       const GoldSrcUserCmdSequence sequence,
@@ -3644,9 +4490,16 @@ public:
     }
     try {
       const auto before = candidate->current_predicted_state();
+      const movement::MeasuredMovementCollision measured_collision{
+          *prediction_collision_, config_.movement_diagnostics
+              ? &movement_diagnostics_.prediction_work : nullptr};
+      const movement::ILocalMovementCollision& simulation_collision =
+          config_.movement_diagnostics
+              ? static_cast<const movement::ILocalMovementCollision&>(measured_collision)
+              : *prediction_collision_;
       const auto simulated = simulate_reference_movement(
           *before, *adapted.state, *prediction_environment_,
-          *prediction_collision_, prediction_scratch_,
+          simulation_collision, prediction_scratch_,
           prediction_movement_config_, prediction_support_motion_ ? &*prediction_support_motion_ : nullptr,
           config_.game_client->movement_policy().reference_ladder ? &prediction_brush_context_ : nullptr,
           config_.game_client->movement_policy().reference_ladder ? &*config_.game_client->movement_policy().reference_ladder : nullptr);
@@ -3713,6 +4566,7 @@ public:
       return;
     }
     auto candidate = prediction_history_;
+    begin_velocity_stop_capture();
     std::string_view reason;
     if (!append_reference_prediction_command(candidate, sequence, wire, reason,
             sampled_at,false)) {
@@ -3721,6 +4575,143 @@ public:
     }
     prediction_history_ = std::move(candidate);
     ++prediction_local_steps_;
+    publish_velocity_stop_capture(false);
+  }
+
+  [[nodiscard]] std::optional<core::MovementCorrectionWitness> begin_correction_witness(
+      const ReferencePredictionSeed& seed,const ReferencePredictionAnchorResult& anchor,
+      const GoldSrcUserCmdHistoryState& history,const LiveRuntimeStageTimePoint now,
+      const std::optional<std::uint64_t> observed_ns) noexcept {
+    if(!config_.movement_diagnostics || !config_.movement_correction_sink ||
+        prediction_correction_event_ordinal_==UINT64_MAX)return {};
+    core::MovementCorrectionWitness value;
+    value.event_ordinal=++prediction_correction_event_ordinal_;
+    value.accepted_ordinal=prediction_accepted_corrections_;
+    value.observed_ns=observed_ns;
+    value.owner_time_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    value.network_generation=seed.generation;value.map_generation=prediction_brush_context_.generation;
+    value.life_epoch=prediction_life_epoch_;value.life_deaths=prediction_life_deaths_;
+    value.source_record_identity=seed.record_identity;
+    value.source_record_ordinal=seed.clientdata_source.record_ordinal;
+    value.source_sequence=seed.clientdata_source.source_transport_sequence;
+    value.carrier_acknowledgement=seed.clientdata_source.carrier_acknowledgement;
+    value.carrier_outgoing_sequence=anchor.outgoing_sequence;
+    value.carrier_history_revision=anchor.history_revision;
+    value.boundary_command=seed.command_boundary.value();
+    value.anchor_status=static_cast<std::uint8_t>(anchor.status);
+    value.before_prediction_epoch=prediction_epoch_;
+    value.scene_record_identity=prediction_brush_context_.record;
+    value.scene_revision=prediction_brush_context_.revision;
+    value.scene_server_time_s=prediction_brush_context_.server_time;
+    value.source_matches_scene=value.source_record_identity==value.scene_record_identity;
+    value.source_reliable=seed.clientdata_source.source_reliable;
+    value.reassembled=seed.clientdata_source.reassembled;
+    value.contemporaneous_fragment_suffix=seed.clientdata_source.contemporaneous_fragment_suffix;
+    const auto fresh=static_cast<std::uint8_t>(core::MovementWitnessFreshness::observed_in_record);
+    value.source_freshness=fresh;value.authoritative_origin_freshness=fresh;value.authoritative_velocity_freshness=fresh;
+    value.scene_freshness=static_cast<std::uint8_t>(value.source_matches_scene ?
+        core::MovementWitnessFreshness::derived_current_operation : core::MovementWitnessFreshness::retained_context);
+    value.authoritative_origin={*seed.origin.x,*seed.origin.y,*seed.origin.z};
+    value.authoritative_velocity={*seed.velocity.x,*seed.velocity.y,*seed.velocity.z};
+    value.control_active=usercmd_activated_at_.has_value();
+    if(config_.movement_diagnostic_generations) {
+      try {const auto generations=config_.movement_diagnostic_generations();
+        value.network_generation=generations[0];value.map_generation=generations[1];}
+      catch(...) {++prediction_correction_sink_failures_;return {};}
+    }
+    if(movement_diagnostics_.record_identity==seed.record_identity)
+      value.source_commit_ns=movement_diagnostics_.atomic_commit_ns;
+    if(const auto& observed=target_.runtime_observation();observed) {
+      if(observed->lifecycle.state==client::LocalPlayerLifeState::alive)value.alive=true;
+      else if(observed->lifecycle.dead())value.alive=false;
+      if(observed->server_time_metadata.source &&
+          observed->server_time_metadata.source->record_identity==seed.record_identity &&
+          observed->server_time_metadata.source->record_ordinal==seed.clientdata_source.record_ordinal)
+        value.source_server_time_s=observed->server_time_seconds;
+    }
+    const auto& sampled=command_sample_times_[value.boundary_command%command_sample_times_.size()];
+    if(sampled.sequence==value.boundary_command)value.command_sample_ns=sampled.end_nanoseconds;
+    if(anchor.last_new_value) {
+      const auto& command=*anchor.last_new_value;
+      value.command_angle_turns=command.angle_turns;
+      value.command_movement={command.forward,command.side,command.up};
+      value.command_buttons=command.buttons;value.command_msec=command.msec;
+    }
+    if(prediction_collision_)if(const auto identity=prediction_collision_->session_identity()) {
+      value.collision_world_revision=identity->collision_world_revision;
+      value.collision_scene_signature=identity->scene_signature;
+    }
+    if(prediction_history_) {
+      value.history_anchor_command=prediction_history_->anchor().movement_state()->source_command_sequence();
+      value.history_latest_command=prediction_history_->current_predicted_state()->source_command_sequence();
+      value.history_size=static_cast<std::uint32_t>(prediction_history_->size());
+      const hlclient::movement::LocalPlayerMovementState* matched=nullptr;
+      if(value.history_anchor_command==value.boundary_command)matched=prediction_history_->anchor().movement_state().get();
+      else if(const auto* exact=prediction_history_->find_exact(seed.command_boundary))matched=exact->post_command_state().get();
+      if(matched) {
+        value.matched_origin=std::array{matched->origin().x,matched->origin().y,matched->origin().z};
+        value.matched_velocity=std::array{matched->velocity().x,matched->velocity().y,matched->velocity().z};
+        std::array<float,3> position{},velocity{};double position_norm{},velocity_norm{};
+        for(std::size_t axis=0;axis<3;++axis) {
+          const double p=value.authoritative_origin[axis]-(*value.matched_origin)[axis];
+          const double v=value.authoritative_velocity[axis]-(*value.matched_velocity)[axis];
+          position[axis]=static_cast<float>(p);velocity[axis]=static_cast<float>(v);
+          position_norm+=p*p;velocity_norm+=v*v;
+        }
+        value.position_delta=position;value.velocity_delta=velocity;
+        value.raw_position_error=std::sqrt(position_norm);value.raw_velocity_error=std::sqrt(velocity_norm);
+        value.raw_error_basis=1U;
+        value.matched_freshness=static_cast<std::uint8_t>(core::MovementWitnessFreshness::retained_exact_history);
+      }
+    }
+    // Metadata from the already materialized immutable suffix, never another
+    // history() owning copy, simulation or command adaptation for diagnostics.
+    for(const auto& entry:history.entries())if(entry.sequence().value()>value.boundary_command) {
+      if(!value.suffix_commands)value.suffix_first_command=entry.sequence().value();
+      value.suffix_last_command=entry.sequence().value();++value.suffix_commands;
+      if(entry.reference_command)value.suffix_milliseconds+=entry.reference_command->msec;
+    }
+    return value;
+  }
+
+  void capture_witness_collision(core::MovementCorrectionWitness& value,
+      const std::uint8_t stage) const noexcept {
+    value.collision_stage=stage;
+    const auto vector=[](const assets::AssetVector3& v){return std::array{v.x,v.y,v.z};};
+    value.query_start=prediction_collision_query_start_ ? std::optional{vector(*prediction_collision_query_start_)} : std::nullopt;
+    value.query_end=prediction_collision_query_end_ ? std::optional{vector(*prediction_collision_query_end_)} : std::nullopt;
+    if(prediction_collision_query_hull_)value.hull=static_cast<std::uint8_t>(*prediction_collision_query_hull_);
+    value.plane_normal.reset();value.collision_plane_index.reset();value.trace_fraction.reset();
+    value.blocking_entity.reset();value.blocking_model.reset();value.blocking_instance.reset();
+    value.collision_freshness=static_cast<std::uint8_t>(core::MovementWitnessFreshness::unavailable);
+    std::optional<hlclient::movement::PlayerMovementHitIdentity> hit;
+    if(prediction_collision_trace_evidence_) {
+      const auto& trace=*prediction_collision_trace_evidence_;
+      value.trace_fraction=trace.fraction;value.startsolid=trace.start_solid;value.allsolid=trace.all_solid;hit=trace.hit;
+      if(trace.collision_plane) {value.plane_normal=vector(trace.collision_plane->normal);
+        value.collision_plane_index=trace.collision_plane->source_plane_index;}
+      value.collision_freshness=static_cast<std::uint8_t>(core::MovementWitnessFreshness::derived_current_operation);
+    } else if(prediction_collision_position_evidence_) {
+      value.query_end=value.query_start; // A position test is one point, not the original raw-seed chord.
+      hit=prediction_collision_position_evidence_->hit;
+      value.collision_freshness=static_cast<std::uint8_t>(core::MovementWitnessFreshness::derived_current_operation);
+    }
+    if(hit) {value.blocking_kind=static_cast<std::uint8_t>(hit->kind);
+      value.blocking_entity=hit->source_entity_index;value.blocking_model=hit->source_model_index;
+      value.blocking_instance=hit->stable_instance_ordinal;}
+  }
+
+  void finish_correction_witness(core::MovementCorrectionWitness& value) noexcept {
+    value.accepted_ordinal=prediction_accepted_corrections_;
+    value.after_prediction_epoch=prediction_epoch_;
+    value.prediction_owner_state=static_cast<std::uint8_t>(prediction_state_);
+    if(!value.accepted && value.reason[0]=='\0')core::set_movement_witness_token(value.reason,prediction_reason_);
+    try {config_.movement_correction_sink(value);++prediction_correction_events_published_;}
+    catch(...) {++prediction_correction_sink_failures_;}
+    if(prediction_presentation_cache_) {
+      prediction_presentation_cache_->correction_events_published=prediction_correction_events_published_;
+      prediction_presentation_cache_->correction_sink_failures=prediction_correction_sink_failures_;
+    }
   }
 
   void accept_reference_prediction_seed(
@@ -3730,6 +4721,9 @@ public:
     if (!prediction_collision_ || !prediction_environment_ ||
         !anchor.last_new_value || !usercmd_stage_)
       return;
+    const auto correction_observed_ns=config_.movement_diagnostics && config_.movement_correction_sink
+        ? actual_monotonic_ns() : std::optional<std::uint64_t>{};
+    begin_velocity_stop_capture();
     if (config_.movement_diagnostics) {
       prediction_seed_origin_ = assets::AssetVector3{
           static_cast<float>(*seed.origin.x), static_cast<float>(*seed.origin.y),
@@ -3753,6 +4747,16 @@ public:
         !prediction_history_ || !prediction_last_anchor_at_ || now < *prediction_last_anchor_at_ ||
         now - *prediction_last_anchor_at_ > std::chrono::milliseconds{250};
     const auto history = usercmd_stage_->history();
+    auto witness=begin_correction_witness(seed,anchor,history,now,correction_observed_ns);
+    struct WitnessPublication final {
+      Implementation& owner;std::optional<core::MovementCorrectionWitness>& value;
+      int exceptions{std::uncaught_exceptions()};
+      ~WitnessPublication() {if(value) {
+        if(std::uncaught_exceptions()>exceptions)
+          core::set_movement_witness_token(value->reason,"reference_seed_or_collision_exception");
+        owner.finish_correction_witness(*value);
+      }}
+    } witness_publication{*this,witness};
     const auto suffix_preflight = [&]() -> std::string_view {
       if (seed.generation != kLiveRuntimeGeneration ||
           anchor.generation != seed.generation || history.generation() != seed.generation ||
@@ -3858,6 +4862,7 @@ public:
             static_cast<float>(static_cast<double>(derived.queried_origin->z) -
                 prediction_movement_config_.ground_probe_distance)};
     }
+    if(witness)capture_witness_collision(*witness,1U);
     if (!derived.state) {
       suspend_reference_prediction(to_string(derived.status));
       return;
@@ -3873,6 +4878,28 @@ public:
     const auto timed_correction = hlclient::movement::LocalPlayerMovementState::create(corrected_info);
     if (!timed_correction) { suspend_reference_prediction("support_time_invalid"); return; }
     const auto& corrected = *timed_correction.state;
+    if(witness) {
+      const auto& origin=corrected.origin();const auto& velocity=corrected.velocity();
+      witness->rebase_origin=std::array{origin.x,origin.y,origin.z};
+      witness->rebase_velocity=std::array{velocity.x,velocity.y,velocity.z};
+      witness->hull=static_cast<std::uint8_t>(corrected.hull());
+      witness->mode=static_cast<std::uint8_t>(corrected.mode());
+      witness->grounded=corrected.ground_state().grounded();
+      if(const auto& hit=corrected.ground_state().hit();hit) {
+        witness->support_entity=hit->source_entity_index;witness->support_model=hit->source_model_index;
+        if(prediction_support_motion_)witness->support_velocity_z=prediction_support_motion_->velocity_z_for(*hit);
+        if(witness->support_velocity_z)witness->support_freshness=
+            static_cast<std::uint8_t>(core::MovementWitnessFreshness::retained_context);
+      }
+      if(witness->matched_origin) {
+        std::array<float,3> delta{};double norm{};
+        for(std::size_t axis=0;axis<3;++axis) {
+          const double difference=(*witness->rebase_origin)[axis]-static_cast<double>((*witness->matched_origin)[axis]);
+          delta[axis]=static_cast<float>(difference);norm+=difference*difference;
+        }
+        witness->rebase_position_delta=delta;witness->raw_position_error=std::sqrt(norm);witness->raw_error_basis=2U;
+      }
+    }
     if (prediction_history_) {
       const hlclient::movement::LocalPlayerMovementState* matched = nullptr;
       const auto boundary = corrected.source_command_sequence();
@@ -3888,6 +4915,14 @@ public:
       const auto before_camera = before_presentation.presented_origin;
       const auto before_camera_offset =
           before_presentation.presented_view_offset;
+      if(witness) {
+        witness->presentation_requested_ns=before_presentation.render_sample_time_ns;
+        witness->presentation_before_ns=before_presentation.presentation_selected_time_ns;
+        witness->presentation_before_kind=before_presentation.presentation_selected_time_ns &&
+            before_presentation.presentation_selected_time_ns==before_presentation.render_sample_time_ns ? 1U : 2U;
+        if(before_camera && before_camera_offset)witness->before_eye=std::array{
+            before_camera->x+before_camera_offset->x,before_camera->y+before_camera_offset->y,before_camera->z+before_camera_offset->z};
+      }
       const auto old_latest_state = prediction_history_->current_predicted_state();
       const auto old_epoch = prediction_epoch_;
       const auto rebased = [&] {
@@ -3895,13 +4930,23 @@ public:
             movement_diagnostics_.prediction_replay_ms};
         if (config_.movement_diagnostics)
           movement_diagnostics_.prediction_use_ns = actual_monotonic_ns();
+        const movement::MeasuredMovementCollision measured_collision{
+            *prediction_collision_, config_.movement_diagnostics
+                ? &movement_diagnostics_.prediction_work : nullptr};
+        const movement::ILocalMovementCollision& simulation_collision =
+            config_.movement_diagnostics
+                ? static_cast<const movement::ILocalMovementCollision&>(measured_collision)
+                : *prediction_collision_;
         return rebase_reference_prediction(
             *prediction_history_, corrected, *prediction_environment_,
-            *prediction_collision_, prediction_scratch_,
+            simulation_collision, prediction_scratch_,
             prediction_movement_config_, prediction_support_motion_ ? &*prediction_support_motion_ : nullptr,
             config_.game_client->movement_policy().reference_ladder ? &prediction_brush_context_ : nullptr,
             config_.game_client->movement_policy().reference_ladder ? &*config_.game_client->movement_policy().reference_ladder : nullptr);
       }();
+      if(witness) {witness->rebase_status=static_cast<std::uint8_t>(rebased.status);
+        witness->replayed_commands=static_cast<std::uint32_t>(rebased.replayed_commands);
+        if(rebased.raw_position_error)witness->raw_position_error=rebased.raw_position_error;}
       if (config_.movement_diagnostics) {
         movement_diagnostics_.replayed_commands += rebased.replayed_commands;
         if (rebased.history) {
@@ -3926,6 +4971,7 @@ public:
               prediction_collision_trace_evidence_ ? "support_carry" :
               prediction_collision_position_evidence_ ? "support_clearance" : "movement_replay";
         }
+        if(witness)capture_witness_collision(*witness,2U);
         suspend_reference_prediction("reference_rebase_or_suffix_failed");
         return;
       }
@@ -3941,6 +4987,15 @@ public:
       }
       const bool velocity_correction = rebased.raw_position_error && matched &&
           verified_server_velocity_correction(*matched, corrected, seed, now, *rebased.raw_position_error);
+      const bool grounded_position_correction = !velocity_correction &&
+          rebased.raw_position_error && matched && checked_grounded_position_correction(
+              *matched, corrected, seed, now, *rebased.raw_position_error);
+      // matched belongs to the old history. Retain only this value before
+      // installing the rebased suffix, which can release its boundary state.
+      const double velocity_correction_speed = velocity_correction ? std::hypot(
+          double(corrected.velocity().x)-matched->velocity().x,
+          double(corrected.velocity().y)-matched->velocity().y,
+          double(corrected.velocity().z)-matched->velocity().z) : 0.;
       if (!rebased.raw_position_error || !std::isfinite(*rebased.raw_position_error)) {
         prediction_last_error_ = rebased.raw_position_error;
         suspend_reference_prediction("reference_correction_measurement_missing");
@@ -3948,10 +5003,12 @@ public:
       }
       const bool hard_correction_snap =
           *rebased.raw_position_error > kMaximumCorrectionForSmoothView && !velocity_correction;
+      if(witness)witness->classification=static_cast<std::uint8_t>(hard_correction_snap ?
+          core::MovementCorrectionClassification::hard_unclassified_snap : velocity_correction ?
+          core::MovementCorrectionClassification::verified_velocity_visual : core::MovementCorrectionClassification::ordinary_rebase);
       if (hard_correction_snap) {
         prediction_visual_correction_.reset();
-        prediction_server_velocity_visual_ = false;
-        prediction_server_velocity_pose_.reset();
+        clear_prediction_authority_visual_metadata();
         prediction_exterior_correction_source_.reset();
         prediction_presentation_cache_.reset();
         if (config_.movement_diagnostics) prediction_rebase_reason_ = "ready_hard_correction_snap";
@@ -3963,7 +5020,10 @@ public:
       prediction_replayed_commands_ += rebased.replayed_commands;
       const auto retained_pre_anchor=prediction_pre_anchor_;
       prediction_pre_anchor_.reset();
+      std::uint8_t predecessor_decision = hard_correction_snap ? 1U : 2U;
+      bool checked_support_predecessor_for_bridge = false;
       if (!hard_correction_snap && prediction_support_motion_ && prediction_support_motion_->active()) {
+        predecessor_decision = 5U;
         std::shared_ptr<const hlclient::movement::LocalPlayerMovementState> predecessor;
         std::shared_ptr<const hlclient::movement::LocalPlayerMovementState> previous_boundary;
         if (const auto* entry = prediction_history_->find_exact(*GoldSrcUserCmdSequence::create(corrected.source_command_sequence()))) {
@@ -4035,39 +5095,84 @@ public:
                   !same_vector(support.result->collision_plane->normal,ground.plane().normal)) return false;
             }
           } catch (const std::exception&) { return false; }
+          // A first moving carrier has no earlier moving-support proof. Its
+          // fully checked retained predecessor can instead witness the start,
+          // but only within one maximum supported wire-command interval. The
+          // older250ms pair-retention allowance must not authorize a new
+          // visual bridge across a distant initial/static server sample.
+          checked_support_predecessor_for_bridge =
+              corrected.simulation_time_nanoseconds() -
+                  predecessor->simulation_time_nanoseconds() <= 50'000'000ULL;
           return true;
         };
-        if (*rebased.raw_position_error<=.25 || checked_support_pair())
+        if (*rebased.raw_position_error<=.25 || checked_support_pair()) {
           prediction_pre_anchor_=std::move(predecessor);
+          if (prediction_pre_anchor_)
+            predecessor_decision = *rebased.raw_position_error<=.25 ? 3U : 4U;
+        }
       }
       // before_camera already includes the residual. Remove it before sampling
       // the new physical eye, then retarget once with the ORIGINAL deadline.
       // Ordinary ACKs must neither double the residual nor prolong its life.
       const double now_seconds = std::chrono::duration<double>{now.time_since_epoch()}.count();
-      std::optional<double> velocity_visual_deadline;
-      const bool continuing_velocity_visual = prediction_server_velocity_visual_ &&
+      const bool support_boundary_compatible = matched &&
+          compatible_vertical_support_replay_pose(*matched, corrected);
+      std::optional<double> authority_visual_deadline;
+      auto requested_authority_source =
+          PredictionAuthorityVisualSource::none;
+      const auto continuing_authority_source =
+          prediction_authority_visual_source_;
+      const bool continuing_authority_visual =
+          continuing_authority_source !=
+              PredictionAuthorityVisualSource::none &&
           prediction_visual_correction_ && prediction_visual_correction_->active();
-      if (continuing_velocity_visual) {
+      const double retained_authority_visual_limit =
+          prediction_authority_visual_maximum_offset_;
+      if (continuing_authority_visual) {
         const double end = prediction_visual_correction_->start_monotonic_time_seconds() +
             prediction_visual_correction_->duration_seconds();
-        if (end > now_seconds && matched && compatible_velocity_correction_pose(*matched, corrected) &&
-            velocity_correction_context_continuous(seed.receiving_entity_number) &&
-            (velocity_correction || *rebased.raw_position_error <= kMaximumCorrectionForSmoothView))
-          velocity_visual_deadline = end;
+        const bool server_continuous = continuing_authority_source ==
+                PredictionAuthorityVisualSource::server_velocity && matched &&
+            compatible_velocity_correction_pose(*matched, corrected) &&
+            authority_visual_context_continuous();
+        const bool support_continuous = continuing_authority_source ==
+                PredictionAuthorityVisualSource::vertical_support_replay &&
+            support_boundary_compatible &&
+            authority_visual_context_continuous() &&
+            compatible_vertical_support_replay_pose(*old_latest_state, corrected);
+        const bool grounded_position_continuous = continuing_authority_source ==
+                PredictionAuthorityVisualSource::grounded_position && matched &&
+            *rebased.raw_position_error <= kMaximumCorrectionForSmoothView &&
+            prediction_brush_context_.record == seed.record_identity &&
+            compatible_grounded_position_pose(*matched, corrected) &&
+            compatible_grounded_position_pose(*old_latest_state, corrected) &&
+            authority_visual_context_continuous();
+        if (end > now_seconds &&
+            (velocity_correction || *rebased.raw_position_error <=
+                kMaximumCorrectionForSmoothView) &&
+            (server_continuous || support_continuous || grounded_position_continuous)) {
+          authority_visual_deadline = end;
+          requested_authority_source = continuing_authority_source;
+        }
         prediction_visual_correction_.reset();
-        prediction_server_velocity_visual_ = false;
-        prediction_server_velocity_pose_.reset();
+        clear_prediction_authority_visual_metadata();
         prediction_exterior_correction_source_.reset();
         prediction_presentation_cache_.reset();
       }
-      if (velocity_correction && !velocity_visual_deadline && !continuing_velocity_visual)
-        velocity_visual_deadline = now_seconds + .100;
-      if (velocity_correction && !continuing_velocity_visual) {
+      if (velocity_correction && !authority_visual_deadline &&
+          !continuing_authority_visual) {
+        authority_visual_deadline = now_seconds + .100;
+        requested_authority_source =
+            PredictionAuthorityVisualSource::server_velocity;
+      }
+      if ((velocity_correction || grounded_position_correction) && !continuing_authority_visual) {
         prediction_visual_correction_.reset();
         prediction_exterior_correction_source_.reset();
         prediction_presentation_cache_.reset();
       }
       prediction_history_ = rebased.history;
+      prediction_last_command_boundary_ = seed.command_boundary.value();
+      prediction_anchor_coherent_reliable_frame_ = anchor.coherent_reliable_frame;
       config_.game_client->rewind_movement_audio(corrected.source_command_sequence());
       for (const auto& entry:prediction_history_->entries())
         publish_movement_audio(*entry.pre_command_state(),
@@ -4085,30 +5190,200 @@ public:
       }
       prediction_state_ = LiveReferencePredictionState::active;
       prediction_reason_ = "active";
+      finish_prediction_life_wait(now);
+      publish_velocity_stop_capture(true, predecessor_decision);
       const auto after_physical = live_reference_prediction_snapshot(now);
+      bool witness_context_matches{},witness_requested_times_match{};
+      const auto note_final_presentation=[&](const LiveReferencePredictionSnapshot& sample) {
+        if(!witness)return;
+        core::set_movement_witness_token(witness->presentation_reason,sample.presentation_reason);
+        witness->presentation_after_ns=sample.presentation_selected_time_ns;
+        witness->presentation_after_kind=sample.presentation_selected_time_ns &&
+            sample.presentation_selected_time_ns==sample.render_sample_time_ns ? 1U : 2U;
+        witness_requested_times_match=before_presentation.render_sample_time_ns==sample.render_sample_time_ns;
+        const auto& old_offset=before_presentation.predicted_view_offset;
+        const auto& new_offset=sample.predicted_view_offset;
+        witness_context_matches=before_presentation.collision_context_revision==sample.collision_context_revision &&
+            before_presentation.predicted_hull==sample.predicted_hull &&
+            before_presentation.predicted_mode==sample.predicted_mode && old_offset && new_offset &&
+            old_offset->x==new_offset->x && old_offset->y==new_offset->y && old_offset->z==new_offset->z;
+      };
+      note_final_presentation(after_physical);
       auto after_camera = after_physical.presented_origin;
       auto after_camera_offset = after_physical.presented_view_offset;
-      if (velocity_visual_deadline && before_camera && before_camera_offset && after_camera &&
-          after_camera_offset && compatible_velocity_correction_pose(*old_latest_state,
-              *prediction_history_->current_predicted_state())) {
+      std::uint64_t suffix_milliseconds{};
+      for (const auto& entry : prediction_history_->entries())
+        suffix_milliseconds += entry.command()->msec();
+      const auto& old_presentation_offset =
+          before_presentation.predicted_view_offset;
+      const auto& new_presentation_offset =
+          after_physical.predicted_view_offset;
+      const bool same_presentation_sample =
+          before_presentation.render_sample_time_ns &&
+          before_presentation.presentation_selected_time_ns ==
+              before_presentation.render_sample_time_ns &&
+          after_physical.render_sample_time_ns ==
+              before_presentation.render_sample_time_ns &&
+          after_physical.presentation_selected_time_ns ==
+              after_physical.render_sample_time_ns &&
+          before_presentation.collision_context_revision ==
+              after_physical.collision_context_revision &&
+          before_presentation.predicted_hull == after_physical.predicted_hull &&
+          before_presentation.predicted_mode == after_physical.predicted_mode &&
+          old_presentation_offset && new_presentation_offset &&
+          old_presentation_offset->x == new_presentation_offset->x &&
+          old_presentation_offset->y == new_presentation_offset->y &&
+          old_presentation_offset->z == new_presentation_offset->z;
+      const auto& new_latest_state =
+          *prediction_history_->current_predicted_state();
+      std::optional<double> support_replay_velocity_z;
+      if (prediction_support_motion_ && prediction_support_motion_->active() &&
+          new_latest_state.ground_state().hit())
+        support_replay_velocity_z = prediction_support_motion_->velocity_z_for(
+            *new_latest_state.ground_state().hit());
+      const bool support_replay_context = !velocity_correction &&
+          support_boundary_compatible &&
+          *rebased.raw_position_error <= kMaximumCorrectionForSmoothView &&
+          suffix_milliseconds <= 100U && same_presentation_sample &&
+          prediction_brush_context_.record == seed.record_identity &&
+          prediction_collision_ && prediction_camera_collision_query_ &&
+          velocity_correction_context_continuous(seed.receiving_entity_number) &&
+          compatible_vertical_support_replay_pose(*old_latest_state,
+              new_latest_state) &&
+          compatible_vertical_support_replay_pose(corrected,
+              new_latest_state) &&
+          support_replay_velocity_z &&
+          std::isfinite(*support_replay_velocity_z) &&
+          *support_replay_velocity_z != 0.0 &&
+          std::abs(*support_replay_velocity_z) <= 256.0;
+      const bool fresh_support_replay_admission = support_replay_context &&
+          *rebased.raw_position_error > .25 &&
+          // An empty suffix still has a real correction of the sampled old
+          // pair. Admit it only through the checked <=50ms predecessor, never
+          // through a historical moving-support proof alone.
+          ((rebased.replayed_commands > 0U && suffix_milliseconds > 0U &&
+            (prior_support_replay_proof_matches(new_latest_state,
+                 *support_replay_velocity_z) ||
+             checked_support_predecessor_for_bridge)) ||
+           (rebased.replayed_commands == 0U && suffix_milliseconds == 0U &&
+            checked_support_predecessor_for_bridge));
+      const bool continued_support_replay_admission =
+          support_replay_context && continuing_authority_visual &&
+          authority_visual_deadline && requested_authority_source ==
+              PredictionAuthorityVisualSource::vertical_support_replay;
+      const bool support_replay_admission =
+          fresh_support_replay_admission ||
+          continued_support_replay_admission;
+      if (!authority_visual_deadline && !continuing_authority_visual &&
+          fresh_support_replay_admission) {
+        authority_visual_deadline = now_seconds + .100;
+        requested_authority_source =
+            PredictionAuthorityVisualSource::vertical_support_replay;
+      }
+      if (requested_authority_source ==
+              PredictionAuthorityVisualSource::vertical_support_replay &&
+          !support_replay_admission) {
+        authority_visual_deadline.reset();
+        requested_authority_source = PredictionAuthorityVisualSource::none;
+      }
+      if (!authority_visual_deadline && !continuing_authority_visual &&
+          grounded_position_correction && same_presentation_sample &&
+          suffix_milliseconds <= 100U &&
+          compatible_grounded_position_pose(*old_latest_state, new_latest_state) &&
+          compatible_grounded_position_pose(corrected, new_latest_state)) {
+        authority_visual_deadline = now_seconds + .100;
+        requested_authority_source = PredictionAuthorityVisualSource::grounded_position;
+      }
+      const bool authority_pose_compatible =
+          requested_authority_source ==
+                  PredictionAuthorityVisualSource::vertical_support_replay
+              ? compatible_vertical_support_replay_pose(*old_latest_state,
+                    new_latest_state)
+              : requested_authority_source == PredictionAuthorityVisualSource::grounded_position
+                  ? compatible_grounded_position_pose(*old_latest_state, new_latest_state)
+                  : compatible_velocity_correction_pose(*old_latest_state, new_latest_state);
+      if (authority_visual_deadline && before_camera && before_camera_offset &&
+          after_camera && after_camera_offset && authority_pose_compatible) {
         prediction::PredictionVisualCorrectionConfig visual_config;
-        visual_config.duration_seconds = std::clamp(*velocity_visual_deadline - now_seconds, 0., .100);
+        visual_config.duration_seconds = std::clamp(
+            *authority_visual_deadline - now_seconds, 0., .100);
         visual_config.maximum_duration_seconds = .100;
-        visual_config.maximum_offset_magnitude = 32.;
+        visual_config.maximum_offset_magnitude = continuing_authority_visual
+            ? retained_authority_visual_limit : 32.;
         const assets::AssetVector3 old_eye{before_camera->x+before_camera_offset->x,
             before_camera->y+before_camera_offset->y,before_camera->z+before_camera_offset->z};
         const assets::AssetVector3 new_eye{after_camera->x+after_camera_offset->x,
             after_camera->y+after_camera_offset->y,after_camera->z+after_camera_offset->z};
-        const auto visual = prediction::begin_prediction_visual_correction(std::nullopt,old_eye,new_eye,
+        const double eye_delta = std::hypot(double(old_eye.x)-new_eye.x,
+            double(old_eye.y)-new_eye.y, double(old_eye.z)-new_eye.z);
+        bool admissible = true;
+        if (requested_authority_source == PredictionAuthorityVisualSource::grounded_position) {
+          admissible = same_presentation_sample && suffix_milliseconds <= 100U &&
+              eye_delta <= kMaximumCorrectionForSmoothView &&
+              // The command-boundary proof does not cover the rendered pair:
+              // replay may move that chord beside a different convex corner.
+              // Validate its actual same-time endpoints before creating a lane;
+              // publication still repeats its body/eye checks for every sample.
+              checked_grounded_presentation_route(*after_camera, *before_camera,
+                  new_latest_state.hull(), *after_camera_offset);
+          visual_config.maximum_offset_magnitude = kMaximumCorrectionForSmoothView;
+        } else if (requested_authority_source ==
+            PredictionAuthorityVisualSource::vertical_support_replay) {
+          const double envelope = *rebased.raw_position_error +
+              std::abs(*support_replay_velocity_z) *
+                  (static_cast<double>(suffix_milliseconds) * .001) + 2.;
+          constexpr double kMaximumSupportReplayVisualOffset =
+              kMaximumCorrectionForSmoothView + 256.0 * .100 + 2.0;
+          const double bounded_envelope =
+              std::min(kMaximumSupportReplayVisualOffset, envelope);
+          admissible = std::isfinite(envelope) &&
+              envelope <= kMaximumSupportReplayVisualOffset &&
+              eye_delta <= (continuing_authority_visual
+                  ? retained_authority_visual_limit : bounded_envelope);
+          visual_config.maximum_offset_magnitude =
+              continuing_authority_visual
+                  ? retained_authority_visual_limit
+                  : bounded_envelope;
+        } else if (!continuing_authority_visual && eye_delta > 32.) {
+          // The source-boundary error alone does not bound the rendered eye:
+          // replaying the exact suffix also carries the new server velocity.
+          // A larger new bridge needs equal-time/equal-context samples and a
+          // velocity-explained envelope, not an enlarged generic snap limit.
+          const double envelope = *rebased.raw_position_error + velocity_correction_speed *
+              (static_cast<double>(suffix_milliseconds) * .001) + 2.;
+          admissible = same_presentation_sample &&
+              suffix_milliseconds <= 100U && std::isfinite(envelope);
+          if (admissible) visual_config.maximum_offset_magnitude = std::min(96., envelope);
+        }
+        const auto visual = admissible ? prediction::begin_prediction_visual_correction(std::nullopt,old_eye,new_eye,
             prediction::PredictionCorrectionClass::small_visual_correction,now_seconds,
-            prediction_accepted_corrections_,old_epoch,prediction_epoch_,visual_config);
+            prediction_accepted_corrections_,old_epoch,prediction_epoch_,visual_config)
+            : prediction::PredictionVisualCorrectionCreateResult{};
         if (visual && visual.correction && visual.correction->active()) {
           prediction_visual_correction_.emplace(std::move(*visual.correction));
-          prediction_server_velocity_visual_ = true;
-          prediction_server_velocity_pose_ = prediction_history_->current_predicted_state();
-          prediction_server_velocity_entity_ = seed.receiving_entity_number;
+          prediction_authority_visual_source_ = requested_authority_source;
+          prediction_authority_visual_maximum_offset_ =
+              visual_config.maximum_offset_magnitude;
+          prediction_authority_visual_pose_ =
+              prediction_history_->current_predicted_state();
+          prediction_authority_visual_entity_ = seed.receiving_entity_number;
+          prediction_authority_visual_life_epoch_ = prediction_life_epoch_;
+          prediction_authority_visual_life_deaths_ = prediction_life_deaths_;
+          prediction_authority_visual_brush_generation_ =
+              prediction_brush_context_.generation;
+          if (requested_authority_source ==
+              PredictionAuthorityVisualSource::vertical_support_replay) {
+            prediction_authority_visual_support_ =
+                *new_latest_state.ground_state().hit();
+            prediction_authority_visual_support_velocity_z_ =
+                *support_replay_velocity_z;
+          } else {
+            prediction_authority_visual_support_.reset();
+            prediction_authority_visual_support_velocity_z_ = 0.0;
+          }
           prediction_presentation_cache_.reset();
           const auto sample = live_reference_prediction_snapshot(now);
+          note_final_presentation(sample);
           after_camera = sample.presented_origin; after_camera_offset = sample.presented_view_offset;
         }
       }
@@ -4155,6 +5430,7 @@ public:
             prediction_presentation_cache_.reset();
             const auto corrected_presentation =
                 live_reference_prediction_snapshot(now);
+            note_final_presentation(corrected_presentation);
             after_camera = corrected_presentation.presented_origin;
             after_camera_offset =
                 corrected_presentation.presented_view_offset;
@@ -4183,6 +5459,37 @@ public:
           prediction_presentation_cache_->maximum_camera_correction_jump =
               prediction_maximum_camera_correction_jump_;
         }
+      }
+      // Arm the next correction only after this transaction has made its
+      // presentation decision. A first static-to-moving carrier observation
+      // therefore cannot justify its own visual bridge.
+      update_support_replay_proof();
+      if(witness) {
+        witness->accepted=true;witness->predecessor_decision=predecessor_decision;
+        core::set_movement_witness_token(witness->reason,hard_correction_snap ? "ready_hard_correction_snap" : "ready");
+        if(after_camera && after_camera_offset)witness->after_eye=std::array{
+            after_camera->x+after_camera_offset->x,after_camera->y+after_camera_offset->y,after_camera->z+after_camera_offset->z};
+        witness->camera_status=static_cast<std::uint8_t>(core::MovementCorrectionCameraStatus::not_measured);
+        if(witness->before_eye && witness->after_eye) {
+          const bool equal_time=witness->presentation_before_ns && witness->presentation_after_ns &&
+              witness->presentation_before_ns==witness->presentation_after_ns &&
+              witness_requested_times_match &&
+              witness->presentation_before_ns==before_presentation.render_sample_time_ns;
+          const bool equal_context=witness_context_matches;
+          witness->camera_status=static_cast<std::uint8_t>(!equal_time ?
+              core::MovementCorrectionCameraStatus::different_time_samples : !equal_context ?
+              core::MovementCorrectionCameraStatus::incompatible_context : core::MovementCorrectionCameraStatus::same_time_samples);
+          if(equal_time && equal_context) {
+            double norm{};for(std::size_t axis=0;axis<3;++axis) {
+              const double delta=(*witness->after_eye)[axis]-static_cast<double>((*witness->before_eye)[axis]);norm+=delta*delta;}
+            witness->same_time_camera_delta=std::sqrt(norm);
+            witness->presentation_freshness=static_cast<std::uint8_t>(core::MovementWitnessFreshness::same_time_presentation);
+          }
+        }
+        if(prediction_visual_correction_) {
+          const auto& residual=prediction_visual_correction_->current_residual_offset();
+          witness->residual_units=std::hypot(static_cast<double>(residual.x),static_cast<double>(residual.y),static_cast<double>(residual.z));
+        } else witness->residual_units=0.;
       }
       return;
     }
@@ -4224,6 +5531,8 @@ public:
       ++appended;
     }
     prediction_history_ = std::move(candidate);
+    prediction_last_command_boundary_ = seed.command_boundary.value();
+    prediction_anchor_coherent_reliable_frame_ = anchor.coherent_reliable_frame;
     prediction_epoch_ = next_epoch;
     prediction_local_steps_ += appended;
     prediction_last_record_identity_ = seed.record_identity;
@@ -4237,6 +5546,15 @@ public:
     }
     prediction_state_ = LiveReferencePredictionState::active;
     prediction_reason_ = "active";
+    finish_prediction_life_wait(now);
+    publish_velocity_stop_capture(true);
+    update_support_replay_proof();
+    if(witness) {
+      witness->accepted=true;witness->replayed_commands=static_cast<std::uint32_t>(appended);
+      witness->classification=static_cast<std::uint8_t>(core::MovementCorrectionClassification::initial_seed);
+      core::set_movement_witness_token(witness->reason,"initial_seed");
+      core::set_movement_witness_token(witness->presentation_reason,"not_measured");
+    }
   }
 
   [[nodiscard]] bool rolling_usercmd_diagnostics() const noexcept {
@@ -4267,6 +5585,18 @@ public:
           observation, client_slot_,
           config_.game_client->movement_policy().coherent_unfragmented_movement_frames);
       prediction_last_anchor_status_ = anchor.status;
+      prediction_candidate_anchor_command_ = anchor.bound() && anchor.last_new_command
+          ? std::optional<std::uint32_t>{anchor.last_new_command->value()} : std::nullopt;
+      if (config_.reference_prediction && prediction_state_ != LiveReferencePredictionState::active) {
+        prediction_recovery_wait_reason_ = !anchor.bound() || !anchor.last_new_command
+            ? "waiting_for_carrier"
+            : anchor.last_new_command->value() <= prediction_life_command_floor_
+                ? "carrier_before_life_floor"
+                : !prediction_history_ && observation.lifecycle.respawns > 0U &&
+                      anchor.last_new_value && (anchor.last_new_value->buttons &
+                          (kReferenceGoldSrcButtonJump | kReferenceGoldSrcButtonDuck)) != 0U
+                    ? "jump_duck_history_required" : "seed_or_collision";
+      }
       if (!anchor.bound() && prediction_state_ ==
               LiveReferencePredictionState::active &&
           prediction_last_anchor_at_ &&
@@ -4275,9 +5605,6 @@ public:
       if (anchor.bound() && anchor.last_new_command &&
           anchor.last_new_command->value() > prediction_life_command_floor_) {
         ++prediction_anchor_bindings_;
-        prediction_anchor_coherent_reliable_frame_ = anchor.coherent_reliable_frame;
-        prediction_last_command_boundary_ =
-            anchor.last_new_command->value();
         const auto movement_command = config_.game_client->movement_policy().button_policy == GoldSrcReferenceButtonPolicy::jump_duck_primary_secondary_reload_use
             ? reference_jump_duck_secondary_weapon_use_movement_command(*anchor.last_new_command, *anchor.last_new_value)
             : config_.game_client->movement_policy().button_policy == GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use
@@ -4562,6 +5889,15 @@ public:
     return result;
   }
 
+  [[nodiscard]] std::optional<LiveUserCmdReceiptCounters>
+  usercmd_receipt_counters() const noexcept {
+    if (!usercmd_stage_ || !usercmd_activated_at_)
+      return std::nullopt;
+    return LiveUserCmdReceiptCounters{
+        usercmd_stage_->new_command_submission_count(),
+        usercmd_stage_->transmitted_packet_count(), server_sample_count_};
+  }
+
   void complete_usercmd_scenario_if_ready(const LiveRuntimeStageTimePoint now) {
     const bool life_check = config_.live_visual_input_source ==
         LiveVisualControlInputSource::scripted_damage_respawn_check;
@@ -4639,9 +5975,21 @@ public:
       process_netchan_payload(std::move(*event.payload), now);
       return;
     case NetchanDriverEventType::reliable_payload_acknowledged:
-      if (spawn_request_transmitted_ && !spawn_request_acknowledged_) {
+      if (spawn_request_queue_count_ != 0U && !spawn_request_acknowledged_) {
         auto *const driver = response_stage_.retained_driver();
-        if (!driver || !spawn_reliable_generation_ ||
+        const auto& completion = event.completed_fragment_transfer;
+        if (!completion ||
+            completion->transfer.current_fragment_index != completion->transfer.fragment_count) {
+          fail(LiveRuntimeStageErrorCode::spawn_request_transmit_mismatch,
+               LiveRuntimeStageState::protocol_error,
+               "Reliable spawn completion lost its exact final-fragment witness", now);
+          return;
+        }
+        // The driver snapshots these owning bytes and final-send facts before
+        // ACK commit. Do not infer them from a session already advanced by RX.
+        observe_spawn_fragment(completion->transfer, completion->final_fragment, now);
+        if (terminal_state(state_)) return;
+        if (!driver || !spawn_request_transmitted_ || !spawn_reliable_generation_ ||
             !spawn_most_recent_transmit_sequence_ || !event.acknowledgement ||
             !event.completed_reliable_generation ||
             event.acknowledgement->disposition !=
@@ -4995,6 +6343,14 @@ public:
     }
     cleanup_done_ = true;
     ++cleanup_count_;
+    if (prediction_life_wait_started_at_ && !prediction_life_wait_ended_at_) {
+      prediction_life_wait_ended_at_ = std::max(now, *prediction_life_wait_started_at_);
+      prediction_recovery_wait_reason_ = "session_ended";
+      prediction_presentation_cache_.reset();
+    }
+    // Cooperative cancellation; owned worker joins at destruction. Transport
+    // cleanup never waits for a disk read or detaches a stage-referencing task.
+    file_consistency_worker_.request_stop();
     pending_hud_messages_.clear();
     pending_hud_bytes_ = 0U;
     pending_audio_count_ = pending_audio_bytes_ = 0U;
@@ -5070,6 +6426,9 @@ public:
   std::vector<PostMoveVarsUserMessageDefinition> user_messages_;
   std::unique_ptr<RuntimeReplaySession> runtime_session_;
   std::optional<EncodedStockSpawnRequest> spawn_request_;
+  std::vector<std::byte> spawn_wire_bytes_;
+  std::future<FileConsistencyResponseBuildResult> file_consistency_future_;
+  std::jthread file_consistency_worker_;
   std::optional<EncodedStockSendEntitiesRequest> signon_reply_;
   std::optional<LiveRuntimeStageTimePoint> started_at_;
   std::optional<LiveRuntimeStageTimePoint> stable_started_at_;
@@ -5083,6 +6442,7 @@ public:
   std::string map_file_path_;
   std::size_t payload_ordinal_{0U};
   std::size_t runtime_record_ordinal_{0U};
+  std::array<std::uint64_t,static_cast<std::size_t>(core::MultiplayerDiagnosticProducer::count)> multiplayer_event_ids_{};
   std::vector<PendingHudMessage> pending_hud_messages_;
   std::size_t pending_hud_bytes_{0U};
   std::size_t pending_audio_count_{},pending_audio_bytes_{};
@@ -5107,6 +6467,7 @@ public:
   std::size_t cleanup_count_{0U};
   std::size_t spawn_request_queue_count_{0U};
   std::optional<std::uint64_t> spawn_reliable_generation_;
+  std::uint16_t spawn_fragment_index_{0U};
   std::optional<NetchanSequence> spawn_first_transmit_sequence_;
   std::optional<NetchanSequence> spawn_most_recent_transmit_sequence_;
   std::uint64_t spawn_transmit_count_{0U};
@@ -5147,6 +6508,12 @@ public:
   bool prediction_has_brush_models_{false};
   ReferenceBrushCollisionContext prediction_brush_context_;
   std::optional<ReferenceVerticalSupportMotion> prediction_support_motion_;
+  std::optional<hlclient::movement::PlayerMovementHitIdentity>
+      prediction_support_replay_proof_;
+  double prediction_support_replay_proof_velocity_z_{};
+  std::uint64_t prediction_support_replay_proof_life_epoch_{};
+  std::uint64_t prediction_support_replay_proof_life_deaths_{};
+  std::uint64_t prediction_support_replay_proof_brush_generation_{};
   std::shared_ptr<const hlclient::movement::LocalPlayerMovementState> prediction_pre_anchor_;
   std::size_t prediction_brush_transform_changes_{};
   std::optional<std::uint32_t> prediction_last_changed_brush_entity_, prediction_last_changed_brush_model_;
@@ -5155,12 +6522,18 @@ public:
   std::optional<movement::GoldSrcMovementEnvironment> prediction_environment_;
   movement::GoldSrcLocalMovementConfig prediction_movement_config_{};
   movement::GoldSrcLocalMovementScratch prediction_scratch_{};
+  mutable std::optional<LiveVelocityStopDiagnostic> prediction_velocity_stop_;
+  std::uint64_t prediction_velocity_stop_ordinal_{};
+  std::uint64_t prediction_correction_event_ordinal_{},prediction_correction_events_published_{},prediction_correction_sink_failures_{};
   std::optional<movement::LocalMovementPositionTest> prediction_collision_position_evidence_;
   std::optional<movement::LocalMovementTrace> prediction_collision_trace_evidence_;
   std::optional<hlclient::movement::PlayerMovementHull> prediction_collision_query_hull_;
   std::optional<assets::AssetVector3> prediction_collision_query_start_, prediction_collision_query_end_;
   std::optional<assets::AssetVector3> prediction_seed_origin_, prediction_previous_valid_origin_;
   std::optional<LiveRuntimeStageTimePoint> prediction_fallback_started_at_;
+  std::optional<LiveRuntimeStageTimePoint> prediction_life_wait_started_at_, prediction_life_wait_ended_at_;
+  std::optional<std::uint32_t> prediction_candidate_anchor_command_;
+  std::string_view prediction_recovery_wait_reason_{"none"};
   double prediction_last_fallback_duration_ms_{};
   std::string_view prediction_rebase_reason_{"not_attempted"};
   std::optional<movement::LocalMovementSimulationErrorCode> prediction_last_simulation_error_;
@@ -5174,10 +6547,18 @@ public:
       prediction_camera_collision_query_;
   mutable std::optional<prediction::PredictionVisualCorrectionState>
       prediction_visual_correction_;
-  mutable bool prediction_server_velocity_visual_{false};
+  mutable PredictionAuthorityVisualSource prediction_authority_visual_source_{
+      PredictionAuthorityVisualSource::none};
+  mutable double prediction_authority_visual_maximum_offset_{32.};
   mutable std::shared_ptr<const hlclient::movement::LocalPlayerMovementState>
-      prediction_server_velocity_pose_;
-  std::uint32_t prediction_server_velocity_entity_{0U};
+      prediction_authority_visual_pose_;
+  mutable std::optional<hlclient::movement::PlayerMovementHitIdentity>
+      prediction_authority_visual_support_;
+  mutable double prediction_authority_visual_support_velocity_z_{};
+  mutable std::uint32_t prediction_authority_visual_entity_{0U};
+  mutable std::uint64_t prediction_authority_visual_life_epoch_{};
+  mutable std::uint64_t prediction_authority_visual_life_deaths_{};
+  mutable std::uint64_t prediction_authority_visual_brush_generation_{};
   std::optional<client::RuntimeObservationSource> prediction_last_view_angle_source_;
   mutable std::optional<std::uint64_t> prediction_exterior_correction_source_;
   mutable std::optional<LiveReferencePredictionSnapshot> prediction_presentation_cache_;
@@ -5345,6 +6726,9 @@ bool LiveRuntimeStage::submit_live_visual_input(
 bool LiveRuntimeStage::request_weapon_selection(const std::uint8_t weapon_id) {
   return implementation_->request_weapon_selection(weapon_id);
 }
+bool LiveRuntimeStage::request_console_command(const ConsoleServerCommandRequest& request) {
+  return implementation_->request_console_command(request);
+}
 
 bool LiveRuntimeStage::activate_live_visual_control(
     const LiveRuntimeStageTimePoint now) noexcept {
@@ -5455,6 +6839,10 @@ std::string_view LiveRuntimeStage::live_sky_name() const noexcept {
 std::optional<LiveUserCmdCheckState>
 LiveRuntimeStage::live_usercmd_snapshot() const {
   return implementation_->usercmd_snapshot();
+}
+std::optional<LiveUserCmdReceiptCounters>
+LiveRuntimeStage::live_usercmd_receipt_counters() const noexcept {
+  return implementation_->usercmd_receipt_counters();
 }
 std::size_t LiveRuntimeStage::live_use_new_submission_count() const noexcept {
   return implementation_->use_new_submission_count();

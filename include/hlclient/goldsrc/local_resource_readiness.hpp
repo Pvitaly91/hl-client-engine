@@ -21,7 +21,7 @@ class PrecacheManifestDefensiveTestAccess;
 }
 
 inline constexpr std::size_t kDefaultMaximumLocalResourceReadinessEntries =
-    1'024U;
+    kDefaultMaximumResourceCount;
 inline constexpr std::size_t kMaximumLocalResourceReadinessEntries = 4'095U;
 inline constexpr std::size_t kDefaultMaximumLocatorVirtualNameBytes = 1'024U;
 inline constexpr std::size_t kMaximumLocatorVirtualNameBytes = 1'024U;

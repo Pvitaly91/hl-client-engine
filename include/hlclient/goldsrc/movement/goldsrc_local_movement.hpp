@@ -7,6 +7,7 @@
 #include <hlclient/goldsrc/usercmd_state.hpp>
 #include <hlclient/movement/local_player_movement_state.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -68,6 +69,28 @@ struct LocalMovementSimulationResult {
     }
 };
 
+// Opt-in first nonzero -> zero operation from the selected movement route.
+// This owns the actual query, never the last unrelated seed/presentation query.
+enum class VelocityStopReason : std::uint8_t {
+    opposing_planes, clip_solver, no_progress, tiny_residual
+};
+enum class VelocityStopCandidate : std::uint8_t { direct, step, air };
+struct VelocityStopTransition final {
+    std::uint32_t command_sequence{};
+    std::uint64_t simulation_start_ns{}, simulation_end_ns{};
+    std::uint8_t command_msec{};
+    hlclient::movement::PlayerMovementPhase phase{hlclient::movement::PlayerMovementPhase::direct_slide};
+    VelocityStopReason reason{VelocityStopReason::clip_solver};
+    VelocityStopCandidate candidate{VelocityStopCandidate::direct};
+    hlclient::movement::PlayerMovementHull hull{hlclient::movement::PlayerMovementHull::standing};
+    assets::AssetVector3 before_origin{}, after_origin{}, before_velocity{}, after_velocity{};
+    assets::AssetVector3 query_start{}, query_end{};
+    LocalMovementTrace trace;
+    std::optional<LocalMovementCollisionSessionIdentity> collision_identity;
+    std::array<hlclient::movement::PlayerMovementPlane,5> clip_planes{};
+    std::uint8_t clip_plane_count{};
+};
+
 struct GoldSrcLocalMovementScratch {
     // General queries and the two speculative walking routes use distinct
     // bounded scratch arenas. A rejected route cannot leave active traversal
@@ -86,6 +109,10 @@ struct GoldSrcLocalMovementScratch {
     std::optional<hlclient::movement::PlayerMovementHull> last_reference_collision_hull;
     std::optional<assets::AssetVector3> last_reference_collision_start;
     std::optional<assets::AssetVector3> last_reference_collision_end;
+    bool capture_velocity_stops{false};
+    // Owner clears before one append or complete suffix-replay transaction.
+    // Discarded speculative candidates must not populate this slot.
+    std::optional<VelocityStopTransition> first_velocity_stop;
 };
 
 class GoldSrcLocalMovementKernel final {

@@ -330,6 +330,29 @@ template<class Integer>
     return ConnectResponseParseResult{std::move(response), std::nullopt};
 }
 
+[[nodiscard]] ConnectResponseParseResult parse_password_rejected(const std::string_view payload)
+{
+    // ReHLDS 0124d56c3d888d922eb045775f71c6682ad1226f:
+    // SV_RejectConnectionForPassword writes class '8', then MSG_WriteString
+    // (strlen+1) of this fixed marker. There is no LF or arbitrary text body.
+    constexpr std::string_view marker{"BADPASSWORD"};
+    constexpr auto terminator=1U+marker.size();
+    if(payload.substr(1U,marker.size())!=marker) {
+        return payload_failure(ConnectResponseErrorCode::invalid_rejection_message,1U,
+            "Password rejection does not contain the exact standard marker");
+    }
+    if(payload.size()<=terminator || payload[terminator]!='\0') {
+        return payload_failure(ConnectResponseErrorCode::invalid_terminator,terminator,
+            "Password rejection must end with exactly one NUL byte and no LF");
+    }
+    if(payload.size()!=terminator+1U) {
+        return payload_failure(ConnectResponseErrorCode::unexpected_trailing_data,terminator+1U,
+            "Password rejection contains bytes after its NUL terminator");
+    }
+    ConnectResponse response{ConnectRejected{std::string{marker}}};
+    return ConnectResponseParseResult{std::move(response),std::nullopt};
+}
+
 [[nodiscard]] std::size_t escaped_size(const unsigned char value) noexcept
 {
     if (value == '\\' || value == '\n' || value == '\r' || value == '\t') {
@@ -430,6 +453,9 @@ ConnectResponseParseResult parse_connect_response(
     }
     if (response_class == kConnectRejectedResponseClass) {
         return parse_rejected(payload);
+    }
+    if (response_class == kConnectPasswordRejectedResponseClass) {
+        return parse_password_rejected(payload);
     }
     return payload_failure(
         ConnectResponseErrorCode::unknown_response_class,

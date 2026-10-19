@@ -289,12 +289,18 @@ TEST_CASE("E32 exact upward post-step boundary preserves canonical grounded reco
         canonical.velocity={fired.state->velocity().x,fired.state->velocity().y,fired.state->velocity().z};
         canonical.old_buttons=fired.state->old_buttons();
         const auto untouched=canonical;
-        const auto denied=t::g::derive_reference_prediction_ground(canonical,wire,collision,scratch,{},reference_profile);
-        CHECK_FALSE(denied.state);CHECK(denied.status==t::g::ReferencePredictionGroundStatus::ground_flag_disagreement);
+        // A coherent native server ONGROUND endpoint with actual support is
+        // sufficient, even when its upward impulse has no local command hint.
+        const auto unhinted=t::g::derive_reference_prediction_ground(canonical,wire,collision,scratch,{},reference_profile);
+        REQUIRE(unhinted.state);REQUIRE(unhinted.trace_evidence);
+        CHECK(unhinted.status==t::g::ReferencePredictionGroundStatus::ready);
         const auto grounded=t::g::derive_reference_prediction_ground(canonical,wire,collision,scratch,{},
             reference_profile,nullptr,&*fired_command.state);REQUIRE(grounded.state);REQUIRE(grounded.trace_evidence);
+        REQUIRE(grounded.ground_evidence);
         CHECK(grounded.state->ground_state().grounded());t::same_origin(grounded.state->origin(),fired.state->origin());
         CHECK(grounded.state->velocity().z==vertical_kick);
+        CHECK(t::p::local_player_movement_state_signature(*unhinted.state)==
+            t::p::local_player_movement_state_signature(*grounded.state));
         CHECK(canonical.origin==untouched.origin);CHECK(canonical.velocity==untouched.velocity);CHECK(canonical.flags==untouched.flags);
         // Canonical timing comes from the accepted source boundary, as in the
         // application owner. Ground derivation itself never guesses that clock.
@@ -331,21 +337,49 @@ TEST_CASE("E32 exact upward post-step boundary preserves canonical grounded reco
         CHECK_FALSE(rebased.history->current_predicted_state()->ground_state().grounded());
         CHECK(t::p::local_player_movement_state_signature(*rebased.history->current_predicted_state())==
             t::p::local_player_movement_state_signature(*next.state));
-        // Only the exact validated reference value authorizes that one probe.
-        const auto denied_with=[&](const t::g::GoldSrcUserCmdState* witness,
+        // An unmatched hint is not an action to execute or a source of extra
+        // velocity. The independent server endpoint still requires the same
+        // actual contact, and the next real command consumes its velocity once.
+        const auto unchanged_with=[&](const t::g::GoldSrcUserCmdState* witness,
             const t::g::GoldSrcWireUserCmd& boundary) {
             const auto result=t::g::derive_reference_prediction_ground(canonical,boundary,collision,scratch,{},
                 reference_profile,nullptr,witness);
-            CHECK_FALSE(result.state);CHECK(result.status==t::g::ReferencePredictionGroundStatus::ground_flag_disagreement);
+            REQUIRE(result.state);REQUIRE(result.trace_evidence);REQUIRE(result.ground_evidence);
+            CHECK(result.status==t::g::ReferencePredictionGroundStatus::ready);
+            CHECK(result.state->ground_state().grounded());
+            t::same_origin(result.state->origin(),fired.state->origin());
+            t::same_origin(result.state->velocity(),fired.state->velocity());
+            CHECK(result.ground_evidence->hit==grounded.ground_evidence->hit);
+            CHECK(result.trace_evidence->fraction==grounded.trace_evidence->fraction);
+            CHECK(canonical.origin==untouched.origin);CHECK(canonical.velocity==untouched.velocity);
+            CHECK(canonical.flags==untouched.flags);
+            const auto advanced=t::g::simulate_reference_movement(*result.state,*next_command.state,
+                environment,collision,scratch,{});REQUIRE(advanced);
+            t::same_origin(advanced.state->origin(),next.state->origin());
+            t::same_origin(advanced.state->velocity(),next.state->velocity());
+            CHECK_FALSE(advanced.state->ground_state().grounded());
+            CHECK(advanced.state->velocity().z==Catch::Approx(vertical_kick-16.0F));
+
+            auto no_support=canonical;no_support.origin.z=-80;
+            const auto unsupported_hint=t::g::derive_reference_prediction_ground(no_support,boundary,
+                collision,scratch,{},reference_profile,nullptr,witness);
+            CHECK_FALSE(unsupported_hint.state);
+            CHECK(unsupported_hint.status==t::g::ReferencePredictionGroundStatus::ground_flag_disagreement);
+            const auto strict_hint=t::g::derive_reference_prediction_ground(canonical,boundary,
+                collision,scratch,{},t::p::GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1,
+                nullptr,witness);
+            CHECK_FALSE(strict_hint.state);
+            CHECK(strict_hint.status==t::g::ReferencePredictionGroundStatus::ground_flag_disagreement);
         };
-        denied_with(&*ordinary.state,wire);
+        unchanged_with(nullptr,wire);
+        unchanged_with(&*ordinary.state,wire);
         const auto wrong_sequence=next_command.state->with_post_velocity_impulse({0,0,vertical_kick});REQUIRE(wrong_sequence);
-        denied_with(&*wrong_sequence.state,wire);
+        unchanged_with(&*wrong_sequence.state,wire);
         const auto synthetic=t::f::make_command(8,20).with_post_velocity_impulse({0,0,vertical_kick});REQUIRE(synthetic);
-        denied_with(&*synthetic.state,wire);
+        unchanged_with(&*synthetic.state,wire);
         const auto pre_only=ordinary.state->with_velocity_impulse({0,0,vertical_kick});REQUIRE(pre_only);
-        denied_with(&*pre_only.state,wire);
-        auto changed_wire=wire;changed_wire.angle_turns[1]=1;denied_with(&*fired_command.state,changed_wire);
+        unchanged_with(&*pre_only.state,wire);
+        auto changed_wire=wire;changed_wire.angle_turns[1]=1;unchanged_with(&*fired_command.state,changed_wire);
         const auto strict=t::g::derive_reference_prediction_ground(canonical,wire,collision,scratch,{},
             t::p::GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1,nullptr,&*fired_command.state);
         CHECK_FALSE(strict.state);CHECK(strict.status==t::g::ReferencePredictionGroundStatus::ground_flag_disagreement);

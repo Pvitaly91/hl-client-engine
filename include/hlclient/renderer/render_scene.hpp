@@ -1,5 +1,6 @@
 #pragma once
 #include <hlclient/core/presentation_settings.hpp>
+#include <hlclient/renderer/screen_ui.hpp>
 
 #include <hlclient/assets/asset_types.hpp>
 #include <hlclient/assets/skybox_asset.hpp>
@@ -246,6 +247,9 @@ struct RenderScene {
     std::vector<RenderWorldDecals> additional_world_decals;
     std::optional<RenderBasicHud> basic_hud;
     std::vector<RenderHudSpriteBinding> hud_sprite_bindings;
+    // Application overlay is independent of world/player/HUD availability and
+    // is always composited after image adjustments and the gameplay HUD.
+    std::optional<ScreenUiFrame> screen_ui;
     core::ImageAdjustments image_adjustments;
     // Scene geometry only. HUD is composited after native-resolution resolve.
     // Zero preserves the baseline renderer for fixtures/alternate modules.

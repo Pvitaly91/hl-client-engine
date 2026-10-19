@@ -466,10 +466,13 @@ class EntitySnapshotInterpolator final {
 
 // Render-only ordinary-entity jitter buffer. The caller retains current-list
 // authority and chooses ready kinetic Studio / server glow-sprite identities;
-// no velocity, gravity,
-// collision or game rule is executed here. Observations are immutable owning
-// references, limited to sixteen. Per-lifetime retained values are visual
-// samples only, bounded by maximum_entities; they never enter RX or replay.
+// no velocity, gravity, collision or game rule is executed here. Observations
+// are immutable owning references, limited to sixteen. A bounded recent window
+// adapts the presentation reserve to authoritative cadence and inferred
+// presentation-arrival jitter (never a claimed wire-receipt timestamp); it is
+// never an extrapolation or a local projectile simulation.
+// Per-lifetime retained values are visual samples only, bounded by
+// maximum_entities; they never enter RX or replay.
 class RuntimeOrdinarySnapshotPresentation final {
   public:
     static constexpr std::size_t maximum_history = 16U;
@@ -493,6 +496,11 @@ class RuntimeOrdinarySnapshotPresentation final {
     };
     std::vector<std::shared_ptr<const client::RuntimeClientObservationState>> history_;
     std::map<std::uint32_t,Lifetime> lifetimes_;
+    std::array<double,maximum_history> arrival_intervals_{};
+    std::size_t arrival_interval_count_{}, arrival_interval_next_{};
+    std::optional<std::size_t> arrival_record_ordinal_;
+    std::optional<double> arrival_application_seconds_, arrival_server_seconds_;
+    double maximum_render_gap_since_arrival_{};
     std::optional<double> application_anchor_, server_anchor_, last_application_, cadence_delay_;
 };
 
@@ -534,6 +542,9 @@ class RuntimePlayerSnapshotPresentation final {
         std::span<const RuntimePlayerContinuityBoundary> boundaries={});
     [[nodiscard]] std::size_t history_size() const noexcept { return history_.size(); }
     [[nodiscard]] std::size_t player_count() const noexcept { return players_.size(); }
+    // Actual global buffer reserve after bounded startup fill. This is not an
+    // actor's held age, packet latency, or latest-source-minus-sample distance.
+    [[nodiscard]] std::optional<double> effective_delay_seconds() const noexcept { return delay_; }
   private:
     struct PlayerContinuity {
         std::size_t floor{}, seen{}, presented{};

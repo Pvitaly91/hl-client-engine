@@ -56,7 +56,8 @@ static GoldSrcUserCmdState::CreationResult reference_actions_movement_command(
     const std::uint16_t allowed = movement_allowed |
         (weapon_buttons ? weapon_allowed : 0U) |
         (use_button ? kReferenceGoldSrcButtonUse : 0U) |
-        (secondary_button ? kReferenceGoldSrcButtonAttack2 : 0U);
+        (secondary_button ? kReferenceGoldSrcButtonAttack2 |
+            kReferenceGoldSrcButtonScore : 0U);
     if (!identity.valid() || !valid_wire_usercmd(wire) || wire.msec == 0U ||
         wire.msec > 50U || (wire.buttons & ~allowed) != 0U ||
         wire.up != 0 || wire.impulse != 0U || wire.impact_index != 0U ||

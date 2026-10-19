@@ -499,19 +499,21 @@ TEST_CASE("Steam provider polls fresh variable-length legacy material and owns i
         CHECK(pending.state == auth::AuthenticationUpdateState::pending);
         CHECK(state->initialize_calls == 1U);
         CHECK(state->initiate_calls == 0U);
-        REQUIRE(trace_statuses.size() == 4U);
+        REQUIRE(trace_statuses.size() == 5U);
         CHECK(trace_statuses[1] ==
               app::SteamAuthenticationTraceStatus::api_initializing);
         CHECK(trace_statuses[2] ==
               app::SteamAuthenticationTraceStatus::api_initialized);
         CHECK(trace_statuses[3] ==
+              app::SteamAuthenticationTraceStatus::context_checked);
+        CHECK(trace_statuses[4] ==
               app::SteamAuthenticationTraceStatus::material_pending);
 
         auto completed = begun.operation->update();
         REQUIRE(completed.state == auth::AuthenticationUpdateState::succeeded);
         REQUIRE(completed.session);
-        REQUIRE(trace_statuses.size() == 5U);
-        CHECK(trace_statuses[4] ==
+        REQUIRE(trace_statuses.size() == 6U);
+        CHECK(trace_statuses[5] ==
               app::SteamAuthenticationTraceStatus::material_acquired);
         CHECK(completed.session->material_suffix_size() == 333U);
         CHECK(completed.session->material_size() == 365U);
@@ -651,6 +653,231 @@ TEST_CASE("Steam provider reports context, runtime, callback, size, cancel, and 
     }
 }
 
+TEST_CASE("Steam diagnostics retain request class without server account or challenge data",
+          "[auth][provider][steam][diagnostics]")
+{
+    auto state = std::make_shared<MockSteamApiState>();
+    auto config = mock_steam_config(state);
+    std::vector<app::SteamAuthenticationTraceEvent> events;
+    config.trace = [&events](const app::SteamAuthenticationTraceEvent& event) {
+        events.push_back(event);
+    };
+    app::SteamAuthenticationProvider provider{std::move(config)};
+    auto context = steam_request_context();
+    context.remote_endpoint = network::NetworkAddress{0x021c45b3U, 27'015U};
+    context.game_server_secure = false;
+    context.game_server_steam_id =
+        (std::uint64_t{1U} << 56U) | (std::uint64_t{3U} << 52U) |
+        (std::uint64_t{0xabcU} << 32U) | std::uint64_t{0x12345678U};
+
+    auto first = provider.begin(context);
+    REQUIRE(first.operation);
+    REQUIRE(events.size() == 1U);
+    REQUIRE(events.front().request_context);
+    const auto summary = *events.front().request_context;
+    CHECK(summary.remote_endpoint == context.remote_endpoint);
+    CHECK(summary.protocol == goldsrc::ProtocolVersion::goldsrc_48);
+    CHECK(summary.server_id_present);
+    CHECK(summary.server_id_nonzero);
+    CHECK(summary.server_id_universe == 1U);
+    CHECK(summary.server_id_account_type == 3U);
+    CHECK(summary.server_id_instance == 0xabcU);
+    REQUIRE(summary.secure.has_value());
+    CHECK_FALSE(*summary.secure);
+    CHECK_FALSE(events.front().actual_app_id);
+    CHECK_FALSE(events.front().logged_on);
+    CHECK(events.front().callback_pump_count == 0U);
+    CHECK_FALSE(events.front().initiate_returned_length);
+    first.operation->cancel();
+    CHECK(first.operation->update().state == auth::AuthenticationUpdateState::failed);
+
+    // Different account and challenge values produce the same safe metadata.
+    context.game_server_steam_id =
+        (*context.game_server_steam_id & 0xffff'ffff'0000'0000ULL) | 0xfedcba98ULL;
+    context.challenge = goldsrc::ChallengeToken{987'654'321U};
+    auto second = provider.begin(context);
+    REQUIRE(second.operation);
+    REQUIRE(events.back().request_context);
+    const auto second_summary = *events.back().request_context;
+    CHECK(second_summary.remote_endpoint == summary.remote_endpoint);
+    CHECK(second_summary.protocol == summary.protocol);
+    CHECK(second_summary.server_id_present == summary.server_id_present);
+    CHECK(second_summary.server_id_nonzero == summary.server_id_nonzero);
+    CHECK(second_summary.server_id_universe == summary.server_id_universe);
+    CHECK(second_summary.server_id_account_type == summary.server_id_account_type);
+    CHECK(second_summary.server_id_instance == summary.server_id_instance);
+    CHECK(second_summary.secure == summary.secure);
+    second.operation->cancel();
+    CHECK(second.operation->update().state == auth::AuthenticationUpdateState::failed);
+    CHECK(state->initialize_calls == 0U);
+    CHECK(state->callback_calls == 0U);
+    CHECK(state->initiate_calls == 0U);
+}
+
+TEST_CASE("Steam begin diagnostics distinguish absent and zero context before rejecting it",
+          "[auth][provider][steam][diagnostics]")
+{
+    auto state = std::make_shared<MockSteamApiState>();
+    auto config = mock_steam_config(state);
+    std::vector<app::SteamAuthenticationTraceEvent> events;
+    config.trace = [&events](const app::SteamAuthenticationTraceEvent& event) {
+        events.push_back(event);
+    };
+    app::SteamAuthenticationProvider provider{std::move(config)};
+    auto context = steam_request_context();
+    SECTION("missing server identity and security remain unknown")
+    {
+        context.game_server_steam_id.reset();
+        context.game_server_secure.reset();
+    }
+    SECTION("a present zero identity is recorded as zero classification")
+    {
+        context.game_server_steam_id = 0U;
+        context.game_server_secure = false;
+    }
+    const auto begun = provider.begin(context);
+    REQUIRE_FALSE(begun);
+    REQUIRE(begun.error);
+    CHECK(begun.error->code == auth::AuthenticationErrorCode::configuration_error);
+    REQUIRE(events.size() == 2U);
+    CHECK(events[0].status == app::SteamAuthenticationTraceStatus::operation_started);
+    REQUIRE(events[0].request_context);
+    const auto& summary = *events[0].request_context;
+    CHECK(summary.server_id_present == context.game_server_steam_id.has_value());
+    CHECK_FALSE(summary.server_id_nonzero);
+    CHECK(summary.secure == context.game_server_secure);
+    if (context.game_server_steam_id) {
+        CHECK(summary.server_id_universe == 0U);
+        CHECK(summary.server_id_account_type == 0U);
+        CHECK(summary.server_id_instance == 0U);
+    } else {
+        CHECK_FALSE(summary.server_id_universe);
+        CHECK_FALSE(summary.server_id_account_type);
+        CHECK_FALSE(summary.server_id_instance);
+    }
+    CHECK(events[1].status == app::SteamAuthenticationTraceStatus::failed);
+    CHECK(events[1].error == begun.error->code);
+    CHECK_FALSE(events[1].actual_app_id);
+    CHECK_FALSE(events[1].logged_on);
+    CHECK_FALSE(events[1].initiate_returned_length);
+    CHECK(state->initialize_calls == 0U);
+    CHECK(state->callback_calls == 0U);
+    CHECK(state->initiate_calls == 0U);
+}
+
+TEST_CASE("Steam context diagnostics preserve false and zero readiness observations",
+          "[auth][provider][steam][diagnostics]")
+{
+    auto state = std::make_shared<MockSteamApiState>();
+    state->logged_on = false;
+    SECTION("zero App ID and false login are emitted before the App ID gate")
+    {
+        state->app_id = 0U;
+    }
+    SECTION("correct App ID and false login are emitted before the login gate") {}
+    auto config = mock_steam_config(state);
+    std::vector<app::SteamAuthenticationTraceEvent> events;
+    config.trace = [&events](const app::SteamAuthenticationTraceEvent& event) {
+        events.push_back(event);
+    };
+    app::SteamAuthenticationProvider provider{std::move(config)};
+    auto begun = provider.begin(steam_request_context());
+    REQUIRE(begun.operation);
+    const auto result = begun.operation->update();
+    REQUIRE(result.error);
+    CHECK(result.error->code == (state->app_id == 0U
+              ? auth::AuthenticationErrorCode::configuration_error
+              : auth::AuthenticationErrorCode::unavailable));
+    REQUIRE(events.size() == 5U);
+    CHECK(events[3].status == app::SteamAuthenticationTraceStatus::context_checked);
+    CHECK(events[3].actual_app_id == state->app_id);
+    REQUIRE(events[3].logged_on.has_value());
+    CHECK_FALSE(*events[3].logged_on);
+    CHECK(events[4].status == app::SteamAuthenticationTraceStatus::failed);
+    CHECK(events[4].actual_app_id == state->app_id);
+    REQUIRE(events[4].logged_on.has_value());
+    CHECK_FALSE(*events[4].logged_on);
+    CHECK(events[4].callback_pump_count == 0U);
+    CHECK_FALSE(events[4].initiate_returned_length);
+    CHECK(state->callback_calls == 0U);
+    CHECK(state->initiate_calls == 0U);
+}
+
+TEST_CASE("Steam result diagnostics distinguish callback logout and API return values",
+          "[auth][provider][steam][diagnostics]")
+{
+    auto state = std::make_shared<MockSteamApiState>();
+    SECTION("valid material") {}
+    SECTION("zero length") { state->material_size = 0; }
+    SECTION("negative length") { state->material_size = -1; }
+    SECTION("oversized material") { state->material_size = 1'024; }
+    SECTION("logout during callback")
+    {
+        state->on_callbacks = [api_state = state.get()] { api_state->logged_on = false; };
+    }
+    auto config = mock_steam_config(state);
+    std::vector<app::SteamAuthenticationTraceEvent> events;
+    config.trace = [&events](const app::SteamAuthenticationTraceEvent& event) {
+        events.push_back(event);
+    };
+    app::SteamAuthenticationProvider provider{std::move(config)};
+    auto begun = provider.begin(steam_request_context());
+    REQUIRE(begun.operation);
+    REQUIRE(begun.operation->update().state == auth::AuthenticationUpdateState::pending);
+    auto result = begun.operation->update();
+    REQUIRE_FALSE(events.empty());
+    const auto& event = events.back();
+    CHECK(event.actual_app_id == app::kHalfLifeSteamAppId);
+    CHECK(event.logged_on == state->logged_on);
+    CHECK(event.callback_pump_count == 1U);
+    CHECK(state->callback_calls == 1U);
+    if (!state->logged_on) {
+        CHECK_FALSE(event.initiate_returned_length);
+        CHECK(state->initiate_calls == 0U);
+        CHECK(state->terminate_calls == 0U);
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::unavailable);
+    } else {
+        CHECK(event.initiate_returned_length == state->material_size);
+        CHECK(state->initiate_calls == 1U);
+        if (state->material_size == 333) {
+            REQUIRE(result.session);
+            CHECK(event.status == app::SteamAuthenticationTraceStatus::material_acquired);
+            CHECK(event.material_size == 333U);
+            CHECK(state->terminate_calls == 0U);
+            result.session.reset();
+            CHECK(state->terminate_calls == 1U);
+        } else {
+            REQUIRE(result.error);
+            CHECK(event.status == app::SteamAuthenticationTraceStatus::failed);
+            CHECK(state->terminate_calls == (state->material_size > 0 ? 1U : 0U));
+        }
+    }
+}
+
+TEST_CASE("Steam diagnostic callback exceptions do not alter authentication or cleanup",
+          "[auth][provider][steam][diagnostics]")
+{
+    auto state = std::make_shared<MockSteamApiState>();
+    auto config = mock_steam_config(state);
+    config.trace = [](const app::SteamAuthenticationTraceEvent&) {
+        throw std::runtime_error{"Diagnostic consumer unavailable"};
+    };
+    {
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        REQUIRE(begun.operation->update().state == auth::AuthenticationUpdateState::pending);
+        auto result = begun.operation->update();
+        REQUIRE(result.session);
+        CHECK(state->callback_calls == 1U);
+        CHECK(state->initiate_calls == 1U);
+        result.session.reset();
+        CHECK(state->terminate_calls == 1U);
+    }
+    CHECK(state->shutdown_calls == 1U);
+}
+
 TEST_CASE("Steam initialization and fresh material have independent bounded deadlines",
           "[auth][provider][steam][startup-deadline]")
 {
@@ -673,7 +900,7 @@ TEST_CASE("Steam initialization and fresh material have independent bounded dead
         CHECK(begun.operation->update().state == auth::AuthenticationUpdateState::pending);
         CHECK(state->initialize_calls == 1U);
         CHECK(state->initiate_calls == 0U);
-        REQUIRE(events.size() == 4U);
+        REQUIRE(events.size() == 5U);
         CHECK(events[2].status == app::SteamAuthenticationTraceStatus::api_initialized);
         CHECK(events[2].phase == app::SteamAuthenticationPhase::initialization);
         CHECK(events[2].elapsed == Milliseconds{6'000});

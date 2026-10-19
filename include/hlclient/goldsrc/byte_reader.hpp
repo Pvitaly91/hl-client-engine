@@ -23,6 +23,9 @@ public:
     [[nodiscard]] std::optional<std::int32_t> read_int32_le() noexcept;
     [[nodiscard]] std::optional<float> read_float32_le() noexcept;
     [[nodiscard]] std::optional<std::span<const std::byte>> read_bytes(std::size_t count) noexcept;
+    // One uint8 length followed by exactly that many bytes. On truncation
+    // neither the length nor any body byte is consumed. Zero length is valid.
+    [[nodiscard]] std::optional<std::span<const std::byte>> read_uint8_sized_bytes() noexcept;
     [[nodiscard]] std::optional<std::string> read_c_string();
 
 private:

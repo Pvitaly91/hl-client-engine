@@ -2,6 +2,26 @@
 
 using namespace hlclient::tests::hud_resources_e29;
 
+namespace {
+std::vector<std::byte> supplemental_frame_fixture(std::int32_t format = 1) {
+    auto bytes = fixture::literal_header_and_palette(4, format, 2, 0, 3, 3);
+    fixture::append_single_entry(bytes, {-1, 2, 2, 2,
+        {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}}});
+    fixture::append_single_entry(bytes, {7, -3, 1, 3,
+        {std::byte{5}, std::byte{6}, std::byte{7}}});
+    fixture::append_single_entry(bytes, {-9, 1, 3, 1,
+        {std::byte{8}, std::byte{9}, std::byte{10}}});
+    fixture::append_single_entry(bytes, {0, 0, 1, 1, {std::byte{11}}});
+    return bytes;
+}
+api::HudManifestRequest supplemental_request() {
+    return {"sprites/hud.txt", {}, {{"pain_front", 640U, "sprites/pain.spr", 0U},
+        {"pain_right", 640U, "sprites/pain.spr", 1U},
+        {"pain_rear", 640U, "sprites/pain.spr", 2U},
+        {"pain_left", 640U, "sprites/pain.spr", 3U}}};
+}
+}
+
 TEST_CASE("E29 HUD manifest parses actual grammar without executing inert roles", "[e29][hud-resources][parser]") {
     const auto parsed = g::parse_hud_manifest(text_bytes(
         "3\r\n// count and comments\r\nunknown_role 2560 2560/sheet 0 0 2 2\n"
@@ -176,4 +196,196 @@ TEST_CASE("E29 bounded descriptor authorization avoids invalid reads and stop ca
     REQUIRE(oversized_snapshot->resources.descriptors.size() == 1U);
     CHECK(oversized_snapshot->resources.descriptors[0].name.empty());
     CHECK(oversized_snapshot->resources.descriptors[0].status == api::HudResourceStatus::not_authorized);
+}
+
+TEST_CASE("HUD supplemental sprites retain each requested frame geometry format and shared source", "[e29][hud-resources][assets][hud-supplemental]") {
+    constexpr std::array<api::HudSpriteBlend, 4U> blends{api::HudSpriteBlend::opaque,
+        api::HudSpriteBlend::additive, api::HudSpriteBlend::straight_alpha, api::HudSpriteBlend::alpha_test};
+    constexpr std::array<std::uint32_t, 4U> widths{2U, 1U, 3U, 1U}, heights{2U, 3U, 1U, 1U};
+    for (std::int32_t format = 0; format < 4; ++format) {
+        CAPTURE(format);
+        FixtureSource source;
+        source.add("sprites/hud.txt", "1\nnumber_0 640 pain 1 1 1 1\n");
+        source.files["sprites/pain.spr"] = supplemental_frame_fixture(format);
+        std::array requests{supplemental_request()};
+        const auto prepared = g::prepare_hud_assets(source, requests);
+        REQUIRE(prepared.resources.descriptors.size() == 1U);
+        const auto& descriptor = prepared.resources.descriptors.front();
+        REQUIRE(descriptor.status == api::HudResourceStatus::ready);
+        CHECK(descriptor.declared_count == 1U); CHECK(descriptor.parsed_count == 1U);
+        CHECK_FALSE(descriptor.exact_count_compatibility_applied);
+        REQUIRE(descriptor.entries.size() == 5U);
+        CHECK(descriptor.entries[0].source == api::HudSourceRectangle{1U, 1U, 1U, 1U});
+        CHECK(prepared.ready_entries == 5U); CHECK(prepared.rejected_entries == 0U);
+        REQUIRE(prepared.sprites.size() == 1U);
+        CHECK(source.reads["sprites/pain.spr"] == 1U);
+        CHECK(prepared.source_bytes == source.files["sprites/hud.txt"].size() + source.files["sprites/pain.spr"].size());
+        CHECK(prepared.retained_decoded_bytes == (4U + 3U + 3U + 1U) * 4U);
+        for (std::size_t i = 0U; i < 4U; ++i) {
+            const auto& entry = descriptor.entries[i + 1U];
+            REQUIRE(entry.status == api::HudResourceStatus::ready);
+            CHECK(entry.frame == i); CHECK(entry.frame_width == widths[i]); CHECK(entry.frame_height == heights[i]);
+            CHECK(entry.source == api::HudSourceRectangle{0U, 0U, widths[i], heights[i]});
+            CHECK(entry.blend == blends[static_cast<std::size_t>(format)]);
+            CHECK(entry.resource_id == descriptor.entries[0].resource_id);
+            CHECK(entry.resource_revision == descriptor.entries[0].resource_revision);
+            CHECK(entry.asset_sha256 == descriptor.entries[0].asset_sha256);
+            CHECK(prepared.sprites[0].asset->frames()[entry.frame].geometry.width == widths[i]);
+        }
+        const auto original_revision = prepared.resources.revision;
+        requests[0].supplemental_sprites[0].frame = 1U;
+        const auto different_frame = g::prepare_hud_assets(source, requests);
+        CHECK(different_frame.resources.revision != original_revision);
+        CHECK(different_frame.resources.descriptors[0].entries[1].resource_revision == descriptor.entries[1].resource_revision);
+        requests[0] = supplemental_request(); requests[0].supplemental_sprites[0].resolution = 1280U;
+        CHECK(g::prepare_hud_assets(source, requests).resources.revision != original_revision);
+        requests[0] = supplemental_request(); requests[0].supplemental_sprites[0].role = "another_role";
+        CHECK(g::prepare_hud_assets(source, requests).resources.revision != original_revision);
+    }
+}
+
+TEST_CASE("HUD supplemental authorization rejects unsafe names roles tiers frames and duplicates before reads", "[e29][hud-resources][assets][hud-supplemental]") {
+    std::vector<api::HudSpriteRequest> invalid;
+    for (const auto name : {"../pain.spr", "C:/pain.spr", "sprites/../pain.spr", "sprites//pain.spr",
+        "sprites/a/../pain.spr", "sprites/pain.spr/", "sprites/pain.spr;exec", "sprites/.spr",
+        "sprites/pain.txt", "models/pain.spr", "sprites/a\\pain.spr"})
+        invalid.push_back({"pain_front", 640U, name, 0U});
+    invalid.push_back({"pain_front", 640U, "sprites/" + std::string(64U, 'a') + ".spr", 0U});
+    invalid.push_back({"pain_front", 640U, std::string{"sprites/pain\0x.spr", 18U}, 0U});
+    for (const auto role : {"", "bad role", "bad/role", "bad;role", "bad.role"})
+        invalid.push_back({role, 640U, "sprites/pain.spr", 0U});
+    invalid.push_back({std::string(64U, 'r'), 640U, "sprites/pain.spr", 0U});
+    invalid.push_back({"pain_front", 0U, "sprites/pain.spr", 0U});
+    invalid.push_back({"pain_front", 65'536U, "sprites/pain.spr", 0U});
+    invalid.push_back({"pain_front", 640U, "sprites/pain.spr", 64U});
+    for (const auto& sprite : invalid) {
+        FixtureSource source; source.add("sprites/hud.txt", "0\n");
+        const std::array<api::HudManifestRequest, 1U> requests{{{"sprites/hud.txt", {}, {sprite}}}};
+        const auto prepared = g::prepare_hud_assets(source, requests);
+        REQUIRE(prepared.resources.descriptors.size() == 1U);
+        CHECK(prepared.resources.descriptors[0].status == api::HudResourceStatus::not_authorized);
+        CHECK(prepared.resources.descriptors[0].entries.empty()); CHECK(source.reads.empty());
+    }
+    FixtureSource source; source.add("sprites/hud.txt", "0\n");
+    std::array requests{supplemental_request()};
+    requests[0].supplemental_sprites.push_back(requests[0].supplemental_sprites.front());
+    requests[0].supplemental_sprites.back().frame = 1U;
+    CHECK(g::prepare_hud_assets(source, requests).resources.descriptors[0].status == api::HudResourceStatus::not_authorized);
+    CHECK(source.reads.empty());
+    requests[0] = supplemental_request(); requests[0].supplemental_sprites.resize(513U);
+    CHECK(g::prepare_hud_assets(source, requests).resources.descriptors[0].status == api::HudResourceStatus::resource_limit);
+    CHECK(source.reads.empty());
+    g::ApprovedHudAssets rejected_worker{{}, requests};
+    REQUIRE(rejected_worker.snapshot());
+    CHECK(rejected_worker.snapshot()->resources.descriptors[0].status == api::HudResourceStatus::not_authorized);
+}
+
+TEST_CASE("HUD supplemental whole frames never bypass missing or invalid base manifests", "[e29][hud-resources][assets][hud-supplemental]") {
+    const std::array requests{supplemental_request()};
+    for (const auto manifest : {"", "2\nnumber_0 640 pain 0 0 1 1\n", "1\nnumber_0 640 pain 0 0 0 1\n"}) {
+        FixtureSource source;
+        if (manifest[0]) source.add("sprites/hud.txt", manifest);
+        source.files["sprites/pain.spr"] = supplemental_frame_fixture();
+        const auto prepared = g::prepare_hud_assets(source, requests);
+        REQUIRE(prepared.resources.descriptors.size() == 1U);
+        CHECK(prepared.resources.descriptors[0].status == (manifest[0] ?
+            api::HudResourceStatus::invalid_manifest : api::HudResourceStatus::missing_file));
+        CHECK(prepared.resources.descriptors[0].entries.empty());
+        CHECK_FALSE(source.reads.contains("sprites/pain.spr")); CHECK(prepared.sprites.empty());
+    }
+    FixtureSource source;
+    source.add("sprites/hud.txt", "1\npain_front 640 pain 0 0 1 1\n");
+    CHECK(g::prepare_hud_assets(source, requests).resources.descriptors[0].status == api::HudResourceStatus::not_authorized);
+    CHECK_FALSE(source.reads.contains("sprites/pain.spr"));
+    // A syntactically valid but out-of-bounds manifest crop remains rejected;
+    // it cannot acquire the whole-frame privilege of adjacent explicit requests.
+    source.files.erase("sprites/hud.txt");
+    source.add("sprites/hud.txt", "1\nnumber_0 640 pain 1 1 2 2\n");
+    source.files["sprites/pain.spr"] = supplemental_frame_fixture();
+    const auto prepared = g::prepare_hud_assets(source, requests);
+    REQUIRE(prepared.resources.descriptors[0].entries.size() == 5U);
+    CHECK(prepared.resources.descriptors[0].entries[0].status == api::HudResourceStatus::invalid_rectangle);
+    CHECK(prepared.resources.descriptors[0].entries[0].source == api::HudSourceRectangle{1U, 1U, 2U, 2U});
+    CHECK(prepared.ready_entries == 4U); CHECK(prepared.rejected_entries == 1U);
+    source.reads.clear(); std::stop_source stopped; stopped.request_stop();
+    CHECK(g::prepare_hud_assets(source, requests, stopped.get_token()).resources.descriptors[0].status == api::HudResourceStatus::not_yet_resolved);
+    CHECK(source.reads.empty());
+}
+
+TEST_CASE("HUD supplemental requests reject absent frames malformed formats and oversized source", "[e29][hud-resources][assets][hud-supplemental]") {
+    FixtureSource source; source.add("sprites/hud.txt", "0\n");
+    std::array requests{supplemental_request()};
+    source.files["sprites/pain.spr"] = fixture::literal_two_single_sprite();
+    const auto prepared = g::prepare_hud_assets(source, requests);
+    REQUIRE(prepared.resources.descriptors[0].entries.size() == 4U);
+    CHECK(prepared.ready_entries == 2U); CHECK(prepared.rejected_entries == 2U);
+    for (const auto index : {2U, 3U}) {
+        const auto& entry = prepared.resources.descriptors[0].entries[index];
+        CHECK(entry.status == api::HudResourceStatus::invalid_rectangle);
+        CHECK(entry.resource_id == 0U); CHECK(entry.resource_revision == 0U);
+        CHECK(entry.frame_width == 0U); CHECK(entry.frame_height == 0U);
+    }
+    source.files["sprites/pain.spr"] = supplemental_frame_fixture(99);
+    const auto malformed = g::prepare_hud_assets(source, requests);
+    CHECK(malformed.ready_entries == 0U); CHECK(malformed.rejected_entries == 4U);
+    for (const auto& entry : malformed.resources.descriptors[0].entries) {
+        CHECK(entry.status == api::HudResourceStatus::decode_failed); CHECK(entry.resource_id == 0U);
+    }
+    source.files["sprites/pain.spr"].resize(g::kMaximumHudSpriteSourceBytes + 1U);
+    const auto oversized = g::prepare_hud_assets(source, requests);
+    CHECK(oversized.source_bytes == source.files["sprites/hud.txt"].size());
+    CHECK(oversized.sprites.empty()); CHECK(oversized.retained_decoded_bytes == 0U);
+    for (const auto& entry : oversized.resources.descriptors[0].entries)
+        CHECK(entry.status == api::HudResourceStatus::resource_limit);
+}
+
+TEST_CASE("HUD supplemental entries share global entry and dependency budgets with manifests", "[e29][hud-resources][assets][hud-supplemental]") {
+    FixtureSource source;
+    source.add("sprites/hud.txt", "1\nnumber_0 640 pain 0 0 1 1\n");
+    source.files["sprites/pain.spr"] = supplemental_frame_fixture();
+    std::array<api::HudManifestRequest, 1U> requests{{{"sprites/hud.txt", {}, {}}}};
+    for (std::size_t i = 0U; i < 511U; ++i)
+        requests[0].supplemental_sprites.push_back({"extra" + std::to_string(i), 640U, "sprites/pain.spr", 0U});
+    const auto maximum = g::prepare_hud_assets(source, requests);
+    CHECK(maximum.ready_entries == 512U); CHECK(maximum.sprites.size() == 1U);
+    source.reads.clear();
+    requests[0].supplemental_sprites.push_back({"extra511", 640U, "sprites/pain.spr", 0U});
+    const auto overflow = g::prepare_hud_assets(source, requests);
+    CHECK(overflow.resources.descriptors[0].status == api::HudResourceStatus::resource_limit);
+    CHECK(overflow.resources.descriptors[0].entries.empty()); CHECK_FALSE(source.reads.contains("sprites/pain.spr"));
+    const std::array<api::HudManifestRequest, 2U> aggregate{{requests[0], {"sprites/extra.txt", {},
+        {{"more", 640U, "sprites/pain.spr", 0U}}}}};
+    source.reads.clear();
+    CHECK(g::prepare_hud_assets(source, aggregate).resources.descriptors[0].status == api::HudResourceStatus::resource_limit);
+    CHECK(source.reads.empty());
+
+    FixtureSource many; many.add("sprites/hud.txt", "0\n");
+    requests[0].supplemental_sprites.clear();
+    for (std::size_t i = 0U; i < 257U; ++i) {
+        const auto name = "sprites/sheet" + std::to_string(i) + ".spr";
+        requests[0].supplemental_sprites.push_back({"extra" + std::to_string(i), 640U, name, 0U});
+        many.files[name] = fixture::literal_single_sprite(1);
+    }
+    const auto dependencies = g::prepare_hud_assets(many, requests);
+    CHECK(dependencies.sprites.size() == api::kMaximumHudResourceDependencies);
+    CHECK(dependencies.ready_entries == 256U); CHECK(dependencies.rejected_entries == 1U);
+    CHECK(dependencies.resources.descriptors[0].entries.back().status == api::HudResourceStatus::resource_limit);
+    CHECK_FALSE(many.reads.contains("sprites/sheet256.spr"));
+}
+
+TEST_CASE("HUD supplemental approved assets stay within the selected world root", "[e29][hud-resources][approved][hud-supplemental]") {
+    hlclient::tests::ScopedLocalResourceTestRoot root; root.create_game("sample");
+    root.write("sample", "maps/test_map.bsp", "map"); root.write("sample", "sprites/hud.txt", "0\n");
+    root.write("sample", "sprites/pain.spr", supplemental_frame_fixture());
+    root.write("valve", "sprites/foreign.spr", supplemental_frame_fixture());
+    std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment> environment{
+        hlclient::tests::readiness_fixture::make_environment(root, "sample")};
+    std::array requests{supplemental_request()};
+    requests[0].supplemental_sprites.push_back({"foreign", 640U, "sprites/foreign.spr", 0U});
+    g::ApprovedHudAssets assets{resources_for(environment, "maps/test_map.bsp"), requests};
+    const auto prepared = wait_prepared(assets); REQUIRE(prepared);
+    REQUIRE(prepared->resources.descriptors[0].entries.size() == 5U);
+    CHECK(prepared->ready_entries == 4U); CHECK(prepared->rejected_entries == 1U);
+    CHECK(prepared->sprites.size() == 1U);
+    CHECK(prepared->resources.descriptors[0].entries.back().status == api::HudResourceStatus::missing_file);
 }

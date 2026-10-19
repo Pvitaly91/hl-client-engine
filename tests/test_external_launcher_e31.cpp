@@ -247,6 +247,124 @@ TEST_CASE("E31 settings use atomic replacement and preserve corrupt settings bac
     REQUIRE(native::write_external_text_atomic(path,"corrupt",true));loaded=native::load_external_settings(path,defaults);CHECK(loaded.status=="corrupt_settings_backed_up");CHECK(loaded.configuration.name==defaults.name);CHECK(native::read_external_text(loaded.corrupt_backup,32)=="corrupt");CHECK_FALSE(std::filesystem::exists(path));
     CHECK_FALSE(native::write_external_text_atomic(loaded.corrupt_backup,"overwrite",false));CHECK(native::read_external_text(loaded.corrupt_backup,32)=="corrupt");
 }
+TEST_CASE("E33 shared configuration merges only explicit fields without stale launcher rollback",
+          "[e33][launcher][config][no-stock]")
+{
+    const core::ExternalLaunchConfiguration baseline;
+    auto latest=baseline;latest.volume=91;latest.image.gamma=1.432F;
+    latest.video.msaa_samples=8;latest.endpoint="192.168.0.104:27017";
+    const auto unchanged=core::merge_external_launch_configuration(baseline,baseline,latest);
+    REQUIRE(unchanged);CHECK(*unchanged==latest);
+    auto edited=baseline;edited.name="New launcher name";edited.image.brightness=.17F;
+    edited.video.vsync=false;
+    const auto merged=core::merge_external_launch_configuration(baseline,edited,latest);
+    REQUIRE(merged);CHECK(merged->name==edited.name);CHECK(merged->image.brightness==.17F);
+    CHECK_FALSE(merged->video.vsync);CHECK(merged->volume==91);
+    CHECK(merged->image.gamma==latest.image.gamma);CHECK(merged->video.msaa_samples==8);
+    CHECK(merged->endpoint==latest.endpoint);
+    edited.volume=42;
+    const auto conflict=core::merge_external_launch_configuration(baseline,edited,latest);
+    REQUIRE(conflict);CHECK(conflict->volume==42);CHECK(conflict->image.gamma==latest.image.gamma);
+    edited.image.gamma=std::numeric_limits<float>::quiet_NaN();
+    CHECK_FALSE(core::merge_external_launch_configuration(baseline,edited,latest));
+    auto invalid=latest;invalid.volume=101;
+    CHECK_FALSE(core::merge_external_launch_configuration(baseline,baseline,invalid));
+    CHECK_FALSE(core::merge_external_launch_configuration(invalid,baseline,latest));
+}
+TEST_CASE("E33 atomic shared settings retain console changes through later launcher edits",
+          "[e33][launcher][windows][config][no-stock]")
+{
+    Directory directory;const auto path=directory.path/L"launcher.json";
+    const core::ExternalLaunchConfiguration initial;
+    REQUIRE(native::save_external_settings(path,initial));
+    auto console=initial;console.volume=91;console.image.gamma=1.432F;
+    REQUIRE(native::merge_external_settings(path,initial,console));
+    REQUIRE(native::merge_external_settings(path,initial,initial));
+    auto launcher=initial;launcher.name="Only name edited";
+    REQUIRE(native::merge_external_settings(path,initial,launcher));
+    const auto loaded=native::load_external_settings(path,{});REQUIRE(loaded.status=="loaded");
+    CHECK(loaded.configuration.name==launcher.name);CHECK(loaded.configuration.volume==91);
+    CHECK(loaded.configuration.image.gamma==console.image.gamma);
+    REQUIRE(native::write_external_text_atomic(path,"corrupt",true));
+    CHECK_FALSE(native::merge_external_settings(path,initial,launcher));
+    CHECK(native::read_external_text(path,32)=="corrupt");
+    const auto own=native::default_external_settings_path();REQUIRE(own);
+    CHECK(own->is_absolute());CHECK(own->filename()==L"launcher.json");
+    CHECK(own->parent_path().filename()==L"HLClientEngine");
+}
+TEST_CASE("E33 serialized shared settings combine independent simultaneous client edits",
+          "[e33][launcher][windows][config][no-stock]")
+{
+    Directory directory;const auto path=directory.path/L"launcher.json";
+    const core::ExternalLaunchConfiguration initial;
+    REQUIRE(native::save_external_settings(path,initial));
+    auto sound=initial;sound.volume=82;
+    auto image=initial;image.image.contrast=1.75F;
+    std::array<bool,2> saved{};
+    std::thread first{[&]{saved[0]=native::merge_external_settings(path,initial,sound);}};
+    std::thread second{[&]{saved[1]=native::merge_external_settings(path,initial,image);}};
+    first.join();second.join();REQUIRE(saved[0]);REQUIRE(saved[1]);
+    const auto loaded=native::load_external_settings(path,{});REQUIRE(loaded.status=="loaded");
+    CHECK(loaded.configuration.volume==82);CHECK(loaded.configuration.image.contrast==1.75F);
+}
+TEST_CASE("E33 launcher recognizes idle recovery without treating application close as gameplay",
+          "[e33][launcher][reporting][no-stock]")
+{
+    const auto idle=native::latest_external_status_marker("[external-status] stage=idle reason=none\n");
+    REQUIRE(idle);CHECK(idle->stage=="idle");
+    const auto recovered=native::latest_external_status_marker(
+        "[external-status] stage=recoverable_error reason=server_unavailable\n");
+    REQUIRE(recovered);CHECK(recovered->reason=="server_unavailable");
+    const auto closed=native::latest_external_status_marker(
+        "[external-status] stage=completed reason=application_closed\n");
+    REQUIRE(closed);CHECK(closed->stage=="completed");CHECK(closed->reason=="application_closed");
+    CHECK_FALSE(native::latest_external_status_marker("server: [external-status] stage=idle reason=none\n"));
+}
+TEST_CASE("E33 current launcher phase can recover while earlier attempt failures remain immutable",
+          "[e33][launcher][reporting][no-stock]")
+{
+    const std::string failed="[external-status] stage=error reason=server_unavailable\n"
+        "[external-status] stage=error reason=disconnect_failed\n";
+    const auto history=native::external_failure_markers(failed);
+    REQUIRE(history.primary_reason=="server_unavailable");REQUIRE(history.cleanup_reason=="disconnect_failed");
+    for(const auto stage:{"recoverable_error","idle","connecting","authentication","signon","preparing_map","in_game"}) {
+        const auto current=native::latest_external_status_marker(failed+
+            "[external-status] stage="+stage+" reason=fixture\n");
+        REQUIRE(current);
+        CHECK(native::external_progress_stage("error",current,history,true,false)==stage);
+        CHECK(native::external_progress_stage("error",current,history,true,true)=="disconnecting");
+    }
+    CHECK(native::external_progress_stage("checking_resources",{},history,true,false)=="error");
+    CHECK(native::external_progress_stage("checking_resources",{}, {},true,false)=="in_game");
+    CHECK(native::external_progress_stage("connecting",{}, {},false,false)=="connecting");
+    CHECK(native::external_progress_stage("connecting",native::ExternalStatusMarker{"untrusted_phase","none"},history,true,false)=="error");
+    const auto closed=native::latest_external_status_marker(failed+
+        "[external-status] stage=completed reason=application_closed\n");
+    CHECK(native::external_application_close_succeeded(closed,0U,false));
+    CHECK_FALSE(native::external_application_close_succeeded(closed,7U,false));
+    CHECK_FALSE(native::external_application_close_succeeded(closed,{},false));
+    CHECK_FALSE(native::external_application_close_succeeded(closed,0U,true));
+    CHECK_FALSE(native::external_application_close_succeeded({},0U,false));
+    CHECK(history.primary_reason=="server_unavailable");CHECK(history.cleanup_reason=="disconnect_failed");
+}
+TEST_CASE("E33 native application recovery retains the first failure and rejects nonzero final exits",
+          "[e33][launcher][windows][process][reporting][no-stock]")
+{
+    const auto identity=native::observe_windows_binary_identity(fixture(),native::kMaximumObservedExecutableBytes,
+        {native::AuthenticodePolicy::not_required_for_project_owned_binary,false});REQUIRE(identity);
+    for(const bool fail:{false,true}) {
+        native::ExternalClientProcess child;
+        std::vector<std::wstring> arguments{L"--recover-and-close"};if(fail)arguments.emplace_back(L"--fail");
+        REQUIRE(child.launch(*identity.identity,arguments));
+        const auto result=wait(child);REQUIRE(result.exit_code);
+        const auto log=child.finish_log();const auto history=native::external_failure_markers(log.bytes);
+        const auto current=native::latest_external_status_marker(log.bytes);REQUIRE(current);
+        CHECK(history.primary_reason=="server_unavailable");CHECK(history.cleanup_reason.empty());
+        CHECK(native::external_progress_stage("error",current,history,false,false)=="completed");
+        CHECK(native::external_application_close_succeeded(current,result.exit_code,false)==!fail);
+        CHECK(native::redacted_external_status_log(log.bytes).find("reason=server_unavailable")!=std::string::npos);
+    }
+}
 TEST_CASE("E31 lifecycle gates duplicate Connect cancel and clean retry", "[e31][launcher]")
 {
     core::ExternalLauncherLifecycle state;CHECK_FALSE(state.cancel());REQUIRE(state.begin());CHECK_FALSE(state.begin());REQUIRE(state.cancel());CHECK_FALSE(state.cancel());CHECK_FALSE(state.child_started());CHECK_FALSE(state.begin());state.finish(false);CHECK_FALSE(state.busy());REQUIRE(state.begin());REQUIRE(state.child_started());CHECK_FALSE(state.child_started());CHECK_FALSE(state.begin());state.finish(true);CHECK(state.phase()==core::ExternalLauncherPhase::completed);REQUIRE(state.begin());

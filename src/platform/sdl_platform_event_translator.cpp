@@ -16,6 +16,51 @@ namespace {
     const SDL_Scancode scancode) noexcept
 {
     switch (scancode) {
+    case SDL_SCANCODE_GRAVE: return input::PhysicalKey::grave;
+    case SDL_SCANCODE_RETURN: return input::PhysicalKey::enter;
+    case SDL_SCANCODE_HOME: return input::PhysicalKey::home;
+    case SDL_SCANCODE_END: return input::PhysicalKey::end;
+    case SDL_SCANCODE_BACKSPACE: return input::PhysicalKey::backspace;
+    case SDL_SCANCODE_DELETE: return input::PhysicalKey::delete_key;
+    case SDL_SCANCODE_PAGEUP: return input::PhysicalKey::page_up;
+    case SDL_SCANCODE_PAGEDOWN: return input::PhysicalKey::page_down;
+    case SDL_SCANCODE_RCTRL: return input::PhysicalKey::right_control;
+    case SDL_SCANCODE_RSHIFT: return input::PhysicalKey::right_shift;
+    case SDL_SCANCODE_LALT: return input::PhysicalKey::left_alt;
+    case SDL_SCANCODE_RALT: return input::PhysicalKey::right_alt;
+    case SDL_SCANCODE_F3: return input::PhysicalKey::f3;
+    case SDL_SCANCODE_F4: return input::PhysicalKey::f4;
+    case SDL_SCANCODE_F5: return input::PhysicalKey::f5;
+    case SDL_SCANCODE_F6: return input::PhysicalKey::f6;
+    case SDL_SCANCODE_F7: return input::PhysicalKey::f7;
+    case SDL_SCANCODE_F9: return input::PhysicalKey::f9;
+    case SDL_SCANCODE_F10: return input::PhysicalKey::f10;
+    case SDL_SCANCODE_F11: return input::PhysicalKey::f11;
+    case SDL_SCANCODE_F12: return input::PhysicalKey::f12;
+    case SDL_SCANCODE_B: return input::PhysicalKey::b;
+    case SDL_SCANCODE_C: return input::PhysicalKey::c;
+    case SDL_SCANCODE_F: return input::PhysicalKey::f;
+    case SDL_SCANCODE_G: return input::PhysicalKey::g;
+    case SDL_SCANCODE_H: return input::PhysicalKey::h;
+    case SDL_SCANCODE_I: return input::PhysicalKey::i;
+    case SDL_SCANCODE_J: return input::PhysicalKey::j;
+    case SDL_SCANCODE_K: return input::PhysicalKey::k;
+    case SDL_SCANCODE_L: return input::PhysicalKey::l;
+    case SDL_SCANCODE_M: return input::PhysicalKey::m;
+    case SDL_SCANCODE_N: return input::PhysicalKey::n;
+    case SDL_SCANCODE_O: return input::PhysicalKey::o;
+    case SDL_SCANCODE_P: return input::PhysicalKey::p;
+    case SDL_SCANCODE_T: return input::PhysicalKey::t;
+    case SDL_SCANCODE_U: return input::PhysicalKey::u;
+    case SDL_SCANCODE_V: return input::PhysicalKey::v;
+    case SDL_SCANCODE_X: return input::PhysicalKey::x;
+    case SDL_SCANCODE_Y: return input::PhysicalKey::y;
+    case SDL_SCANCODE_Z: return input::PhysicalKey::z;
+    case SDL_SCANCODE_0: return input::PhysicalKey::digit_0;
+    case SDL_SCANCODE_6: return input::PhysicalKey::digit_6;
+    case SDL_SCANCODE_7: return input::PhysicalKey::digit_7;
+    case SDL_SCANCODE_8: return input::PhysicalKey::digit_8;
+    case SDL_SCANCODE_9: return input::PhysicalKey::digit_9;
     case SDL_SCANCODE_W:
         return input::PhysicalKey::w;
     case SDL_SCANCODE_A:
@@ -130,6 +175,9 @@ std::optional<PlatformEvent> SdlPlatformEventTranslator::translate(
             ? input::InputEvent::key_pressed(*key, event.key.repeat)
             : input::InputEvent::key_released(*key)};
     }
+    case SDL_EVENT_TEXT_INPUT:
+        if(event.text.text) return PlatformEvent{input::InputEvent::text_input(event.text.text)};
+        return std::nullopt;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP: {
         const auto button = translate_mouse_button(event.button.button);

@@ -281,6 +281,7 @@ public:
     ~ResourceClientResponseSignonState() = default;
 
     [[nodiscard]] const ResourceListSignonState& resource_list() const noexcept;
+    [[nodiscard]] const SignonUserInfoUpdates& user_info_updates() const noexcept;
     [[nodiscard]] const Opcode5ResourceResponse& response() const noexcept;
     [[nodiscard]] const std::optional<ResourceResponseCarrierGeometry>&
     source_carrier_geometry() const noexcept;
@@ -305,7 +306,8 @@ private:
         std::optional<ResourceResponseCarrierGeometry> source_carrier_geometry,
         std::optional<ResourceResponseConcurrentTail> concurrent_tail,
         ResourceResponseReliableLifecycle reliable_lifecycle,
-        std::optional<PostResourceResponseBoundary> boundary) noexcept;
+        std::optional<PostResourceResponseBoundary> boundary,
+        SignonUserInfoUpdates user_info_updates) noexcept;
 
     ResourceListSignonState resource_list_;
     Opcode5ResourceResponse response_;
@@ -313,6 +315,7 @@ private:
     std::optional<ResourceResponseConcurrentTail> concurrent_tail_;
     ResourceResponseReliableLifecycle reliable_lifecycle_;
     std::optional<PostResourceResponseBoundary> boundary_;
+    SignonUserInfoUpdates user_info_updates_;
 };
 
 enum class ResourceClientResponseStageEventType {
@@ -654,6 +657,7 @@ private:
     std::size_t pre_transmit_control_payload_count_{0U};
     std::size_t pre_transmit_control_byte_count_{0U};
     std::size_t pre_transmit_control_message_count_{0U};
+    SignonUserInfoUpdates user_info_updates_;
     bool response_transmitted_{false};
     bool response_acknowledged_{false};
     bool current_event_batch_received_after_first_response_transmit_{false};

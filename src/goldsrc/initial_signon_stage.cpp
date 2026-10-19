@@ -170,6 +170,43 @@ static_assert(std::is_nothrow_move_constructible_v<InitialSignonEvent>);
     return InitialSignonTraceClassification::protocol_failure;
 }
 
+struct PendingInitialServiceBatch final {
+    DecodedServiceStream stream;
+    std::size_t wire_payload_size{0U};
+    std::uint32_t source_sequence{0U};
+    InitialSignonTimePoint occurred_at{};
+};
+
+enum class DecodedBatchCommitOutcome {
+    committed,
+    transient_event_pressure,
+    failed,
+};
+
+[[nodiscard]] std::optional<std::uint8_t> first_wire_opcode(
+    const DecodedServiceStream& stream) noexcept
+{
+    if (!stream.messages.empty()) {
+        return static_cast<std::uint8_t>(stream.messages.front().opcode);
+    }
+    if (stream.boundary) {
+        return static_cast<std::uint8_t>(stream.boundary->opcode);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::size_t> first_wire_byte_offset(
+    const DecodedServiceStream& stream) noexcept
+{
+    if (!stream.messages.empty()) {
+        return stream.messages.front().byte_offset;
+    }
+    if (stream.boundary) {
+        return stream.boundary->byte_offset;
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 bool valid_initial_signon_configuration(const InitialSignonConfig& config) noexcept
@@ -179,9 +216,16 @@ bool valid_initial_signon_configuration(const InitialSignonConfig& config) noexc
            valid_service_message_limits(config.service_messages) &&
            config.maximum_events > 0U &&
            config.maximum_events <= kMaximumInitialSignonEvents &&
+           config.maximum_retained_messages > 0U &&
+           config.maximum_retained_messages <=
+               kMaximumInitialSignonRetainedMessages &&
            config.maximum_driver_events_per_update > 0U &&
            config.maximum_driver_events_per_update <=
-               kMaximumInitialSignonDriverEventsPerUpdate;
+               kMaximumInitialSignonDriverEventsPerUpdate &&
+           config.maximum_pre_ack_payloads > 0U &&
+           config.maximum_pre_ack_payloads <= kMaximumInitialPreAckPayloads &&
+           config.maximum_pre_ack_payload_bytes > 0U &&
+           config.maximum_pre_ack_payload_bytes <= kMaximumInitialPreAckPayloadBytes;
 }
 
 class InitialSignonStage::Implementation final {
@@ -201,7 +245,8 @@ public:
           events_{configuration_valid_ ? config_.maximum_events : 0U}
     {
         if (configuration_valid_) {
-            accumulated_messages_.reserve(config_.maximum_events);
+            accumulated_messages_.reserve(config_.maximum_retained_messages);
+            pre_ack_payloads_.reserve(config_.maximum_pre_ack_payloads);
         }
     }
 
@@ -365,19 +410,22 @@ public:
         }
         last_update_ = now;
 
-        if (pending_decode_payload_) {
-            decode_pending_payload(now);
-            if (terminal_state(state_) || pending_decode_payload_) {
+        std::size_t decoded_payloads = 0U;
+        if (pending_decoded_batch_ || pending_decode_payload_) {
+            decode_pending_payload(now, decoded_payloads);
+            if (terminal_state(state_) || pending_decoded_batch_ ||
+                pending_decode_payload_) {
                 return;
             }
         }
 
         std::size_t processed_events = 0U;
         drain_driver_events(now, processed_events);
-        if (terminal_state(state_) || pending_decode_payload_ ||
+        if (terminal_state(state_) || pending_decoded_batch_ ||
+            pending_decode_payload_ ||
             processed_events >= config_.maximum_driver_events_per_update) {
-            if (pending_decode_payload_) {
-                decode_pending_payload(now);
+            if (pending_decoded_batch_ || pending_decode_payload_) {
+                decode_pending_payload(now, decoded_payloads);
             }
             return;
         }
@@ -401,9 +449,10 @@ public:
         if (terminal_state(state_)) {
             return;
         }
-        if (pending_decode_payload_) {
-            decode_pending_payload(now);
-            if (terminal_state(state_)) {
+        if (pending_decoded_batch_ || pending_decode_payload_) {
+            decode_pending_payload(now, decoded_payloads);
+            if (terminal_state(state_) || pending_decoded_batch_ ||
+                pending_decode_payload_) {
                 return;
             }
         }
@@ -551,7 +600,8 @@ private:
     {
         while (driver_ &&
                processed_events < config_.maximum_driver_events_per_update &&
-               !terminal_state(state_) && !pending_decode_payload_) {
+               !terminal_state(state_) && !pending_decoded_batch_ &&
+               !pending_decode_payload_) {
             auto event = driver_->poll_event();
             if (!event) {
                 return;
@@ -648,32 +698,43 @@ private:
             now,
         });
         emit_trace(InitialSignonTraceClassification::initial_request_acknowledged);
-        if (pre_ack_payload_) {
-            pending_decode_payload_.emplace(std::move(*pre_ack_payload_));
-            pre_ack_payload_.reset();
-            state_ = InitialSignonState::decoding_service_stream;
-        }
+        promote_pre_ack_payload();
     }
 
     void handle_payload(
         OwnedNetchanPayload payload,
         const InitialSignonTimePoint now)
     {
+        // Header-only transport packets can acknowledge reliable traffic but
+        // carry no service stream. The independent ACK event remains handled;
+        // never queue an empty envelope or return one across a stage boundary.
+        if (payload.bytes.empty()) {
+            return;
+        }
         if (!request_acknowledged_) {
-            if (pre_ack_payload_) {
+            if (pre_ack_payloads_.size() >= config_.maximum_pre_ack_payloads ||
+                payload.bytes.size() >
+                    config_.maximum_pre_ack_payload_bytes - pre_ack_payload_bytes_) {
                 fail(
                     InitialSignonErrorCode::service_payload_before_ack_overflow,
-                    "More than one owning service payload arrived before request ACK",
+                    "Pre-ACK service FIFO limit: queued_count=" +
+                        std::to_string(pre_ack_payloads_.size()) +
+                        " count_cap=" + std::to_string(config_.maximum_pre_ack_payloads) +
+                        " queued_bytes=" + std::to_string(pre_ack_payload_bytes_) +
+                        " incoming_bytes=" + std::to_string(payload.bytes.size()) +
+                        " byte_cap=" + std::to_string(config_.maximum_pre_ack_payload_bytes),
                     now);
                 return;
             }
             emit_trace(
                 InitialSignonTraceClassification::service_payload_received,
                 payload.bytes.size());
-            pre_ack_payload_.emplace(std::move(payload));
+            const auto byte_count = payload.bytes.size();
+            pre_ack_payloads_.push_back(std::move(payload));
+            pre_ack_payload_bytes_ += byte_count;
             return;
         }
-        if (pending_decode_payload_) {
+        if (pending_decoded_batch_ || pending_decode_payload_) {
             fail(
                 InitialSignonErrorCode::service_event_backpressure,
                 "A second service payload arrived before bounded decode commit",
@@ -687,7 +748,47 @@ private:
         state_ = InitialSignonState::decoding_service_stream;
     }
 
-    void decode_pending_payload(const InitialSignonTimePoint now)
+    void promote_pre_ack_payload()
+    {
+        if (!request_acknowledged_ || pending_decoded_batch_ ||
+            pending_decode_payload_ ||
+            pre_ack_payloads_.empty()) {
+            return;
+        }
+        pre_ack_payload_bytes_ -= pre_ack_payloads_.front().bytes.size();
+        pending_decode_payload_.emplace(std::move(pre_ack_payloads_.front()));
+        pre_ack_payloads_.erase(pre_ack_payloads_.begin());
+        state_ = InitialSignonState::decoding_service_stream;
+    }
+
+    void decode_pending_payload(
+        const InitialSignonTimePoint now,
+        std::size_t& decoded_payloads)
+    {
+        while ((pending_decoded_batch_ || pending_decode_payload_) &&
+               !terminal_state(state_) &&
+               decoded_payloads < config_.maximum_driver_events_per_update) {
+            ++decoded_payloads;
+            if (pending_decoded_batch_) {
+                const auto outcome =
+                    try_commit_decoded_batch(*pending_decoded_batch_, now);
+                if (outcome != DecodedBatchCommitOutcome::committed) {
+                    return;
+                }
+                pending_decoded_batch_.reset();
+                if (!terminal_state(state_)) {
+                    promote_pre_ack_payload();
+                }
+                continue;
+            }
+            decode_one_pending_payload(now);
+            if (terminal_state(state_) || pending_decoded_batch_) {
+                return;
+            }
+        }
+    }
+
+    void decode_one_pending_payload(const InitialSignonTimePoint now)
     {
         if (!pending_decode_payload_ || terminal_state(state_)) {
             return;
@@ -722,6 +823,7 @@ private:
             return;
         }
 
+        const auto source_sequence = envelope.envelope->payload.source_sequence;
         ServiceMessageDecodeResult decoded;
         try {
             ServiceMessageStreamDecoder decoder{config_.service_messages};
@@ -746,36 +848,109 @@ private:
                           "Unable to decode the bounded service payload"},
                 now,
                 std::nullopt,
-                decoded.error ? std::optional{decoded.error->code} : std::nullopt);
+                decoded.error ? std::optional{decoded.error->code} : std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                decoded.error ? decoded.error->wire_opcode : std::nullopt,
+                decoded.error ? std::optional{decoded.error->byte_offset} : std::nullopt,
+                source_sequence);
             return;
         }
 
-        auto& stream = *decoded.stream;
+        PendingInitialServiceBatch decoded_batch{
+            std::move(*decoded.stream),
+            payload_size,
+            source_sequence,
+            now,
+        };
+        const auto outcome = try_commit_decoded_batch(decoded_batch, now);
+        if (outcome != DecodedBatchCommitOutcome::transient_event_pressure) {
+            return;
+        }
+
+        const auto wire_opcode = first_wire_opcode(decoded_batch.stream);
+        const auto byte_offset = first_wire_byte_offset(decoded_batch.stream);
+        try {
+            pending_decoded_batch_.emplace(std::move(decoded_batch));
+        } catch (...) {
+            fail(
+                InitialSignonErrorCode::service_event_backpressure,
+                "Unable to retain the bounded decoded service batch",
+                now,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                wire_opcode,
+                byte_offset,
+                source_sequence);
+        }
+    }
+
+    [[nodiscard]] DecodedBatchCommitOutcome try_commit_decoded_batch(
+        PendingInitialServiceBatch& batch,
+        const InitialSignonTimePoint now)
+    {
+        auto& stream = batch.stream;
+        const auto payload_size = batch.wire_payload_size;
+        const auto occurred_at = batch.occurred_at;
+        const auto wire_opcode = first_wire_opcode(stream);
+        const auto byte_offset = first_wire_byte_offset(stream);
         const auto expected_event_count = stream.messages.size() +
             (stream.boundary ? 1U : 0U);
         if (stream.required_event_count != expected_event_count) {
             fail(
                 InitialSignonErrorCode::service_message_decode_failed,
                 "Service decoder returned inconsistent bounded event metadata",
-                now);
-            return;
+                now,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                wire_opcode,
+                byte_offset,
+                batch.source_sequence);
+            return DecodedBatchCommitOutcome::failed;
         }
+
         const std::size_t required_events = 1U + stream.required_event_count;
-        if (stream.required_event_count > config_.maximum_events ||
-            !events_.can_push(required_events) ||
-            stream.messages.size() >
-                config_.maximum_events - accumulated_messages_.size()) {
+        const auto retained_messages = accumulated_messages_.size();
+        const auto incoming_messages = stream.messages.size();
+        const bool retained_capacity_exceeded =
+            retained_messages > config_.maximum_retained_messages ||
+            incoming_messages >
+                config_.maximum_retained_messages - retained_messages;
+        if (required_events > config_.maximum_events ||
+            retained_capacity_exceeded) {
             fail(
                 InitialSignonErrorCode::service_event_backpressure,
-                "Decoded service batch exceeds bounded sign-on event/state capacity",
-                now);
-            return;
+                "Decoded service batch exceeds bounded sign-on capacity: queued=" +
+                    std::to_string(events_.size()) +
+                    " required=" + std::to_string(required_events) +
+                    " event_cap=" + std::to_string(config_.maximum_events) +
+                    " retained=" + std::to_string(retained_messages) +
+                    " incoming=" + std::to_string(incoming_messages) +
+                    " state_cap=" +
+                    std::to_string(config_.maximum_retained_messages),
+                now,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                wire_opcode,
+                byte_offset,
+                batch.source_sequence);
+            return DecodedBatchCommitOutcome::failed;
+        }
+        if (!events_.can_push(required_events)) {
+            state_ = InitialSignonState::decoding_service_stream;
+            return DecodedBatchCommitOutcome::transient_event_pressure;
         }
 
         std::vector<DecodedServiceMessage> candidate;
         try {
             candidate = accumulated_messages_;
-            candidate.reserve(config_.maximum_events);
+            candidate.reserve(config_.maximum_retained_messages);
             candidate.insert(
                 candidate.end(),
                 std::make_move_iterator(stream.messages.begin()),
@@ -784,8 +959,31 @@ private:
             fail(
                 InitialSignonErrorCode::service_event_backpressure,
                 "Unable to retain the bounded owning early-message state",
-                now);
-            return;
+                now,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                wire_opcode,
+                byte_offset,
+                batch.source_sequence);
+            return DecodedBatchCommitOutcome::failed;
+        }
+
+        // Restoring the already-owned FIFO tail can fail on a configured
+        // driver capacity. Do it before publishing any batch event, trace or
+        // history/count state; all later publication is allocation-free.
+        if (stream.boundary && retain_connection_at_boundary_ &&
+            !pre_ack_payloads_.empty()) {
+            if (!driver_ || !driver_->prepend_retained_payloads(pre_ack_payloads_)) {
+                fail(InitialSignonErrorCode::service_event_backpressure,
+                     "No driver capacity remains for the retained pre-ACK FIFO tail", now,
+                     std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                     wire_opcode, byte_offset, batch.source_sequence);
+                return DecodedBatchCommitOutcome::failed;
+            }
+            pre_ack_payloads_.clear();
+            pre_ack_payload_bytes_ = 0U;
         }
 
         events_.push(InitialSignonEvent{
@@ -794,7 +992,7 @@ private:
             0U,
             0U,
             payload_size,
-            now,
+            occurred_at,
         });
         for (const auto& message : candidate | std::views::drop(accumulated_messages_.size())) {
             events_.push(InitialSignonEvent{
@@ -803,7 +1001,7 @@ private:
                 message.byte_offset,
                 message.byte_count,
                 payload_size,
-                now,
+                occurred_at,
             });
             emit_trace(
                 InitialSignonTraceClassification::service_message_decoded,
@@ -822,7 +1020,7 @@ private:
                 boundary.byte_offset,
                 boundary.remaining_byte_count,
                 payload_size,
-                now,
+                occurred_at,
             });
             result_.emplace(InitialSignonResult{
                 std::move(candidate),
@@ -841,11 +1039,13 @@ private:
                 boundary.opcode,
                 boundary.byte_offset,
                 boundary.remaining_byte_count);
-            return;
+            return DecodedBatchCommitOutcome::committed;
         }
 
         accumulated_messages_.swap(candidate);
         state_ = InitialSignonState::waiting_for_server_payload;
+        promote_pre_ack_payload();
+        return DecodedBatchCommitOutcome::committed;
     }
 
     void fail_from_driver(const InitialSignonTimePoint now)
@@ -881,7 +1081,10 @@ private:
         const std::optional<ServiceMessageErrorCode> service_code = std::nullopt,
         const std::optional<NetchanDriverErrorCode> driver_code = std::nullopt,
         const std::optional<ServicePayloadEnvelopeErrorCode> envelope_code =
-            std::nullopt) noexcept
+            std::nullopt,
+        const std::optional<std::uint8_t> wire_opcode = std::nullopt,
+        const std::optional<std::size_t> service_error_byte_offset = std::nullopt,
+        const std::optional<std::uint32_t> source_sequence = std::nullopt) noexcept
     {
         if (terminal_state(state_)) {
             return;
@@ -900,11 +1103,22 @@ private:
         error_->service_message_code = service_code;
         error_->driver_code = driver_code;
         error_->envelope_code = envelope_code;
+        error_->wire_opcode = wire_opcode;
+        error_->service_error_byte_offset = service_error_byte_offset;
+        error_->source_sequence = source_sequence;
         const auto bounded = context.substr(
             0U,
             (std::min)(context.size(), kInitialSignonDiagnosticTextLimit));
         try {
             error_->context.assign(bounded.data(), bounded.size());
+            if (service_error_byte_offset) {
+                const auto numeric_context =
+                    " [opcode=" + (wire_opcode ? std::to_string(*wire_opcode) : "unknown") +
+                    " offset=" + std::to_string(*service_error_byte_offset) + "]";
+                error_->context.resize((std::min)(error_->context.size(),
+                    kInitialSignonDiagnosticTextLimit - numeric_context.size()));
+                error_->context += numeric_context;
+            }
         } catch (...) {
             error_->context.clear();
         }
@@ -922,7 +1136,9 @@ private:
         if (!driver_->terminal()) {
             driver_->close(now);
         }
-        pre_ack_payload_.reset();
+        pre_ack_payloads_.clear();
+        pre_ack_payload_bytes_ = 0U;
+        pending_decoded_batch_.reset();
         pending_decode_payload_.reset();
         std::vector<DecodedServiceMessage>{}.swap(accumulated_messages_);
     }
@@ -948,6 +1164,13 @@ private:
         event.byte_count = byte_count;
         event.service_payload_count = service_payload_count_;
         event.transmitted_packet_count = transmitted_packet_count();
+        if (error_) {
+            event.service_message_code = error_->service_message_code;
+            event.wire_opcode = error_->wire_opcode;
+            event.service_error_byte_offset = error_->service_error_byte_offset;
+            event.source_sequence = error_->source_sequence;
+            event.stage_error_code = error_->code;
+        }
         trace_callback_active_ = true;
         try {
             trace_callback_(event);
@@ -970,7 +1193,9 @@ private:
     std::optional<InitialSignonError> error_;
     std::optional<network::NetworkAddress> local_endpoint_;
     std::optional<InitialSignonTimePoint> last_update_;
-    std::optional<OwnedNetchanPayload> pre_ack_payload_;
+    std::vector<OwnedNetchanPayload> pre_ack_payloads_;
+    std::size_t pre_ack_payload_bytes_{0U};
+    std::optional<PendingInitialServiceBatch> pending_decoded_batch_;
     std::optional<OwnedNetchanPayload> pending_decode_payload_;
     std::vector<DecodedServiceMessage> accumulated_messages_;
     std::size_t request_size_{0U};

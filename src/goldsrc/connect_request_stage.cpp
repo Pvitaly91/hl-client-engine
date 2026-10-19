@@ -698,6 +698,7 @@ bool ConnectRequestStage::start(
     const auto protocol_info_size = prepared_request_->protocol_info_wire_size();
     const auto user_info_size = prepared_request_->user_info().value().serialized_size();
     const auto authentication_size = prepared_request_->authentication_size();
+    const auto authentication_suffix_size = prepared_request_->authentication_suffix_size();
     const auto profile = prepared_request_->profile();
 
     state_ = ConnectRequestStageState::building_request;
@@ -745,6 +746,9 @@ bool ConnectRequestStage::start(
             authentication_size,
             "Connect request sent exactly once; server acceptance was not evaluated",
         };
+        event.authentication_suffix_size=authentication_suffix_size;
+        if(built.datagram->size()>authentication_suffix_size)
+            event.authentication_line_delimiter=(*built.datagram)[built.datagram->size()-authentication_suffix_size-1U]==std::byte{0x0a};
         trace_callback_active_ = true;
         try {
             trace_callback_(event);
@@ -1037,6 +1041,10 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 } else {
                     live_runtime_config.resource_response =
                         std::move(resource_response_config);
+                    if (local_resource_environment) {
+                        live_runtime_config.file_consistency_environment =
+                            local_resource_environment;
+                    }
                     apply_live_runtime_compatibility_profile(
                         live_runtime_config);
                     live_runtime_stage_ = std::make_unique<LiveRuntimeStage>(
@@ -1832,11 +1840,22 @@ bool GoldSrcHandshakeCoordinator::request_weapon_selection(
     return live_runtime_stage_ &&
         live_runtime_stage_->request_weapon_selection(weapon_id);
 }
+bool GoldSrcHandshakeCoordinator::request_console_command(
+    const ConsoleServerCommandRequest& request) {
+    return live_runtime_stage_ && live_runtime_stage_->request_console_command(request);
+}
 std::optional<LiveUserCmdCheckState>
 GoldSrcHandshakeCoordinator::live_usercmd_snapshot() const
 {
     return live_runtime_stage_ ? live_runtime_stage_->live_usercmd_snapshot()
                                : std::nullopt;
+}
+std::optional<LiveUserCmdReceiptCounters>
+GoldSrcHandshakeCoordinator::live_usercmd_receipt_counters() const noexcept
+{
+    return live_runtime_stage_
+        ? live_runtime_stage_->live_usercmd_receipt_counters()
+        : std::nullopt;
 }
 std::size_t GoldSrcHandshakeCoordinator::live_use_new_submission_count() const noexcept {
     return live_runtime_stage_ ? live_runtime_stage_->live_use_new_submission_count() : 0U;

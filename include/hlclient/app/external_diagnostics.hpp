@@ -75,6 +75,41 @@ struct ExternalSessionDiagnostics {
         resources.push_back({external_virtual_name(name)?std::string{name}:"rejected_virtual_name",
             external_diagnostic_token(status)?std::string{status}:"rejected_status",index,type});
     }
+    // Only typed numeric metadata and enum labels; never a resource URL or
+    // a byte read from an unvalidated string/body position.
+    void resource_transition_failure(std::string_view code,
+        std::optional<std::size_t> error_offset, std::optional<unsigned> opcode,
+        std::optional<std::uint64_t> sequence) {
+        failure_phase="resource_transition";failure_category="protocol";
+        protocol_code=external_diagnostic_token(code)?std::string{code}:"rejected_diagnostic";
+        protocol_field="resource_transition_control";protocol_byte_offset=error_offset;
+        wire_opcode=opcode;source_sequence=sequence;
+    }
+    // Numeric decoder cursor only, never payload previews or server text.
+    void initial_service_failure(std::string_view code,
+        std::optional<std::size_t> error_offset, std::optional<unsigned> opcode,
+        std::optional<std::uint64_t> sequence) {
+        failure_phase="initial_signon";failure_category="protocol";
+        protocol_code=external_diagnostic_token(code)?std::string{code}:"rejected_diagnostic";
+        protocol_field="service_message";protocol_byte_offset=error_offset;
+        wire_opcode=opcode;source_sequence=sequence;
+    }
+    // A local bounded-consumer/state limit is not a remote protocol-parser
+    // failure. Preserve the actual owner through cascading stage wrappers.
+    void initial_capacity_failure(std::string_view code,
+        std::optional<std::size_t> error_offset, std::optional<unsigned> opcode,
+        std::optional<std::uint64_t> sequence) {
+        initial_service_failure(code,error_offset,opcode,sequence);
+        failure_category="capacity";protocol_field="event_or_retained_state";
+    }
+    // Numeric decoder cursor only, never payload previews or server text.
+    // Preserve the outer runtime_record_failed reason and wire provenance.
+    void runtime_control_failure(std::string_view code,
+        std::optional<std::size_t> message_offset) {
+        failure_phase="runtime_control";failure_category="protocol";
+        protocol_code=external_diagnostic_token(code)?std::string{code}:"rejected_diagnostic";
+        protocol_field="service_message";protocol_byte_offset=message_offset;
+    }
     [[nodiscard]] std::string encode(const SessionReceiptIdentity& identity) const {
         const auto quote=[](std::string_view token){return core::external_json_string(
             external_diagnostic_token(token)?token:std::string_view{"rejected_diagnostic"});};

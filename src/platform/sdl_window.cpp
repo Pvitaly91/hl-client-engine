@@ -1,6 +1,7 @@
 #include <hlclient/platform/sdl_window.hpp>
 
 #include <hlclient/input/input_state_tracker.hpp>
+#include <hlclient/core/multiplayer_diagnostics.hpp>
 
 #include "sdl_platform_event_translator.hpp"
 
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cmath>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -21,10 +23,13 @@ namespace hlclient::platform {
 namespace {
 
 std::atomic_bool sdl_event_pump_claimed{false};
+std::atomic<std::uint64_t> next_video_revision{1U};
 
 [[nodiscard]] std::optional<SDL_WindowID> event_window_id(
     const SDL_Event& event) noexcept
 {
+    if (event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST)
+        return event.window.windowID;
     switch (event.type) {
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -34,6 +39,8 @@ std::atomic_bool sdl_event_pump_claimed{false};
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP:
         return event.key.windowID;
+    case SDL_EVENT_TEXT_INPUT:
+        return event.text.windowID;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
         return event.button.windowID;
@@ -221,6 +228,7 @@ struct SdlWindow::Impl final {
     ~Impl() noexcept
     {
         if (window != nullptr) {
+            (void)SDL_StopTextInput(window);
             (void)SDL_SetWindowRelativeMouseMode(window, false);
             (void)SDL_ShowCursor();
         }
@@ -248,9 +256,17 @@ struct SdlWindow::Impl final {
     std::size_t native_events_in_current_drain{0U};
     bool native_event_pump_terminal{false};
     bool escape_input_owned{false};
+    bool input_diagnostic_clocks{false};
+    bool text_input_requested{false};
+    bool suppress_toggle_text{false};
     core::VideoSettings requested_video;
     bool safe_window_recovery{};
     std::string video_recovery_reason;
+    mutable std::optional<VideoWindowState> cached_video;
+    // A replacement window/context never aliases the previous cache identity,
+    // including console reconnect in the same application process.
+    std::uint64_t video_revision{next_video_revision.fetch_add(1U,std::memory_order_relaxed)};
+    mutable std::uint64_t video_refresh_count{};
     detail::SdlPlatformEventTranslator translator{};
 
     [[nodiscard]] bool pending_event_available() const noexcept
@@ -482,6 +498,8 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
 
     SDL_Event native_event{};
     while (SDL_PollEvent(&native_event)) {
+        const auto diagnostic_dequeue_ns=implementation_->input_diagnostic_clocks
+            ? core::multiplayer_diagnostic_now_ns() : 0U;
         if (implementation_->native_events_in_current_drain >=
             input::InputStateLimits::hard_maximum_events_per_frame) {
             implementation_->native_event_pump_terminal = true;
@@ -501,18 +519,52 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
             return true;
         }
         ++implementation_->native_events_in_current_drain;
+        const auto stamp_input=[&](PlatformEvent& value) noexcept {
+            if(implementation_->input_diagnostic_clocks)
+                if(auto* input=std::get_if<input::InputEvent>(&value))
+                    input->set_observation_clocks(native_event.common.timestamp,
+                        diagnostic_dequeue_ns);
+        };
         const auto native_window_id = event_window_id(native_event);
         if (native_window_id &&
             *native_window_id != implementation_->window_id) {
             continue;
         }
+        // Invalidation is owned by the sole SDL event pump. Input/motion does
+        // not trigger display enumeration or GL metadata queries. Context is
+        // immutable for this window's lifetime; reset events invalidate too.
+        if ((native_event.type >= SDL_EVENT_DISPLAY_FIRST &&
+             native_event.type <= SDL_EVENT_DISPLAY_LAST) ||
+            native_event.type == SDL_EVENT_WINDOW_MOVED ||
+            native_event.type == SDL_EVENT_WINDOW_RESIZED ||
+            native_event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+            native_event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED ||
+            native_event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED ||
+            native_event.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ||
+            native_event.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN ||
+            native_event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+            native_event.type == SDL_EVENT_WINDOW_MAXIMIZED ||
+            native_event.type == SDL_EVENT_WINDOW_RESTORED ||
+            native_event.type == SDL_EVENT_RENDER_TARGETS_RESET ||
+            native_event.type == SDL_EVENT_RENDER_DEVICE_RESET) {
+            implementation_->video_revision=next_video_revision.fetch_add(1U,std::memory_order_relaxed);
+            implementation_->cached_video.reset();
+        }
         implementation_->refresh_capture_state();
+        if(native_event.type==SDL_EVENT_KEY_DOWN) {
+            implementation_->suppress_toggle_text =
+                native_event.key.scancode==SDL_SCANCODE_GRAVE;
+        }
+        if(native_event.type==SDL_EVENT_TEXT_INPUT&&
+           (!implementation_->text_input_requested||implementation_->suppress_toggle_text||
+            implementation_->focus_state!=input::InputFocusState::focused))continue;
         if (native_event.type == SDL_EVENT_KEY_DOWN &&
             native_event.key.scancode == SDL_SCANCODE_ESCAPE &&
             !native_event.key.repeat) {
             if (implementation_->escape_input_owned) {
                 if (const auto translated = implementation_->translator.translate(native_event)) {
                     event = *translated;
+                    stamp_input(event);
                     return true;
                 }
                 continue;
@@ -529,6 +581,7 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
                 }
                 if (translated) {
                     event = *translated;
+                    stamp_input(event);
                     return true;
                 }
                 continue;
@@ -539,6 +592,7 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
 
         if (native_event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
             implementation_->focus_state = input::InputFocusState::focused;
+            if(implementation_->text_input_requested)(void)SDL_StartTextInput(implementation_->window);
             if (implementation_->capture_state ==
                     input::InputCaptureState::captured &&
                 !implementation_->try_release_capture_and_show_cursor()) {
@@ -546,6 +600,7 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
             }
         } else if (native_event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
             implementation_->focus_state = input::InputFocusState::unfocused;
+            (void)SDL_StopTextInput(implementation_->window);
             if (!implementation_->try_release_capture_and_show_cursor()) {
                 implementation_->queue_capture_recovery_failure();
             }
@@ -554,6 +609,7 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
         const auto translated = implementation_->translator.translate(native_event);
         if (translated) {
             event = *translated;
+            stamp_input(event);
             return true;
         }
     }
@@ -563,6 +619,31 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
 
 void SdlWindow::set_escape_input_owned(const bool owned) noexcept {
     implementation_->escape_input_owned = owned;
+}
+void SdlWindow::set_input_diagnostic_clocks(const bool enabled) noexcept {
+    implementation_->input_diagnostic_clocks=enabled;
+}
+
+bool SdlWindow::set_text_input_enabled(const bool enabled) noexcept {
+    if(enabled==implementation_->text_input_requested)return true;
+    const bool success=enabled
+        ? SDL_StartTextInput(implementation_->window):SDL_StopTextInput(implementation_->window);
+    if(success)implementation_->text_input_requested=enabled;
+    return success;
+}
+bool SdlWindow::text_input_enabled() const noexcept {return implementation_->text_input_requested;}
+std::string SdlWindow::clipboard_text(const std::size_t maximum_bytes) const {
+    char* value=SDL_GetClipboardText();
+    if(!value)return {};
+    struct Release {char* value;~Release(){SDL_free(value);}} release{value};
+    const auto limit=std::min<std::size_t>(maximum_bytes,32768U);
+    std::size_t count{};while(count<limit&&value[count])++count;
+    if(value[count])while(count>0&&(static_cast<unsigned char>(value[count])&0xc0U)==0x80U)--count;
+    return {value,count};
+}
+bool SdlWindow::set_clipboard_text(const std::string_view text) const {
+    if(text.size()>32768U||text.find('\0')!=std::string_view::npos)return false;
+    const std::string owned{text};return SDL_SetClipboardText(owned.c_str());
 }
 
 bool SdlWindow::poll_event(WindowEvent& event) noexcept
@@ -792,6 +873,7 @@ std::vector<VideoDisplay> enumerate_video_displays()
 
 VideoWindowState SdlWindow::video_state() const
 {
+    ++implementation_->video_refresh_count;
     VideoWindowState state;
     state.requested = implementation_->requested_video;
     state.safe_window_recovery = implementation_->safe_window_recovery;
@@ -818,7 +900,29 @@ VideoWindowState SdlWindow::video_state() const
         state.actual_mode = SDL_GetWindowFullscreenMode(implementation_->window) != nullptr
             ? core::VideoWindowMode::exclusive : core::VideoWindowMode::borderless;
     state.vsync = implementation_->vsync;
+    if (const auto* mode = SDL_GetCurrentDisplayMode(display);
+        mode && std::isfinite(mode->refresh_rate) && mode->refresh_rate > 0.0F)
+        state.display_refresh_hz = mode->refresh_rate;
+    int interval{};
+    if (SDL_GL_GetSwapInterval(&interval)) state.actual_swap_interval = interval;
     return state;
+}
+
+const VideoWindowState& SdlWindow::cached_video_state() const
+{
+    if (!implementation_->cached_video)
+        implementation_->cached_video = video_state();
+    return *implementation_->cached_video;
+}
+
+std::uint64_t SdlWindow::video_state_revision() const noexcept
+{
+    return implementation_->video_revision;
+}
+
+std::uint64_t SdlWindow::video_state_refresh_count() const noexcept
+{
+    return implementation_->video_refresh_count;
 }
 
 void SdlWindow::swap_buffers()

@@ -173,6 +173,10 @@ relabel this E4.1 light/visible-casing confirmation as an audio confirmation.
 
 ## Original muzzle sprite presentation corrective (2026-10-15)
 
+Later size/framing correction: [stock viewmodel/muzzle projection](STOCK_VIEWMODEL_MUZZLE_PROJECTION.md)
+retains the source scales below, fixes wide-screen projection and applies the
+same held-origin translation to geometry and sockets (2026-10-17).
+
 The normal local and remote firearm presentation now uses the installed HL
 additive SPR pixels, instead of the historical generated orange quad above.
 The existing accepted-action/Studio-marker gate, current evaluated attachment,

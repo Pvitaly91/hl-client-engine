@@ -34,6 +34,14 @@ std::span<const game_api::HudManifestRequest> halflife_hud_resource_preparation(
         out.reserve(15U);
         out.push_back({"sprites/hud.txt", game_api::HudManifestCountCompatibility{
             "E7922C3D3ED2EC59614E032D1C5A8194AA4ABED7713193191EE1E68A2FF39EF5", 257U, 247U}});
+        // Original health.cpp loads these full-frame sprites outside hud.txt.
+        // Requests remain game-owned; the common approved loader owns IO.
+        constexpr std::array<std::string_view,4> pain_roles{
+            "pain_front","pain_right","pain_rear","pain_left"};
+        for(const auto resolution:{320U,640U,1280U,2560U})
+            for(std::uint32_t frame=0;frame<pain_roles.size();++frame)
+                out.front().supplemental_sprites.push_back({std::string{pain_roles[frame]},
+                    resolution,"sprites/"+std::to_string(resolution)+"_pain.spr",frame});
         for (const auto& [command, descriptor] : descriptions) {
             (void)command; out.push_back({std::string{descriptor}, std::nullopt});
         }

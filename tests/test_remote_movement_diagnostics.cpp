@@ -89,6 +89,28 @@ TEST_CASE("E32 remote displacement events preserve exact consecutive frames and 
     REQUIRE(recorder.observe(remote_frame(5,41000),observed));CHECK(recorder.statistics().retained_events==3);
     CHECK(recorder.encode().find("observations_not_root_cause_proof")!=std::string::npos);
 }
+TEST_CASE("Remote F8 observations preserve authoritative render changes separately from rendered opacity",
+    "[e32-remote-recorder][movement-diagnostics][studio-translucency]") {
+    Recorder recorder{true};std::array observed{actor(1,0)};
+    observed[0].raw_render_mode=0U;observed[0].raw_render_amount=255U;observed[0].raw_render_effect=0U;
+    observed[0].rendered_opacity=1.0;
+    REQUIRE(recorder.observe(remote_frame(1,1000),observed));
+    observed[0].raw_render_mode=2U;observed[0].raw_render_amount=64U;observed[0].rendered_opacity=64.0/255.0;
+    REQUIRE(recorder.observe(remote_frame(2,11000),observed));
+    REQUIRE(recorder.mark_manual(11000));
+    const auto encoded=recorder.encode();
+    const auto event=array_element(member(encoded,"events"),1);
+    CHECK(count(event,"trigger_mask")==256U);
+    const auto state=member(event,"current");
+    CHECK(member(state,"raw_render_mode")=="2");CHECK(member(state,"raw_render_amount")=="64");
+    CHECK(member(state,"raw_render_effect")=="0");
+    CHECK(member(state,"rendered_opacity")!="null");
+    observed[0].rendered_opacity=std::numeric_limits<double>::quiet_NaN();
+    REQUIRE(recorder.observe(remote_frame(3,211000),observed));
+    CHECK(recorder.statistics().invalid_values==1U);
+    CHECK(recorder.encode().find("NaN")==std::string::npos);
+    CHECK(recorder.capacity_bytes()<=Recorder::maximum_capacity_bytes);
+}
 TEST_CASE("E32 remote diagnostics reject duplicates and unordered frames sanitize values and never invent disappearance from malformed input",
     "[e32-remote-recorder][movement-diagnostics][app][core]"){
     Recorder recorder{true};std::array observed{actor(1,0),actor(2,10)};REQUIRE(recorder.observe(remote_frame(1,1000),observed));
@@ -117,28 +139,29 @@ TEST_CASE("E32 remote disappearance reentry generation and lifetime boundaries r
     CHECK(count(array_element(member(encoded,"actors"),0),"comparisons")==0);
 }
 TEST_CASE("E32 remote recording stays bounded in long sessions and manual capture survives local automatic exhaustion",
-    "[e32-remote-recorder][movement-diagnostics][app][core]"){
+    "[b080][e32-remote-recorder][movement-diagnostics][app][core]"){
     app::MovementIncidentRecorder recorder{true};std::array<app::RemoteMovementObservation,32> observed;
     for(std::size_t i=0;i<observed.size();++i)observed[i]=actor(static_cast<std::uint32_t>(i+1),static_cast<double>(i));
     for(std::uint64_t n=1;n<=80;++n){auto frame=remote_frame(n,n*3'000'000);frame.frame_interval_ms=60;
         REQUIRE(recorder.observe(frame));for(auto& value:observed){value.presentation.decision=n%2?visual::PlayerPresentationDecision::held_floor:visual::PlayerPresentationDecision::interpolated;}
         REQUIRE(recorder.observe_remote(frame,observed));}
-    CHECK(recorder.statistics().incident_limit_drops+recorder.statistics().manual_reservation_suppressions>0);
-    REQUIRE(recorder.mark(app::MovementIncidentTrigger::manual,240'000'000));
-    for(std::uint64_t n=81;n<=400;++n){auto frame=remote_frame(n,240'000'000+(n-80)*200'000);REQUIRE(recorder.observe(frame));REQUIRE(recorder.observe_remote(frame,observed));}
-    REQUIRE(recorder.mark(app::MovementIncidentTrigger::manual,304'000'000));
-    auto saturated_frame=remote_frame(401,305'000'000);REQUIRE(recorder.observe(saturated_frame));REQUIRE(recorder.observe_remote(saturated_frame,observed));
-    CHECK_FALSE(recorder.mark(app::MovementIncidentTrigger::manual,306'000'000));
+    CHECK(recorder.statistics().priority_replacements==74);
+    auto manual_frame=remote_frame(81,240'500'000);REQUIRE(recorder.observe(manual_frame));REQUIRE(recorder.observe_remote(manual_frame,observed));
+    REQUIRE(recorder.mark(app::MovementIncidentTrigger::manual,240'500'000));
+    for(std::uint64_t n=82;n<=401;++n){auto frame=remote_frame(n,240'500'000+(n-81)*200'000);REQUIRE(recorder.observe(frame));REQUIRE(recorder.observe_remote(frame,observed));}
+    REQUIRE(recorder.mark(app::MovementIncidentTrigger::manual,304'500'000));
+    auto saturated_frame=remote_frame(402,305'500'000);REQUIRE(recorder.observe(saturated_frame));REQUIRE(recorder.observe_remote(saturated_frame,observed));
+    CHECK_FALSE(recorder.mark(app::MovementIncidentTrigger::manual,306'500'000));
     const auto encoded=recorder.encode(identity);REQUIRE(encoded);CHECK(encoded->size()<=app::MovementIncidentRecorder::maximum_encoded_bytes);
     const auto remote=member(*encoded,"remote_players");CHECK(member(remote,"availability")=="\"ready\"");
     const auto stats=member(remote,"statistics");CHECK(count(stats,"retained_samples")<=640);CHECK(count(stats,"retained_events")<=128);
     CHECK(count(stats,"event_capacity_drops")>0);CHECK(count(stats,"retention_evictions")>0);CHECK(count(stats,"manual_captures")==2);
-    const auto captured=array_element(member(remote,"manual_captures"),1);CHECK(count(captured,"marker_us")==306'000'000);
-    CHECK(member(captured,"samples").find("\"monotonic_us\":305000000")!=std::string_view::npos);
+    const auto captured=array_element(member(remote,"manual_captures"),1);CHECK(count(captured,"marker_us")==306'500'000);
+    CHECK(member(captured,"samples").find("\"monotonic_us\":305500000")!=std::string_view::npos);
     CHECK(recorder.statistics().incidents==8);CHECK(recorder.statistics().incident_limit_drops>0);
     const auto capacity=recorder.statistics();CHECK(capacity.allocated_capacity_bytes<=app::MovementIncidentRecorder::maximum_capacity_bytes);
     CHECK(capacity.remote_capacity_bytes<=Recorder::maximum_capacity_bytes);CHECK(capacity.remote_capacity_bytes>0);
-    CHECK(capacity.total_capacity_bytes==capacity.allocated_capacity_bytes+capacity.session_capacity_bytes+capacity.remote_capacity_bytes);
+    CHECK(capacity.total_capacity_bytes==capacity.allocated_capacity_bytes+capacity.session_capacity_bytes+capacity.remote_capacity_bytes+capacity.multiplayer_capacity_bytes);
 }
 TEST_CASE("E32 remote diagnostics disabled and constrained report budget stay explicit and preserve existing local output",
     "[e32-remote-recorder][movement-diagnostics][app][core]"){
@@ -173,7 +196,7 @@ TEST_CASE("E32 healthy remote endpoint alternation cannot evict a real displacem
     CHECK(member(encoded,"availability")=="\"ready\"");
 }
 TEST_CASE("E32 near report byte limit retains local session summaries and explicit remote availability instead of dropping the report",
-    "[e32-remote-recorder][movement-diagnostics][app][core]"){
+    "[b080][e32-remote-recorder][movement-diagnostics][app][core]"){
     app::MovementIncidentRecorder recorder{true};auto prototype=remote_frame(1,1'000'000'000'000'000);
     for(auto* number:{&prototype.frame_interval_ms,&prototype.cpu_update_ms,&prototype.network_ms,&prototype.parse_commit_ms,&prototype.prediction_ms,
         &prototype.collision_ms,&prototype.studio_ms,&prototype.asset_ms,&prototype.render_ms,&prototype.present_ms,&prototype.report_ms,&prototype.gpu_ms,
@@ -197,19 +220,47 @@ TEST_CASE("E32 near report byte limit retains local session summaries and explic
     prototype.set_remote_sample_mode(std::string(31,'c'));prototype.set_blocker_kind(std::string(31,'d'));
     prototype.set_collision_query_purpose(std::string(23,'e'));prototype.set_authoritative_body_kind(std::string(23,'f'));prototype.set_presentation_reason(std::string(39,'g'));
     std::uint64_t number{},time=prototype.monotonic_us;
+    const auto observe_dense_frame=[&] {
+        prototype.frame_number=++number;prototype.monotonic_us=(time+=1000);prototype.frame_interval_ms=55.;
+        for(auto* stamp:{&prototype.socket_read_begin_us,&prototype.socket_read_us,&prototype.network_poll_begin_us,&prototype.network_poll_end_us,
+            &prototype.parse_begin_us,&prototype.commit_us,&prototype.receipt_observed_us,&prototype.prediction_use_us,&prototype.presentation_use_us,&prototype.support_observation_us})*stamp=time;
+        prototype.command=app::MovementDiagnosticCommand{time,4'294'967'000U,{65000,65001,65002},{32760,-32760,32759},65000,255};
+        REQUIRE(recorder.observe(prototype));
+    };
     for(unsigned incident=0;incident<8;++incident){
         prototype.frame_number=++number;prototype.monotonic_us=++time;REQUIRE(recorder.observe(prototype));
         REQUIRE(recorder.mark(app::MovementIncidentTrigger::manual,time));
-        for(unsigned step=0;step<2100;++step){prototype.frame_number=++number;prototype.monotonic_us=(time+=1000);
-            for(auto* stamp:{&prototype.socket_read_begin_us,&prototype.socket_read_us,&prototype.network_poll_begin_us,&prototype.network_poll_end_us,
-                &prototype.parse_begin_us,&prototype.commit_us,&prototype.receipt_observed_us,&prototype.prediction_use_us,&prototype.presentation_use_us,&prototype.support_observation_us})*stamp=time;
-            prototype.command=app::MovementDiagnosticCommand{time,4'294'967'000U,{65000,65001,65002},{32760,-32760,32759},65000,255};
-            REQUIRE(recorder.observe(prototype));}}
+        // Distinct markers precede automatic cooldown expiry, so all eight
+        // manual windows exist before exact stall witnesses fill their buffers.
+        for(unsigned step=0;step<260;++step)observe_dense_frame();}
+    for(unsigned step=0;step<2100;++step)observe_dense_frame();
     std::array observed{actor(1,0)};REQUIRE(recorder.observe_remote(prototype,observed));
+    const auto statistics=recorder.statistics();
+    CHECK(statistics.accepted_frames==number);
+    CHECK(statistics.retained_frames==app::MovementIncidentRecorder::maximum_recent_frames);
+    // 480 is a hard upper bound, not a promise to allocate beyond the unchanged
+    // 8 MiB pool when the record gains fields. Every incident must still fill
+    // its entire budget-derived capacity and account for omitted detail.
+    constexpr auto available_frames=(app::MovementIncidentRecorder::maximum_capacity_bytes-
+        app::MovementIncidentRecorder::reserved_non_incident_capacity_bytes)/
+        app::MovementIncidentRecorder::maximum_incidents/sizeof(app::MovementFrameRecord);
+    constexpr auto expected_capacity=std::min(app::MovementIncidentRecorder::maximum_incident_frames,available_frames);
+    CHECK(app::MovementIncidentRecorder::maximum_capacity_bytes==8U*1024U*1024U);
+    CHECK(app::MovementIncidentRecorder::incident_frame_capacity==expected_capacity);
+    REQUIRE(expected_capacity>0U);
+    for(const auto& incident:recorder.incidents()) {
+        CHECK(incident.frames.size()==expected_capacity);
+        CHECK(incident.omitted_samples>0U);
+    }
+    CHECK(statistics.exact_samples_omitted>0U);
     const auto encoded=recorder.encode(identity);REQUIRE(encoded);CHECK(encoded->size()<=app::MovementIncidentRecorder::maximum_encoded_bytes);
+    const auto limits=member(*encoded,"limits");
+    CHECK(count(limits,"incident_frame_capacity")==expected_capacity);
+    CHECK(count(limits,"incident_frames")==app::MovementIncidentRecorder::maximum_incident_frames);
+    CHECK(statistics.total_capacity_bytes<=count(limits,"maximum_total_capacity_bytes"));
     CHECK(count(*encoded,"encoded_local_frames_omitted")>0);CHECK_FALSE(member(*encoded,"session_summary").empty());CHECK_FALSE(member(*encoded,"incidents").empty());
     CHECK_FALSE(member(*encoded,"remote_players").empty());CHECK(recorder.statistics().incidents==8);
-    CHECK(recorder.statistics().allocated_capacity_bytes<=app::MovementIncidentRecorder::maximum_capacity_bytes);
+    CHECK(statistics.allocated_capacity_bytes<=app::MovementIncidentRecorder::maximum_capacity_bytes);
 }
 TEST_CASE("E32 full 32 actor recent events and two manual windows remain ready within both hard bounds",
     "[e32-remote-recorder][movement-diagnostics][app][core]"){

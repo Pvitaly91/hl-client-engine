@@ -56,6 +56,8 @@ struct StudioRenderPose {
     std::vector<std::array<float, 16U>> bone_matrices;
 };
 
+enum class StudioBlendMode : std::uint8_t { opaque, alpha_blended, additive };
+
 struct StudioEntityRenderInstance {
     std::uint32_t entity_number{0U};
     std::uint32_t studio_asset_index{0U};
@@ -74,6 +76,10 @@ struct StudioEntityRenderInstance {
     // Draw identity within the original server entity: 0 primary, 1 attached.
     // Attached candidates require a primary Studio owner, never a fake entity.
     std::uint32_t subinstance_ordinal{};
+    // Neutral compositing; protocol render modes are translated upstream.
+    StudioBlendMode blend_mode{StudioBlendMode::opaque};
+    float opacity{1.0F};
+    std::array<float, 3U> tint{1.0F, 1.0F, 1.0F};
 };
 
 enum class SpriteBlendMode : std::uint8_t {

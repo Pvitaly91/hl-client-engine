@@ -67,6 +67,7 @@ void LocalWeaponPresentationController::submit_satchel(const LocalWeaponSubmitte
             std::numeric_limits<double>::max(),false,false);
         if(!action_) return;
         action_->identity.model_index=model_->model_index;
+        diagnostic_action(core::MultiplayerActionPhase::accepted);
         satchel_.charge_ready=2;satchel_.detonation_time=at;++satchel_.detonations;
         satchel_idle_ready_at_=at+.5;
         satchel_primary_ready_at_=satchel_secondary_ready_at_=at+.5;
@@ -82,6 +83,7 @@ void LocalWeaponPresentationController::submit_satchel(const LocalWeaponSubmitte
         std::numeric_limits<double>::max(),false,false);
     if(!action_) return;
     action_->identity.model_index=model_->model_index;
+    diagnostic_action(core::MultiplayerActionPhase::accepted);
     *receipt=SatchelReceipt{action_->identity,action_->pre_record_ordinal,true};
     ++satchel_.reserved_ammo;++satchel_.throws;satchel_.charge_ready=1;
     satchel_.last_throw_context=command.shot_context;

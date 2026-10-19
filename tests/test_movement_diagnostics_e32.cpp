@@ -20,6 +20,22 @@ app::MovementFrameRecord frame(std::uint64_t number,std::uint64_t time) {
     value.prediction_active=true;return value;
 }
 const app::SessionReceiptIdentity identity{"0123456789abcdef0123456789abcdef",app::SessionReceiptRole::A,123,456};
+app::MovementVelocityStopRecord selected_stop(std::uint64_t ordinal=1U) {
+    app::MovementVelocityStopRecord value;
+    value.capture_ordinal=ordinal;value.observed_us=990'000;value.command_sample_us=980'000;
+    value.network_generation=3;value.map_generation=5;value.life_epoch=2;value.query_world_revision=7;
+    value.command_sequence=1289;value.command_msec=20;
+    value.simulation_start_ns=1'000'000'000;value.simulation_end_ns=1'020'000'000;
+    value.source_record_identity=702;value.source_sequence=717;value.scene_record_identity=702;
+    value.scene_revision=702;value.source_server_time_s=1.;value.scene_server_time_s=1.;
+    value.source_matches_scene=true;value.replay=true;value.predecessor_decision=2;
+    value.history_anchor_command=1288;value.history_latest_command=1289;
+    value.before_origin={1,2,36};value.after_origin={1,2.125F,36};
+    value.before_velocity={0,320,0};value.query_start=value.before_origin;value.query_end={1,8.4F,36};
+    value.trace_end=value.after_origin;value.trace_fraction=.02;value.in_open=true;
+    value.hit_kind=0;value.hit_model=0;value.hit_plane=app::MovementStopPlane{{0,-1,0},-2.125,19};
+    value.clip_planes[0]=*value.hit_plane;value.clip_plane_count=1;return value;
+}
 void export_session_fixture(const std::string& text) {
     std::string path;
 #ifdef _MSC_VER
@@ -34,6 +50,80 @@ void export_session_fixture(const std::string& text) {
     std::ofstream output(path,std::ios::binary);REQUIRE(output.good());
     output<<text;output.close();REQUIRE(output.good());
 }
+}
+TEST_CASE("Selected slide stop evidence owns its query and deduplicates sticky snapshots",
+    "[e32][movement-diagnostics][velocity-stop][core][app]") {
+    Recorder recorder{true};const auto observed=frame(11,1'000'000);REQUIRE(recorder.observe(observed));
+    auto stop=selected_stop();REQUIRE(recorder.observe_velocity_stop(observed,stop));
+    CHECK_FALSE(recorder.observe_velocity_stop(observed,stop));
+    stop.before_velocity={999,999,999};stop.hit_plane->normal={1,0,0};stop.clip_planes[0].source_index=777;
+    const auto output=recorder.encode(identity);REQUIRE(output);
+    CHECK(output->find("\"selected_slide_velocity_stops\":[{\"capture_ordinal\":1")!=output->npos);
+    CHECK(output->find("\"before_velocity\":[0,320,0]")!=output->npos);
+    CHECK(output->find("\"after_velocity\":[0,0,0]")!=output->npos);
+    CHECK(output->find("\"query_purpose\":\"selected_slide\"")!=output->npos);
+    CHECK(output->find("\"history_anchor_command\":1288")!=output->npos);
+    CHECK(output->find("\"history_latest_command\":1289")!=output->npos);
+    CHECK(output->find("\"predecessor_reason\":\"no_active_support\"")!=output->npos);
+    CHECK(output->find("\"source_sequence\":717")!=output->npos);
+    CHECK(output->find("\"hit_plane\":{\"normal\":[0,-1,0],\"distance\":-2.125,\"source_index\":19}")!=output->npos);
+    CHECK(output->find("nested_query_walltime")!=output->npos);
+    CHECK(output->find("[999,999,999]")==output->npos);
+    CHECK(recorder.statistics().velocity_stops==1);CHECK(recorder.statistics().velocity_stop_duplicates==1);
+    CHECK(output->size()<=Recorder::maximum_encoded_bytes);
+}
+TEST_CASE("Absent selected slide evidence adds no zero-valued report section",
+    "[e32][movement-diagnostics][velocity-stop][core][app]") {
+    Recorder disabled;
+    const auto output=disabled.encode(identity);REQUIRE(output);
+    CHECK(output->size()<4096);
+    CHECK(output->find("selected_slide_velocity_stops")==output->npos);
+    CHECK(output->find("velocity_stop_duplicates")==output->npos);
+    CHECK(output->find("velocity_stop_evictions")==output->npos);
+    CHECK(output->find("velocity_stop_invalid")==output->npos);
+    Recorder enabled{true};REQUIRE(enabled.observe(frame(1,1'000'000)));
+    const auto ordinary=enabled.encode(identity);REQUIRE(ordinary);
+    CHECK(ordinary->find("selected_slide_velocity_stops")==ordinary->npos);
+}
+TEST_CASE("Selected slide stop pool keeps the latest bounded events without enlarging the byte budget",
+    "[e32][movement-diagnostics][velocity-stop][core][app]") {
+    Recorder recorder{true};const auto observed=frame(1,1'000'000);REQUIRE(recorder.observe(observed));
+    for(std::size_t i=1;i<=Recorder::maximum_velocity_stops;++i)
+        REQUIRE(recorder.observe_velocity_stop(observed,selected_stop(i)));
+    const auto excess=selected_stop(Recorder::maximum_velocity_stops+1U);
+    REQUIRE(recorder.observe_velocity_stop(observed,excess));
+    CHECK_FALSE(recorder.observe_velocity_stop(observed,excess));
+    const auto stats=recorder.statistics();CHECK(stats.velocity_stops==Recorder::maximum_velocity_stops);CHECK(stats.velocity_stop_evictions==1);
+    CHECK(stats.velocity_stop_duplicates==1);CHECK(stats.allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
+    CHECK(Recorder::maximum_recent_frames==961);CHECK(Recorder::maximum_incident_frames==480);
+    const auto output=recorder.encode(identity);REQUIRE(output);CHECK(output->size()<=Recorder::maximum_encoded_bytes);
+    CHECK(output->find("\"selected_slide_velocity_stops\":[{\"capture_ordinal\":2")!=output->npos);
+    CHECK(output->find("\"capture_ordinal\":17")!=output->npos);
+    std::cout<<"[selected-slide-stop-bound] record_bytes="<<sizeof(app::MovementVelocityStopRecord)
+        <<" reserved_pool_bytes="<<sizeof(app::MovementVelocityStopRecord)*Recorder::maximum_velocity_stops
+        <<" retained_capacity_bytes="<<stats.allocated_capacity_bytes<<'\n';
+}
+TEST_CASE("Selected slide stop diagnostics reject invalid or nonzero successors and are absent when off",
+    "[e32][movement-diagnostics][velocity-stop][core][app]") {
+    const auto observed=frame(1,1'000'000);auto stop=selected_stop();Recorder disabled;
+    CHECK_FALSE(disabled.observe_velocity_stop(observed,stop));CHECK(disabled.statistics().allocated_capacity_bytes==0);
+    Recorder recorder{true};REQUIRE(recorder.observe(observed));
+    stop.before_velocity[0]=std::numeric_limits<float>::quiet_NaN();
+    CHECK_FALSE(recorder.observe_velocity_stop(observed,stop));
+    stop=selected_stop(2);stop.after_velocity={0,1,0};CHECK_FALSE(recorder.observe_velocity_stop(observed,stop));
+    stop=selected_stop(3);stop.observed_us=1'000'001;CHECK_FALSE(recorder.observe_velocity_stop(observed,stop));
+    stop=selected_stop(4);stop.clip_plane_count=6;CHECK_FALSE(recorder.observe_velocity_stop(observed,stop));
+    stop=selected_stop(5);stop.simulation_end_ns=stop.simulation_start_ns;
+    CHECK_FALSE(recorder.observe_velocity_stop(observed,stop));
+    stop=selected_stop(6);stop.map_generation=6;CHECK_FALSE(recorder.observe_velocity_stop(observed,stop));
+    CHECK(recorder.statistics().velocity_stop_invalid==6);CHECK(recorder.statistics().velocity_stops==0);
+    CHECK(recorder.recent_frame(0)->prediction_active==true);
+    const auto output=recorder.encode(identity);REQUIRE(output);
+    CHECK(output->find("\"selected_slide_velocity_stops\":[]")!=output->npos);
+    stop=selected_stop(7);stop.observed_us.reset();stop.command_sample_us.reset();
+    REQUIRE(recorder.observe_velocity_stop(observed,stop));
+    const auto unknown_clock=recorder.encode(identity);REQUIRE(unknown_clock);
+    CHECK(unknown_clock->find("\"observed_us\":null")!=unknown_clock->npos);
 }
 TEST_CASE("E32.1 causal recorder keeps wire command matched correction and camera rotation separate",
     "[e321][movement-diagnostics][core][app]") {
@@ -78,6 +168,88 @@ TEST_CASE("E32.1 causal recorder keeps wire command matched correction and camer
     CHECK(recorder.statistics().invalid_values==2);
     CHECK(recorder.statistics().allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
 }
+TEST_CASE("Alive-life recovery diagnostics preserve candidate and accepted anchors separately",
+    "[e3c-life-wait][movement-diagnostics][core][app]") {
+    Recorder recorder{true};auto value=frame(1,1'000'000);
+    value.prediction_active=false;
+    value.anchor_command=40U;value.candidate_anchor_command=42U;
+    value.fallback_duration_ms=2'000.0;
+    value.life_wait_started_us=980'000U;value.life_wait_duration_ms=20.0;
+    value.set_recovery_wait_reason("carrier_before_life_floor");
+    REQUIRE(recorder.observe(value));
+    const auto* retained=recorder.recent_frame(0);REQUIRE(retained);
+    CHECK(retained->anchor_command==40U);CHECK(retained->candidate_anchor_command==42U);
+    CHECK(retained->life_wait_duration_ms==20.0);CHECK(retained->fallback_duration_ms==2'000.0);
+    CHECK_FALSE(retained->prediction_active.value_or(true));
+    value.candidate_anchor_command=999U;value.set_recovery_wait_reason("none");
+    const auto output=recorder.encode(identity);REQUIRE(output);
+    CHECK(output->find("\"anchor_command\":40")!=output->npos);
+    CHECK(output->find("\"candidate_anchor_command\":42")!=output->npos);
+    CHECK(output->find("\"candidate_anchor_command\":999")==output->npos);
+    CHECK(output->find("\"life_wait_started_us\":980000")!=output->npos);
+    CHECK(output->find("\"life_wait_duration_ms\":20")!=output->npos);
+    CHECK(output->find("\"recovery_wait_reason\":\"carrier_before_life_floor\"")!=output->npos);
+    CHECK(output->find("\"fallback_duration\":2000")!=output->npos);
+    CHECK(recorder.statistics().invalid_values==0U);
+}
+TEST_CASE("Alive-life recovery diagnostics keep unknown values null and reject invalid metadata",
+    "[e3c-life-wait][movement-diagnostics][core][app]") {
+    Recorder recorder{true};REQUIRE(recorder.observe(frame(1,1'000'000)));
+    const auto empty=recorder.encode(identity);REQUIRE(empty);
+    CHECK(empty->find("\"life_wait_started_us\":null")!=empty->npos);
+    CHECK(empty->find("\"life_wait_duration_ms\":null")!=empty->npos);
+    CHECK(empty->find("\"candidate_anchor_command\":null")!=empty->npos);
+    CHECK(empty->find("\"recovery_wait_reason\":\"none\"")!=empty->npos);
+    auto invalid=frame(2,1'010'000);
+    invalid.life_wait_started_us=1'010'001;
+    invalid.life_wait_duration_ms=std::numeric_limits<double>::quiet_NaN();
+    invalid.candidate_anchor_command=0U;
+    invalid.set_recovery_wait_reason("PRIVATE/server text");
+    REQUIRE(recorder.observe(invalid));
+    const auto* retained=recorder.recent_frame(1);REQUIRE(retained);
+    CHECK_FALSE(retained->life_wait_started_us);CHECK_FALSE(retained->life_wait_duration_ms);
+    CHECK_FALSE(retained->candidate_anchor_command);CHECK(recorder.statistics().invalid_values==3U);
+    const auto output=recorder.encode(identity);REQUIRE(output);
+    CHECK(output->find("PRIVATE/server text")==output->npos);
+    CHECK(output->find("\"recovery_wait_reason\":\"rejected_diagnostic\"")!=output->npos);
+    Recorder disabled;CHECK_FALSE(disabled.observe(invalid));
+    CHECK(disabled.statistics().allocated_capacity_bytes==0U);
+}
+TEST_CASE("Prediction work diagnostics retain measured calls and reject invalid durations atomically",
+    "[prediction-work][movement-diagnostics][core][app]") {
+    Recorder recorder{true};auto value=frame(1,1'000'000);
+    value.prediction_work=hlclient::core::PredictionWorkDiagnostics{
+        1.25,2.5,.75,11U,12U,13U,14U};
+    REQUIRE(recorder.observe(value));
+    value.prediction_work->command_ms=99.0;
+    const auto* retained=recorder.recent_frame(0);REQUIRE(retained);
+    REQUIRE(retained->prediction_work);CHECK(retained->prediction_work->command_ms==1.25);
+    CHECK(retained->prediction_work->replay_ms==2.5);
+    CHECK(retained->prediction_work->collision_query_ms==.75);
+    CHECK(retained->prediction_work->trace_queries==11U);
+    CHECK(retained->prediction_work->position_queries==12U);
+    CHECK(retained->prediction_work->contents_queries==13U);
+    CHECK(retained->prediction_work->traversal_steps==14U);
+    const auto output=recorder.encode(identity);REQUIRE(output);
+    CHECK(output->find("\"prediction_work\":{\"command_ms\":1.25,\"replay_ms\":2.5,\"collision_query_ms\":0.75,")!=output->npos);
+    CHECK(output->find("\"trace_queries\":11,\"position_queries\":12,\"contents_queries\":13,\"traversal_steps\":14}")!=output->npos);
+
+    for(std::uint64_t index=0;index<3;++index) {
+        auto invalid=frame(index+2U,1'010'000U+index*10'000U);
+        invalid.prediction_work=hlclient::core::PredictionWorkDiagnostics{1,2,3,4,5,6,7};
+        if(index==0U)invalid.prediction_work->command_ms=std::numeric_limits<double>::quiet_NaN();
+        if(index==1U)invalid.prediction_work->replay_ms=-1.0;
+        if(index==2U)invalid.prediction_work->collision_query_ms=std::numeric_limits<double>::infinity();
+        REQUIRE(recorder.observe(invalid));
+        const auto* sanitized=recorder.recent_frame(static_cast<std::size_t>(index+1U));REQUIRE(sanitized);
+        CHECK_FALSE(sanitized->prediction_work);
+    }
+    CHECK(recorder.statistics().invalid_values==3U);
+    CHECK(recorder.statistics().allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
+    const auto sanitized=recorder.encode(identity);REQUIRE(sanitized);
+    CHECK(sanitized->find("\"prediction_work\":null")!=sanitized->npos);
+    CHECK(sanitized->size()<=Recorder::maximum_encoded_bytes);
+}
 TEST_CASE("E32 normal recorder publishes bounded whole-session evidence alongside detailed windows",
     "[e32-session][movement-diagnostics][core][app]") {
     Recorder recorder{true};
@@ -104,7 +276,7 @@ TEST_CASE("E32 normal recorder publishes bounded whole-session evidence alongsid
     CHECK(stats.session_capacity_bytes<=app::MovementSessionRecorder::maximum_capacity_bytes);
     CHECK(stats.remote_capacity_bytes>0);
     CHECK(stats.remote_capacity_bytes<=app::RemoteMovementRecorder::maximum_capacity_bytes);
-    CHECK(stats.total_capacity_bytes==stats.allocated_capacity_bytes+stats.session_capacity_bytes+stats.remote_capacity_bytes);
+    CHECK(stats.total_capacity_bytes==stats.allocated_capacity_bytes+stats.session_capacity_bytes+stats.remote_capacity_bytes+stats.multiplayer_capacity_bytes);
     const auto text=recorder.encode(identity);REQUIRE(text);
     CHECK(text->find("\"session_summary\":{\"schema\":\"hlclient.movement-session.v1\"")!=text->npos);
     CHECK(text->find("\"session_recording_enabled\":true")!=text->npos);
@@ -131,14 +303,16 @@ TEST_CASE("E32 disabled incident recorder performs no collection allocation or g
     CHECK(output->find("\"enabled\":false")!=output->npos);
     CHECK(output->size()<4096);CHECK_FALSE(recorder.recent_frame(0));
 }
-TEST_CASE("E32 manual incident preserves exact prior and following frames with a documented window", "[e32][app][movement-diagnostics][core]") {
+TEST_CASE("E32 manual incident preserves available temporal coverage with explicit background sampling", "[e32][app][movement-diagnostics][core]") {
     Recorder recorder{true};REQUIRE(recorder.enabled());
     for(std::uint64_t i=0;i<=250;++i){REQUIRE(recorder.observe(frame(i,i*10'000)));
         if(i==150)REQUIRE(recorder.mark(Trigger::manual,i*10'000));}
     REQUIRE(recorder.incidents().size()==1);const auto& incident=recorder.incidents().front();
     CHECK(incident.trigger_us==1'500'000);CHECK(incident.end_us==2'500'000);CHECK(incident.complete);
-    CHECK_FALSE(incident.generation_boundary);CHECK(incident.omitted_samples==0);
-    REQUIRE(incident.frames.size()==201);CHECK(incident.frames.front().monotonic_us==500'000);
+    CHECK_FALSE(incident.generation_boundary);CHECK(incident.omitted_samples==50);
+    CHECK(incident.background_samples_omitted==50);CHECK(incident.exact_samples_omitted==0);
+    CHECK(incident.requested_pre_us==4'000'000);CHECK(incident.sampling_interval_us==12'500);
+    REQUIRE(incident.frames.size()==201);CHECK(incident.frames.front().monotonic_us==0);
     CHECK(incident.frames.back().monotonic_us==2'500'000);
     CHECK(incident.triggers==app::movement_incident_mask(Trigger::manual));
     CHECK(incident.manual_marker_count==1);CHECK(incident.manual_marker_us[0]==1'500'000);
@@ -219,7 +393,7 @@ TEST_CASE("E32 finite typed observations preserve unknowns and distinct support 
 }
 TEST_CASE("E32 delayed GPU observation updates matching retained identities without current frame substitution", "[e32][app][movement-diagnostics][core]") {
     Recorder recorder{true};REQUIRE(recorder.observe(frame(10,1'000'000)));
-    REQUIRE(recorder.mark(Trigger::manual,1'000'000));REQUIRE(recorder.observe(frame(11,1'010'000)));
+    REQUIRE(recorder.mark(Trigger::manual,1'000'000));REQUIRE(recorder.observe(frame(11,1'020'000)));
     REQUIRE(recorder.observe_gpu(10,7.25));CHECK(recorder.recent_frame(0)->gpu_ms==7.25);
     CHECK_FALSE(recorder.recent_frame(1)->gpu_ms);
     REQUIRE(recorder.incidents().front().frames.size()==2);CHECK(recorder.incidents().front().frames[0].gpu_ms==7.25);
@@ -248,6 +422,38 @@ TEST_CASE("E32 manual context labels network and collision evidence without asse
     CHECK(output->find("\"classification_is_root_cause\":false")!=output->npos);
     CHECK(output->find("session_close_before_post_window")!=output->npos);
 }
+TEST_CASE("71b97 GPU pass observations retain frame identity and explicit unavailable states", "[71b97][app][movement-diagnostics][core]") {
+    Recorder recorder{true};auto first=frame(10,1'000'000);
+    first.gpu_passes.status=app::MovementGpuPassStatus::pending;
+    REQUIRE(recorder.observe(first));REQUIRE(recorder.mark(Trigger::manual,first.monotonic_us));
+    auto second=frame(11,1'020'000);second.gpu_passes.status=app::MovementGpuPassStatus::unsupported;
+    REQUIRE(recorder.observe(second));
+    app::MovementGpuPassRecord passes{{1.F,2.F,3.F,4.F,5.F,6.F},0x3fU,app::MovementGpuPassStatus::ready};
+    REQUIRE(recorder.observe_gpu_passes(10,passes));
+    CHECK(recorder.recent_frame(0)->gpu_passes.milliseconds[2]==3.F);
+    CHECK(recorder.incidents().front().frames[0].gpu_passes.valid_mask==0x3fU);
+    CHECK(recorder.recent_frame(1)->gpu_passes.status==app::MovementGpuPassStatus::unsupported);
+    passes.milliseconds[2]=99.F;REQUIRE(recorder.observe_gpu_passes(10,passes));
+    CHECK(recorder.recent_frame(0)->gpu_passes.milliseconds[2]==3.F);
+    CHECK_FALSE(recorder.observe_gpu_passes(999,passes));
+    passes.milliseconds[0]=std::numeric_limits<float>::infinity();
+    CHECK_FALSE(recorder.observe_gpu_passes(10,passes));
+    passes={{},0x80U,app::MovementGpuPassStatus::ready};
+    CHECK_FALSE(recorder.observe_gpu_passes(10,passes));
+    passes={{},1U,app::MovementGpuPassStatus::pending};
+    CHECK_FALSE(recorder.observe_gpu_passes(10,passes));
+    const auto text=recorder.encode(identity);REQUIRE(text);
+    CHECK(text->find("\"gpu_passes\":{\"status\":\"ready\",\"valid_mask\":63,\"world\":1")!=text->npos);
+    CHECK(text->find("\"status\":\"unsupported\",\"valid_mask\":0,\"world\":null")!=text->npos);
+    CHECK(recorder.statistics().allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
+    REQUIRE(recorder.observe(frame(12,6'000'000)));
+    app::MovementGpuPassRecord expired{{},0,app::MovementGpuPassStatus::disjoint};
+    REQUIRE(recorder.observe_gpu_passes(10,expired));
+    CHECK(recorder.incidents().front().frames[0].gpu_passes.status==app::MovementGpuPassStatus::ready);
+    CHECK(recorder.recent_frame(0)->gpu_passes.status==app::MovementGpuPassStatus::not_observed);
+    Recorder disabled;CHECK_FALSE(disabled.observe_gpu_passes(10,expired));
+    CHECK(disabled.statistics().allocated_capacity_bytes==0);
+}
 TEST_CASE("E32 automatic incident storms preserve two slots for late manual lift markers", "[e32][app][movement-diagnostics][core]") {
     Recorder recorder{true};std::uint64_t number{},time{};
     for(std::uint64_t i=0;i<12;++i) {
@@ -257,7 +463,9 @@ TEST_CASE("E32 automatic incident storms preserve two slots for late manual lift
             CHECK(recorder.incidents().size()==Recorder::maximum_automatic_incidents);}
     }
     CHECK(recorder.incidents().size()==Recorder::maximum_automatic_incidents);
-    CHECK(recorder.statistics().manual_reservation_suppressions==6);
+    CHECK(recorder.statistics().manual_reservation_suppressions==0);
+    CHECK(recorder.statistics().priority_replacements==6);
+    time+=500'000;REQUIRE(recorder.observe(frame(++number,time)));
     REQUIRE(recorder.mark(Trigger::manual,time));CHECK(recorder.incidents().size()==7);
     CHECK(recorder.incidents().back().manual_marker_us[0]==time);
     time+=3'000'000;REQUIRE(recorder.observe(frame(++number,time)));
@@ -266,7 +474,8 @@ TEST_CASE("E32 automatic incident storms preserve two slots for late manual lift
     const auto output=recorder.encode(identity);REQUIRE(output);
     CHECK(output->find("\"manual_reserved_incidents\":2")!=output->npos);
     CHECK(output->find("\"automatic_incident_limit\":6")!=output->npos);
-    CHECK(output->find("\"manual_reservation_suppressions\":6")!=output->npos);
+    CHECK(output->find("\"manual_reservation_suppressions\":0")!=output->npos);
+    CHECK(output->find("\"priority_replacements\":6")!=output->npos);
 }
 TEST_CASE("E32 recent window quantiles are measured finite values and retention is time bounded", "[e32][app][movement-diagnostics][core]") {
     Recorder recorder{true};
@@ -313,9 +522,17 @@ TEST_CASE("E32 high-rate rings incident count samples and encoded output obey ha
     for(unsigned i=0;i<2000;++i){time+=1000;REQUIRE(recorder.observe(frame(++sequence,time)));}
     const auto stats=recorder.statistics();CHECK(stats.incidents==Recorder::maximum_incidents);
     CHECK(stats.retained_frames<=Recorder::maximum_recent_frames);CHECK(stats.ring_capacity_drops>0);
-    CHECK(stats.incident_sample_drops>0);CHECK(stats.allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
-    for(const auto& incident:recorder.incidents()){CHECK(incident.complete);CHECK(incident.frames.size()<=Recorder::maximum_incident_frames);}
+    CHECK(stats.background_samples_omitted>0);CHECK(stats.allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
+    CHECK(Recorder::maximum_recent_frames==961U);CHECK(Recorder::maximum_incident_frames==480U);
+    CHECK(Recorder::incident_frame_capacity<=Recorder::maximum_incident_frames);
+    CHECK(Recorder::reserved_non_incident_capacity_bytes+
+        Recorder::maximum_incidents*Recorder::incident_frame_capacity*sizeof(app::MovementFrameRecord)<=Recorder::maximum_capacity_bytes);
+    for(const auto& incident:recorder.incidents()){
+        CHECK(incident.complete);CHECK(incident.frames.size()<=Recorder::incident_frame_capacity);
+        CHECK(incident.frames.capacity()<=Recorder::incident_frame_capacity);
+    }
     const auto output=recorder.encode(identity);REQUIRE(output);CHECK(output->size()<=Recorder::maximum_encoded_bytes);
+    CHECK(output->find("\"incident_frame_capacity\":"+std::to_string(Recorder::incident_frame_capacity))!=output->npos);
     std::cout<<"[e32-diagnostics-bound] frame_record_bytes="<<sizeof(app::MovementFrameRecord)
         <<" retained_capacity_bytes="<<stats.allocated_capacity_bytes<<" encoded_bytes="<<output->size()<<'\n';
 }

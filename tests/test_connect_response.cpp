@@ -149,6 +149,47 @@ TEST_CASE("Connect-response parser returns owning values", "[goldsrc][connect-re
     CHECK(std::get<goldsrc::ConnectRejected>(*result.response).message == "Invalid connection.");
 }
 
+TEST_CASE("Standard password refusal is an exact owning rejection rather than an unknown reply",
+          "[goldsrc][connect-response][connect-retry]")
+{
+    // Independent wire shape from SV_RejectConnectionForPassword and
+    // MSG_WriteString: class 8, eleven ASCII marker bytes, one NUL, no LF.
+    std::string body{"8BADPASSWORD"};
+    body.push_back('\0');
+    auto datagram=make_datagram(body);
+    REQUIRE(datagram.size()==17U);
+    auto parsed=goldsrc::parse_connect_response(datagram);
+    REQUIRE(parsed);
+    REQUIRE(parsed.response);
+    REQUIRE(std::holds_alternative<goldsrc::ConnectRejected>(*parsed.response));
+    std::ranges::fill(datagram,std::byte{'X'});
+    CHECK(std::get<goldsrc::ConnectRejected>(*parsed.response).message=="BADPASSWORD");
+    CHECK_FALSE(parsed.error);
+
+    const auto exact=make_datagram(body);
+    for(std::size_t length=0U;length<exact.size();++length) {
+        INFO("truncated length "<<length);
+        CHECK_FALSE(goldsrc::parse_connect_response(std::span{exact}.first(length)));
+    }
+    for(std::size_t marker_index=1U;marker_index<12U;++marker_index) {
+        INFO("modified marker byte "<<marker_index);
+        auto modified=body;modified[marker_index]=static_cast<char>(modified[marker_index]+('a'-'A'));
+        check_error(make_datagram(modified),goldsrc::ConnectResponseErrorCode::invalid_rejection_message);
+    }
+    auto newline=body;newline.insert(newline.size()-1U,1U,'\n');
+    check_error(make_datagram(newline),goldsrc::ConnectResponseErrorCode::invalid_terminator);
+    auto carriage_return=body;carriage_return.insert(carriage_return.size()-1U,1U,'\r');
+    check_error(make_datagram(carriage_return),goldsrc::ConnectResponseErrorCode::invalid_terminator);
+    auto trailing=body;trailing.push_back('X');
+    check_error(make_datagram(trailing),goldsrc::ConnectResponseErrorCode::unexpected_trailing_data);
+    auto duplicate_nul=body;duplicate_nul.push_back('\0');
+    check_error(make_datagram(duplicate_nul),goldsrc::ConnectResponseErrorCode::unexpected_trailing_data);
+    auto embedded_nul=body;embedded_nul[4]='\0';
+    check_error(make_datagram(embedded_nul),goldsrc::ConnectResponseErrorCode::invalid_rejection_message);
+    auto unknown=body;unknown[0]='7';
+    check_error(make_datagram(unknown),goldsrc::ConnectResponseErrorCode::unknown_response_class);
+}
+
 TEST_CASE("Connect-accept parser accepts exact typed boundaries",
           "[goldsrc][connect-response][boundary]")
 {

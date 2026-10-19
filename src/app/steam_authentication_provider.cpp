@@ -32,18 +32,43 @@ void trace(
     const std::optional<auth::AuthenticationErrorCode> code = std::nullopt,
     const std::size_t material_size = 0U,
     const std::optional<SteamAuthenticationPhase> phase = std::nullopt,
-    const std::chrono::milliseconds elapsed = std::chrono::milliseconds::zero())
+    const std::chrono::milliseconds elapsed = std::chrono::milliseconds::zero(),
+    const std::optional<SteamAuthenticationRequestSummary> request_context = std::nullopt,
+    const std::optional<std::uint32_t> actual_app_id = std::nullopt,
+    const std::optional<bool> logged_on = std::nullopt,
+    const std::size_t callback_pump_count = 0U,
+    const std::optional<int> initiate_returned_length = std::nullopt)
 {
     if (callback) {
         try {
             callback(SteamAuthenticationTraceEvent{
-                status, code, material_size, phase, elapsed});
+                status, code, material_size, phase, elapsed, request_context,
+                actual_app_id, logged_on, callback_pump_count,
+                initiate_returned_length});
         } catch (...) {
             // Diagnostics are observational only. In particular, an injected
             // callback must not interrupt ticket/session termination or API
             // shutdown from a noexcept destructor path.
         }
     }
+}
+
+[[nodiscard]] SteamAuthenticationRequestSummary summarize_request(
+    const auth::AuthenticationRequestContext& context) noexcept
+{
+    SteamAuthenticationRequestSummary summary;
+    summary.remote_endpoint = context.remote_endpoint;
+    summary.protocol = context.protocol;
+    summary.server_id_present = context.game_server_steam_id.has_value();
+    summary.server_id_nonzero = context.game_server_steam_id.value_or(0U) != 0U;
+    summary.secure = context.game_server_secure;
+    if (context.game_server_steam_id) {
+        const auto value = *context.game_server_steam_id;
+        summary.server_id_universe = static_cast<std::uint32_t>((value >> 56U) & 0xffU);
+        summary.server_id_account_type = static_cast<std::uint32_t>((value >> 52U) & 0x0fU);
+        summary.server_id_instance = static_cast<std::uint32_t>((value >> 32U) & 0x0f'ffffU);
+    }
+    return summary;
 }
 
 [[nodiscard]] std::optional<std::array<std::byte, 32U>> make_fresh_cdkey()
@@ -386,12 +411,19 @@ public:
             }
         }
         if (!readiness_reported_) {
-            if (state_->api_->app_id() != required_app_id_) {
+            actual_app_id_ = state_->api_->app_id();
+            logged_on_ = state_->api_->logged_on();
+            trace(
+                state_->trace_, SteamAuthenticationTraceStatus::context_checked,
+                std::nullopt, 0U, SteamAuthenticationPhase::initialization,
+                std::chrono::duration_cast<std::chrono::milliseconds>(now_() - started_at_),
+                std::nullopt, actual_app_id_, logged_on_);
+            if (*actual_app_id_ != required_app_id_) {
                 return fail(
                     auth::AuthenticationErrorCode::configuration_error,
                     "Steam API context does not match Half-Life App ID 70");
             }
-            if (!state_->api_->logged_on()) {
+            if (!*logged_on_) {
                 return fail(
                     auth::AuthenticationErrorCode::unavailable,
                     "Steam user session is not logged on");
@@ -418,7 +450,9 @@ public:
         }
 
         state_->api_->run_callbacks();
-        if (!state_->api_->logged_on()) {
+        ++callback_pump_count_;
+        logged_on_ = state_->api_->logged_on();
+        if (!*logged_on_) {
             return fail(
                 auth::AuthenticationErrorCode::unavailable,
                 "Steam user session became unavailable");
@@ -441,6 +475,7 @@ public:
             context_.remote_endpoint.ipv4_host_order(),
             context_.remote_endpoint.port(),
             *context_.game_server_secure);
+        initiate_returned_length_ = length;
         const auto material_elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 now_() - *material_started_at_);
@@ -500,7 +535,8 @@ public:
             SteamAuthenticationTraceStatus::material_acquired,
             std::nullopt,
             material_size, SteamAuthenticationPhase::material_acquisition,
-            material_elapsed);
+            material_elapsed, std::nullopt, actual_app_id_, logged_on_,
+            callback_pump_count_, initiate_returned_length_);
         return auth::AuthenticationUpdateResult::succeeded(
             auth::AuthenticationSession{
                 std::move(*material.value),
@@ -524,7 +560,8 @@ private:
     {
         complete_ = true;
         trace(state_->trace_, SteamAuthenticationTraceStatus::failed,
-              code, 0U, phase, elapsed);
+              code, 0U, phase, elapsed, std::nullopt, actual_app_id_, logged_on_,
+              callback_pump_count_, initiate_returned_length_);
         return auth::AuthenticationUpdateResult::failed(
             error(code, std::move(context)));
     }
@@ -537,6 +574,10 @@ private:
     SteamAuthenticationNow now_;
     SteamAuthenticationClock::time_point started_at_{};
     std::optional<SteamAuthenticationClock::time_point> material_started_at_;
+    std::optional<std::uint32_t> actual_app_id_;
+    std::optional<bool> logged_on_;
+    std::size_t callback_pump_count_{0U};
+    std::optional<int> initiate_returned_length_;
     bool complete_{false};
     bool cancelled_{false};
     bool readiness_reported_{false};
@@ -574,7 +615,13 @@ SteamAuthenticationProvider::~SteamAuthenticationProvider() = default;
 auth::AuthenticationBeginResult SteamAuthenticationProvider::begin(
     const auth::AuthenticationRequestContext& context)
 {
+    const auto request_summary = summarize_request(context);
+    trace(config_.trace, SteamAuthenticationTraceStatus::operation_started,
+          std::nullopt, 0U, std::nullopt, std::chrono::milliseconds::zero(),
+          request_summary);
     if (!state_ || !state_->api_) {
+        trace(config_.trace, SteamAuthenticationTraceStatus::failed,
+              auth::AuthenticationErrorCode::unavailable);
         return auth::AuthenticationBeginResult::failed(error(
             auth::AuthenticationErrorCode::unavailable,
             "Steam legacy client API is unavailable on this platform"));
@@ -588,11 +635,12 @@ auth::AuthenticationBeginResult SteamAuthenticationProvider::begin(
         context.remote_endpoint.ipv4_host_order() == 0U ||
         context.remote_endpoint.port() == 0U ||
         !context.compatibility_profile.variable_binary_authentication_size) {
+        trace(config_.trace, SteamAuthenticationTraceStatus::failed,
+              auth::AuthenticationErrorCode::configuration_error);
         return auth::AuthenticationBeginResult::failed(error(
             auth::AuthenticationErrorCode::configuration_error,
             "Steam authentication requires a fresh Protocol 48 server challenge and Steam profile"));
     }
-    trace(state_->trace_, SteamAuthenticationTraceStatus::operation_started);
     return auth::AuthenticationBeginResult::started(
         std::make_unique<SteamAuthenticationOperation>(
             state_,

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
+#include <string_view>
 
 namespace hlclient::input {
 
@@ -34,6 +36,11 @@ enum class PhysicalKey : std::uint8_t {
     digit_5,
     f8,
     q,
+    grave, enter, home, end, backspace, delete_key, page_up, page_down,
+    b, c, f, g, h, i, j, k, l, m, n, o, p, t, u, v, x, y, z,
+    digit_0, digit_6, digit_7, digit_8, digit_9,
+    right_control, right_shift,
+    left_alt, right_alt, f3, f4, f5, f6, f7, f9, f10, f11, f12,
     count,
 };
 
@@ -57,6 +64,7 @@ enum class InputEventType : std::uint8_t {
     mouse_wheel,
     capture_acquired,
     capture_released,
+    text_input,
 };
 
 enum class InputFocusState : std::uint8_t {
@@ -89,6 +97,18 @@ struct MouseWheelDelta final {
 
 class InputEvent final {
 public:
+    // Own SDL's transient UTF-8 bytes without changing the no-throw event pump.
+    // Retain only complete codepoints; the editor separately validates Unicode.
+    [[nodiscard]] static constexpr InputEvent text_input(std::string_view text) noexcept
+    {
+        auto event=InputEvent{InputEventType::text_input};
+        std::size_t count=text.size()<event.text_.size()?text.size():event.text_.size();
+        if(count<text.size())while(count>0&&(static_cast<unsigned char>(text[count])&0xc0U)==0x80U)--count;
+        for(std::size_t i=0;i<count;++i)event.text_[i]=text[i];
+        event.text_size_=static_cast<std::uint16_t>(count);
+        return event;
+    }
+    [[nodiscard]] constexpr std::string_view text() const noexcept {return {text_.data(),text_size_};}
     [[nodiscard]] static constexpr InputEvent focus_gained() noexcept
     {
         return InputEvent{InputEventType::focus_gained};
@@ -175,6 +195,13 @@ public:
         return wheel_delta_;
     }
     [[nodiscard]] constexpr bool repeated() const noexcept { return repeated_; }
+    // SDL timestamps and the dequeue clock are deliberately separate domains.
+    // Synthetic/capture-recovery events have no native timestamp.
+    constexpr void set_observation_clocks(std::uint64_t sdl_ns, std::uint64_t dequeue_ns) noexcept {
+        sdl_timestamp_ns_=sdl_ns; dequeue_steady_ns_=dequeue_ns;
+    }
+    [[nodiscard]] constexpr std::uint64_t sdl_timestamp_ns() const noexcept { return sdl_timestamp_ns_; }
+    [[nodiscard]] constexpr std::uint64_t dequeue_steady_ns() const noexcept { return dequeue_steady_ns_; }
 
 private:
     explicit constexpr InputEvent(const InputEventType type) noexcept : type_{type} {}
@@ -185,6 +212,9 @@ private:
     RelativeMouseDelta relative_mouse_delta_{};
     MouseWheelDelta wheel_delta_{};
     bool repeated_{false};
+    std::array<char,128U> text_{};
+    std::uint16_t text_size_{};
+    std::uint64_t sdl_timestamp_ns_{},dequeue_steady_ns_{};
 };
 
 [[nodiscard]] constexpr bool is_valid(const PhysicalKey key) noexcept

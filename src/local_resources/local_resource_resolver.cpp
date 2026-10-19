@@ -226,26 +226,35 @@ struct OpenIntermediateDirectoryResult {
     }
 };
 
+// Non-owning view of already pinned storage. Installation checks may use the
+// base handle without adding it to the normal game-resource search roots.
+struct LookupRoot {
+    LocalResourceRootId id;
+    HANDLE handle;
+    const std::wstring& final_path;
+    const detail::NativeFileIdentity& identity;
+};
+
 [[nodiscard]] bool query_validated_root_path(
-    const detail::LocalResourceRootStorage& root,
+    const LookupRoot& root,
     std::wstring& final_path) noexcept
 {
     BY_HANDLE_FILE_INFORMATION information{};
     detail::NativeFileIdentity identity{};
-    return ::GetFileType(root.handle.get()) == FILE_TYPE_DISK &&
-           ::GetFileInformationByHandle(root.handle.get(), &information) !=
+    return ::GetFileType(root.handle) == FILE_TYPE_DISK &&
+           ::GetFileInformationByHandle(root.handle, &information) !=
                FALSE &&
            (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U &&
            (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ==
                0U &&
-           detail::query_identity(root.handle.get(), identity) &&
+           detail::query_identity(root.handle, identity) &&
            identity == root.identity &&
-           detail::query_final_path(root.handle.get(), final_path);
+           detail::query_final_path(root.handle, final_path);
 }
 
 [[nodiscard]] OpenIntermediateDirectoryResult open_intermediate_directory(
     const std::wstring& candidate,
-    const detail::LocalResourceRootStorage& root,
+    const LookupRoot& root,
     const bool exact_root_lookup)
 {
     detail::UniqueHandle handle{::CreateFileW(
@@ -383,6 +392,70 @@ LocalResourceResolutionResult LocalResourceResolver::resolve(
     return resolve_from_roots(name, std::nullopt);
 }
 
+LocalResourceResolutionResult LocalResourceResolver::resolve_installation_check(
+    const std::string_view server_relative_name) const
+{
+    if (server_relative_name.empty() ||
+        server_relative_name.size() > kMaximumLocalVirtualResourcePathBytes + 3U) {
+        return resolution_failure(LocalResourceResolutionCode::unsafe_name,
+            "Installation check name is empty or exceeds its bounded length");
+    }
+    try {
+        // Normalize separators only; never collapse dots, repeated separators,
+        // a drive prefix or an absolute path into an apparently safe name.
+        std::string normalized{server_relative_name};
+        std::replace(normalized.begin(), normalized.end(), '\\', '/');
+        const bool use_base = normalized.starts_with("../");
+        const std::string_view relative = use_base
+            ? std::string_view{normalized}.substr(3U) : std::string_view{normalized};
+        const auto classified = LocalVirtualResourceName::create(relative);
+        if (!classified) {
+            return resolution_failure(
+                classified.error->code == LocalVirtualResourceNameErrorCode::unsupported_name_encoding
+                    ? LocalResourceResolutionCode::unsupported_name_encoding
+                    : LocalResourceResolutionCode::unsafe_name,
+                "Installation check name violates the bounded relative-path policy");
+        }
+        // Win32 wildcard/invalid characters are not path components. Reject
+        // them explicitly rather than letting an OS lookup look like absence.
+        if (relative.find_first_of("*?\"<>|") != std::string_view::npos) {
+            return resolution_failure(LocalResourceResolutionCode::unsafe_name,
+                "Installation check name contains an invalid Windows filename byte");
+        }
+        for (const auto component : split_components(relative)) {
+            const auto stem = component.substr(0U, component.find('.'));
+            std::string folded{stem};
+            for (auto& c : folded) {
+                if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
+            }
+            if ((!stem.empty() && stem.back() == ' ') ||
+                folded == "CONIN$" || folded == "CONOUT$") {
+                return resolution_failure(LocalResourceResolutionCode::unsafe_name,
+                    "Installation check name contains an ambiguous device component");
+            }
+        }
+        if (roots_.roots_.empty() || !roots_.base_) {
+            return resolution_failure(LocalResourceResolutionCode::io_error,
+                "Installation check roots are unavailable");
+        }
+        const auto& game = *roots_.roots_.front();
+        if (game.kind != LocalResourceRootKind::game) {
+            return resolution_failure(LocalResourceResolutionCode::io_error,
+                "Installation check selected game root is unavailable");
+        }
+        // This opaque ID is deliberately outside the normal root ordinals and
+        // cannot be reopened through the resource-locator/search-root API.
+        const auto selected_id = use_base
+            ? LocalResourceRootId{static_cast<std::uint32_t>(kMaximumLocalResourceSearchRoots),
+                                  game.id.token_}
+            : game.id;
+        return resolve_from_roots(*classified.name, selected_id, use_base, true);
+    } catch (...) {
+        return resolution_failure(LocalResourceResolutionCode::io_error,
+            "Unable to retain bounded installation-check lookup state");
+    }
+}
+
 LocalResourceResolutionResult LocalResourceResolver::resolve_exact_root(
     const LocalVirtualResourceName& name,
     const LocalResourceRootId root_id) const
@@ -392,11 +465,29 @@ LocalResourceResolutionResult LocalResourceResolver::resolve_exact_root(
 
 LocalResourceResolutionResult LocalResourceResolver::resolve_from_roots(
     const LocalVirtualResourceName& name,
-    const std::optional<LocalResourceRootId> exact_root_id) const
+    const std::optional<LocalResourceRootId> exact_root_id,
+    const bool use_installation_base,
+    const bool strict_race_failures) const
 {
     std::vector<std::string_view> components;
+    std::vector<LookupRoot> lookup_roots;
     try {
         components = split_components(name.value());
+        if (use_installation_base) {
+            if (!roots_.base_ || !exact_root_id) {
+                return resolution_failure(LocalResourceResolutionCode::io_error,
+                    "Installation check base handle is unavailable");
+            }
+            const auto& base = *roots_.base_;
+            lookup_roots.push_back(LookupRoot{*exact_root_id, base.handle.get(),
+                base.final_path, base.identity});
+        } else {
+            lookup_roots.reserve(roots_.roots_.size());
+            for (const auto& owner : roots_.roots_) {
+                lookup_roots.push_back(LookupRoot{owner->id, owner->handle.get(),
+                    owner->final_path, owner->identity});
+            }
+        }
     } catch (...) {
         return resolution_failure(
             LocalResourceResolutionCode::io_error,
@@ -404,8 +495,7 @@ LocalResourceResolutionResult LocalResourceResolver::resolve_from_roots(
     }
 
     bool exact_root_found = !exact_root_id.has_value();
-    for (const auto& root_owner : roots_.roots_) {
-        const auto& root = *root_owner;
+    for (const auto& root : lookup_roots) {
         if (exact_root_id && root.id != *exact_root_id) {
             continue;
         }
@@ -462,7 +552,7 @@ LocalResourceResolutionResult LocalResourceResolver::resolve_from_roots(
             candidate = append_component(candidate, found.actual_name);
             if (!final_component) {
                 auto opened = open_intermediate_directory(
-                    candidate, root, exact_root_id.has_value());
+                    candidate, root, exact_root_id.has_value() && !strict_race_failures);
                 if (!opened) {
                     return resolution_failure(opened.code, opened.context);
                 }
@@ -490,10 +580,10 @@ LocalResourceResolutionResult LocalResourceResolver::resolve_from_roots(
             const auto open_error = ::GetLastError();
             if (detail::is_missing_error(open_error)) {
                 return resolution_failure(
-                    exact_root_id
+                    exact_root_id && !strict_race_failures
                         ? LocalResourceResolutionCode::not_found
                         : LocalResourceResolutionCode::io_error,
-                    exact_root_id
+                    exact_root_id && !strict_race_failures
                         ? "Local resource disappeared from its selected root during verified reopen"
                         : "Local resource changed during its bounded lookup");
             }
@@ -518,6 +608,11 @@ LocalResourceResolutionResult LocalResourceResolver::resolve_from_roots(
             return resolution_failure(
                 LocalResourceResolutionCode::not_regular_file,
                 "Local resource target is not a regular file");
+        }
+        if (strict_race_failures && information.nNumberOfLinks > 1U) {
+            return resolution_failure(
+                LocalResourceResolutionCode::reparse_escape,
+                "Installation checks reject multiply-linked files");
         }
 
         detail::NativeFileSnapshot snapshot{};

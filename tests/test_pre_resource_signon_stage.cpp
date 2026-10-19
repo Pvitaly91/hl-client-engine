@@ -776,4 +776,125 @@ TEST_CASE("Wrong endpoint and duplicate terminal batch cannot publish twice",
     CHECK(transport.incoming.size() == 1U);
 }
 
+TEST_CASE("Composite sign-on drains deferred initial control batches between bounded updates",
+          "[goldsrc][signon][pre-resource][stage][signon-capacity]")
+{
+    FakeTransport transport;const auto remote=network::NetworkAddress::loopback(27'230U);
+    const auto epoch=goldsrc::PreResourceSignonTimePoint{}+1s;
+    auto config=test_config();config.initial_signon.maximum_events=16U;
+    config.initial_signon.service_payload_envelope.compression_policy=
+        goldsrc::ServicePayloadCompressionPolicy::accept_bzip2_or_uncompressed;
+    std::vector<goldsrc::InitialSignonTraceEvent> traces;
+    std::size_t releases{};
+    goldsrc::PreResourceSignonStage stage{transport,remote,config,
+        [&](const auto& event){traces.push_back(event);}};
+    const auto request=start_and_send_request(stage,transport,epoch,std::make_unique<CountingLifetime>(releases));
+    const auto carrier=[&](const std::uint32_t seq,const bool ack,std::vector<std::byte> payload) {
+        const goldsrc::ServerToClientNetchanPacket packet{
+            goldsrc::NetchanHeader{
+                goldsrc::NetchanSequenceWord{sequence(seq),goldsrc::NetchanSequenceFlags{false,false}},
+                goldsrc::NetchanAcknowledgementWord{
+                    sequence(ack?request.header.sequence.sequence.value():0U),ack}},
+            {},std::move(payload)};
+        auto encoded=goldsrc::encode_server_to_client_netchan_packet(packet);
+        REQUIRE(encoded);REQUIRE(encoded.datagram);return std::move(*encoded.datagram);
+    };
+    for(std::uint32_t seq=1U;seq<=3U;++seq) {
+        std::vector<std::byte> controls;
+        for(unsigned i=0U;i<12U;++i) {
+            controls.push_back(std::byte{51U});controls.push_back(static_cast<std::byte>(seq-1U));
+            controls.insert(controls.end(),seq-1U,std::byte{14U});
+        }
+        transport.queue(remote,carrier(seq,false,std::move(controls)));
+    }
+    const auto boundary=semantic_payload();
+    transport.queue(remote,carrier(4U,false,boundary));
+    stage.update(epoch+2ms);CHECK_FALSE(stage.error());CHECK_FALSE(stage.result());CHECK(releases==0U);
+    CHECK_FALSE(stage.poll_event());
+    transport.queue(remote,carrier(5U,true,{}));
+    stage.update(epoch+3ms);CHECK_FALSE(stage.error());CHECK_FALSE(stage.result());
+    CHECK_FALSE(stage.terminal());CHECK(releases==0U);
+    // No access to the nested stage and no caller draining of its events:
+    // the production facade must release its internal progress ring itself.
+    for(unsigned step=4U;step<12U&&!stage.terminal();++step)
+        stage.update(epoch+std::chrono::milliseconds{step});
+    REQUIRE(stage.result());CHECK_FALSE(stage.error());
+    CHECK(stage.state()==goldsrc::PreResourceSignonStageState::pre_resource_boundary_reached);
+    CHECK(stage.result()->server_info().map_file_path()=="maps/test_alpha.bsp");
+    CHECK(stage.result()->source_payload().source_sequence()==4U);
+    CHECK(stage.result()->source_payload().source_acknowledgement()==0U);
+    CHECK_FALSE(stage.result()->source_payload().acknowledgement_reliable());
+    CHECK(stage.result()->source_payload().received_at()==epoch+2ms);
+    CHECK(stage.result()->source_payload().payload_size()==boundary.size());
+    CHECK(stage.result()->source_payload().initial_boundary_offset()==3U);
+    std::vector<std::size_t> director_sizes;std::size_t acknowledgements{},boundaries{};
+    for(const auto& trace:traces) {
+        if(trace.classification==goldsrc::InitialSignonTraceClassification::initial_request_acknowledged)++acknowledgements;
+        if(trace.classification==goldsrc::InitialSignonTraceClassification::signon_boundary_reached)++boundaries;
+        if(trace.classification==goldsrc::InitialSignonTraceClassification::service_message_decoded&&
+            trace.opcode==goldsrc::ServiceMessageOpcode::director)director_sizes.push_back(trace.byte_count);
+    }
+    REQUIRE(director_sizes.size()==36U);
+    for(std::size_t i=0U;i<director_sizes.size();++i)CHECK(director_sizes[i]==2U+i/12U);
+    CHECK(acknowledgements==1U);CHECK(boundaries==1U);
+    std::size_t facade_events{};while(stage.poll_event())++facade_events;
+    CHECK(facade_events==3U);CHECK(stage.request_queue_count()==1U);
+    CHECK(stage.cleanup_count()==1U);CHECK(releases==1U);
+    const auto sends=transport.sent.size();stage.update(epoch+13ms);
+    CHECK(transport.sent.size()==sends);CHECK_FALSE(stage.poll_event());CHECK(releases==1U);
+}
+
+TEST_CASE("Initial boundary handoff rejects an oversized retained driver tail before semantic publication",
+          "[goldsrc][signon][pre-resource][stage][signon-capacity][transaction]")
+{
+    FakeTransport transport;const auto remote=network::NetworkAddress::loopback(27'230U);
+    const auto epoch=goldsrc::PreResourceSignonTimePoint{}+1s;
+    auto config=test_config();config.initial_signon.driver.maximum_events=5U;
+    config.initial_signon.maximum_pre_ack_payloads=16U;
+    config.initial_signon.service_payload_envelope.compression_policy=
+        goldsrc::ServicePayloadCompressionPolicy::accept_bzip2_or_uncompressed;
+    std::size_t releases{};std::vector<goldsrc::InitialSignonTraceEvent> traces;
+    goldsrc::PreResourceSignonStage stage{transport,remote,config,
+        [&](const auto& event){traces.push_back(event);}};
+    const auto request=start_and_send_request(stage,transport,epoch,std::make_unique<CountingLifetime>(releases));
+    const auto carrier=[&](const std::uint32_t seq,const bool ack,std::vector<std::byte> payload) {
+        const goldsrc::ServerToClientNetchanPacket packet{
+            goldsrc::NetchanHeader{
+                goldsrc::NetchanSequenceWord{sequence(seq),goldsrc::NetchanSequenceFlags{false,false}},
+                goldsrc::NetchanAcknowledgementWord{
+                    sequence(ack?request.header.sequence.sequence.value():0U),ack}},
+            {},std::move(payload)};
+        auto encoded=goldsrc::encode_server_to_client_netchan_packet(packet);
+        REQUIRE(encoded);REQUIRE(encoded.datagram);return std::move(*encoded.datagram);
+    };
+    // The first payload owns both a real initial text control and server info.
+    // Six later payloads fit the pre-ACK FIFO, but cannot be atomically returned
+    // to the driver's five-slot ring when this first boundary is committed.
+    transport.queue(remote,carrier(1U,false,semantic_payload()));
+    stage.update(epoch+2ms);REQUIRE_FALSE(stage.error());CHECK_FALSE(stage.result());
+    for(std::uint32_t seq=2U;seq<=7U;++seq) {
+        transport.queue(remote,carrier(seq,false,{std::byte{51U},std::byte{0U}}));
+        stage.update(epoch+std::chrono::milliseconds{seq+1U});
+        REQUIRE_FALSE(stage.error());CHECK_FALSE(stage.result());CHECK_FALSE(stage.terminal());
+        CHECK_FALSE(stage.poll_event());CHECK(releases==0U);
+    }
+    transport.queue(remote,carrier(8U,true,{}));
+    stage.update(epoch+9ms);
+    REQUIRE(stage.error());CHECK_FALSE(stage.result());CHECK(stage.terminal());
+    CHECK(stage.error()->initial_signon_code==goldsrc::InitialSignonErrorCode::service_event_backpressure);
+    CHECK_FALSE(stage.poll_event());
+    REQUIRE_FALSE(traces.empty());
+    CHECK(traces.back().stage_error_code==goldsrc::InitialSignonErrorCode::service_event_backpressure);
+    for(const auto& trace:traces) {
+        CHECK(trace.classification!=goldsrc::InitialSignonTraceClassification::service_message_decoded);
+        CHECK(trace.classification!=goldsrc::InitialSignonTraceClassification::signon_boundary_reached);
+        CHECK(trace.service_payload_count==0U);
+    }
+    CHECK(stage.request_queue_count()==1U);CHECK(stage.cleanup_count()==1U);CHECK(releases==1U);
+    const auto sends=transport.sent.size(),receives=transport.receive_calls;
+    stage.update(epoch+10ms);stage.cancel(epoch+11ms);
+    CHECK_FALSE(stage.result());CHECK_FALSE(stage.poll_event());CHECK(releases==1U);
+    CHECK(stage.cleanup_count()==1U);CHECK(transport.sent.size()==sends);CHECK(transport.receive_calls==receives);
+}
+
 } // namespace

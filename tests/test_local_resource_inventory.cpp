@@ -445,6 +445,38 @@ TEST_CASE("Local resource inventory publishes no partial state on fatal input",
     }
 }
 
+TEST_CASE("Inventory default covers the full resource-count range but respects lower caps",
+          "[goldsrc][local-resource][inventory][limits][custom-server]")
+{
+    ScopedInventoryDirectory temporary;
+    REQUIRE(std::filesystem::create_directories(temporary.path() / "valve"));
+    auto resolver = make_resolver(temporary.path(), "valve");
+    std::vector<fixture::EntrySpec> specs;
+    specs.reserve(goldsrc::kMaximumResourceCount);
+    for (std::size_t index = 0U; index < goldsrc::kMaximumResourceCount; ++index) {
+        specs.push_back({3U, "{d" + std::to_string(index),
+                         static_cast<std::uint16_t>(index), 0U, 0U});
+    }
+    const auto list = parse_resource_list(specs);
+    const auto built = goldsrc::LocalResourceInventoryBuilder{}.build(
+        list, goldsrc::GoldSrcResourceNameMapper{}, *resolver.resolver);
+    REQUIRE(built);
+    REQUIRE(built.state);
+    CHECK(built.state->entry_count() == goldsrc::kMaximumResourceCount);
+    CHECK(built.state->summary().total_entry_count() == specs.size());
+    CHECK(built.state->entries().back().resource_index() == 4094U);
+
+    goldsrc::LocalResourceInventoryLimits limits;
+    limits.maximum_entry_count = 1024U;
+    const auto limited = goldsrc::LocalResourceInventoryBuilder{limits}.build(
+        list, goldsrc::GoldSrcResourceNameMapper{}, *resolver.resolver);
+    REQUIRE_FALSE(limited);
+    CHECK_FALSE(limited.state);
+    REQUIRE(limited.error);
+    CHECK(limited.error->code ==
+          goldsrc::LocalResourceInventoryErrorCode::entry_count_limit_exceeded);
+}
+
 static_assert(std::is_copy_constructible_v<
               goldsrc::LocalResourceInventoryEntry>);
 static_assert(!std::is_copy_assignable_v<

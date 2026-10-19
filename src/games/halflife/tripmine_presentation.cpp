@@ -37,18 +37,19 @@ void LocalWeaponPresentationController::prepare_presentation(const IStaticEffect
         pose.eye.y+pose.direction.y*scale,pose.eye.z+pose.direction.z*scale},generation_,receiving,2U,3U};
     tripmine_.last_trace=request;const auto result=query.placement_trace(request);tripmine_.last_result=result;
     if(!result.valid || !std::isfinite(result.fraction) || result.fraction<0 || result.fraction>1) {
-        ++tripmine_.unavailable;return;
+        ++tripmine_.unavailable;diagnostic_rejection(c,"local_placement_query_unavailable");return;
     }
     // Pinned event checks fraction<1, not FL_CONVEYOR. Startsolid is conservatively
     // suppressed by this presentation profile; the server still decides placement.
     if(result.start_solid || result.all_solid || result.fraction>=1 || !result.hit_entity) {
-        ++tripmine_.no_hit;return;
+        ++tripmine_.no_hit;diagnostic_rejection(c,"local_placement_trace_blocked_or_no_hit");return;
     }
     start(LocalWeaponAction::deploy_charge,c.sequence,c.sample_end_seconds,
         tripmine_draw_sequence,0U,now+1.0,false,false);
     if(!action_) return;
     if(pending.event_only) {action_->identity.sub_identity=pending.event_ordinal+1U;
         action_->visual.source=LocalWeaponAnimationSource::service_event;}
+    diagnostic_action(core::MultiplayerActionPhase::accepted);
     ++tripmine_.eligible;
     const bool reserve=!pending.event_only && reserve_ && *reserve_>tripmine_.reserved_ammo;
     auto& receipt=tripmine_receipts_[tripmine_receipt_next_++%tripmine_receipts_.size()];

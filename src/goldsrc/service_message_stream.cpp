@@ -1,6 +1,8 @@
 #include <hlclient/goldsrc/service_message_stream.hpp>
+#include <hlclient/goldsrc/byte_reader.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <limits>
 #include <utility>
 
@@ -421,8 +423,54 @@ ServiceMessageDecodeResult ServiceMessageStreamDecoder::decode(
             };
         }
 
+        // GoldSrc dispatches these controls independently of server-info.
+        // A customized server may send a command-only payload before its
+        // fragmented server-info response. Decode framing, never execute it.
+        if (wire_opcode ==
+            static_cast<std::uint8_t>(ServiceMessageOpcode::no_operation)) {
+            messages.push_back(DecodedServiceMessage{
+                ServiceMessageOpcode::no_operation,
+                ServiceMessageKind::no_operation,
+                opcode_offset,
+                1U,
+                std::monostate{},
+            });
+            ++message_count;
+            continue;
+        }
+        if (wire_opcode ==
+            static_cast<std::uint8_t>(ServiceMessageOpcode::director)) {
+            // The same bounded framing primitive is used by the runtime
+            // control decoder. Bytes inside this envelope are never scanned
+            // for service boundaries or interpreted as director commands.
+            ByteReader reader{std::span<const std::byte>{payload.bytes}.subspan(offset)};
+            const auto body=reader.read_uint8_sized_bytes();
+            if (!body) {
+                return failure(
+                    ServiceMessageErrorCode::truncated_control_body,
+                    payload.bytes.size(), wire_opcode,
+                    "Director control explicit-length body is truncated");
+            }
+            offset+=reader.position();
+            messages.push_back(DecodedServiceMessage{
+                ServiceMessageOpcode::director,
+                ServiceMessageKind::ignored_director,
+                opcode_offset,
+                offset-opcode_offset,
+                ServiceIgnoredDirector{body->size()},
+            });
+            ++message_count;
+            continue;
+        }
+        const bool is_command_text = wire_opcode ==
+            static_cast<std::uint8_t>(ServiceMessageOpcode::command_text);
+        const bool is_cvar_query_with_id = wire_opcode ==
+            static_cast<std::uint8_t>(ServiceMessageOpcode::cvar_query_with_id);
+        const bool is_cvar_query = is_cvar_query_with_id || wire_opcode ==
+            static_cast<std::uint8_t>(ServiceMessageOpcode::cvar_query);
         if (wire_opcode !=
-            static_cast<std::uint8_t>(ServiceMessageOpcode::text_control)) {
+                static_cast<std::uint8_t>(ServiceMessageOpcode::text_control) &&
+            !is_command_text && !is_cvar_query) {
             return failure(
                 ServiceMessageErrorCode::unsupported_service_opcode,
                 opcode_offset,
@@ -430,6 +478,22 @@ ServiceMessageDecodeResult ServiceMessageStreamDecoder::decode(
                 "Unsupported service opcode appears before the confirmed boundary");
         }
 
+        std::optional<std::int32_t> request_id;
+        if (is_cvar_query_with_id) {
+            if (payload.bytes.size() - offset < 4U) {
+                return failure(
+                    ServiceMessageErrorCode::truncated_control_body,
+                    payload.bytes.size(), wire_opcode,
+                    "Cvar-query request identifier is truncated");
+            }
+            std::uint32_t encoded = 0U;
+            for (std::size_t index = 0U; index < 4U; ++index) {
+                encoded |= std::to_integer<std::uint32_t>(payload.bytes[offset + index])
+                    << (index * 8U);
+            }
+            request_id = std::bit_cast<std::int32_t>(encoded);
+            offset += 4U;
+        }
         const auto string_offset = offset;
         const auto available = payload.bytes.size() - string_offset;
         const auto scan_count = std::min(
@@ -467,16 +531,35 @@ ServiceMessageDecodeResult ServiceMessageStreamDecoder::decode(
                 "Service text exceeds the configured bounded-string length");
         }
 
-        const auto* string_data = reinterpret_cast<const char*>(
-            payload.bytes.data() + string_offset);
         const auto message_end = *terminator_offset + 1U;
-        messages.push_back(DecodedServiceMessage{
-            ServiceMessageOpcode::text_control,
-            ServiceMessageKind::text_control,
-            opcode_offset,
-            message_end - opcode_offset,
-            ServiceTextControl{std::string{string_data, string_size}},
-        });
+        if (is_cvar_query) {
+            messages.push_back(DecodedServiceMessage{
+                is_cvar_query_with_id ? ServiceMessageOpcode::cvar_query_with_id
+                                     : ServiceMessageOpcode::cvar_query,
+                ServiceMessageKind::ignored_cvar_query,
+                opcode_offset,
+                message_end - opcode_offset,
+                ServiceIgnoredCvarQuery{string_size, request_id},
+            });
+        } else if (is_command_text) {
+            messages.push_back(DecodedServiceMessage{
+                ServiceMessageOpcode::command_text,
+                ServiceMessageKind::ignored_command_text,
+                opcode_offset,
+                message_end - opcode_offset,
+                ServiceIgnoredCommandText{string_size},
+            });
+        } else {
+            const auto* string_data = reinterpret_cast<const char*>(
+                payload.bytes.data() + string_offset);
+            messages.push_back(DecodedServiceMessage{
+                ServiceMessageOpcode::text_control,
+                ServiceMessageKind::text_control,
+                opcode_offset,
+                message_end - opcode_offset,
+                ServiceTextControl{std::string{string_data, string_size}},
+            });
+        }
         ++message_count;
         offset = message_end;
     }
@@ -603,83 +686,121 @@ PreResourceServiceDecodeResult ServiceMessageStreamDecoder::continue_to_pre_reso
     }
 
     auto offset = body_offset + parsed.bytes_consumed;
-    if (offset >= payload.bytes.size()) {
-        return pre_resource_failure(
-            PreResourceServiceErrorCode::missing_post_server_info_control,
-            offset,
-            std::nullopt,
-            std::nullopt,
-            "Server-info is not followed by the confirmed simple control");
-    }
-
-    const auto control_opcode = std::to_integer<std::uint8_t>(payload.bytes[offset]);
-    if (control_opcode != kPreResourceSimpleControlOpcode) {
-        const auto code = control_opcode ==
-                                  static_cast<std::uint8_t>(
-                                      ServiceMessageOpcode::complex_signon_boundary)
-                              ? PreResourceServiceErrorCode::duplicate_server_info
-                              : PreResourceServiceErrorCode::
-                                    unsupported_post_server_info_opcode;
-        return pre_resource_failure(
-            code,
-            offset,
-            control_opcode,
-            std::nullopt,
-            "Unexpected service opcode follows the decoded server-info body");
-    }
-    if (payload.bytes.size() - offset < 3U) {
-        return pre_resource_failure(
-            PreResourceServiceErrorCode::truncated_post_server_info_control,
-            payload.bytes.size(),
-            control_opcode,
-            std::nullopt,
-            "Confirmed opcode-54 control body is truncated");
-    }
-    if (payload.bytes[offset + 1U] != std::byte{0U} ||
-        payload.bytes[offset + 2U] != std::byte{0U}) {
-        return pre_resource_failure(
-            PreResourceServiceErrorCode::invalid_post_server_info_control,
-            offset + 1U,
-            control_opcode,
-            std::nullopt,
-            "Opcode-54 control must contain the captured empty NUL string and zero byte");
-    }
-
     std::vector<PreResourceControl> controls;
-    controls.reserve(1U);
-    controls.push_back(PreResourceControl{
-        control_opcode,
-        offset,
-        3U,
-        0U,
-        0U,
-    });
-    offset += 3U;
-
-    if (offset >= payload.bytes.size()) {
-        return pre_resource_failure(
-            PreResourceServiceErrorCode::missing_pre_resource_boundary,
-            offset,
-            std::nullopt,
-            std::nullopt,
-            "Confirmed simple control is not followed by a complex boundary opcode");
+    bool extra_info_seen = false;
+    while (true) {
+        if (offset >= payload.bytes.size()) {
+            return pre_resource_failure(
+                extra_info_seen
+                    ? PreResourceServiceErrorCode::missing_pre_resource_boundary
+                    : PreResourceServiceErrorCode::missing_post_server_info_control,
+                offset, std::nullopt, std::nullopt,
+                "Pre-resource control stream ended before its required boundary");
+        }
+        // Account for the server-info event and the next control/boundary.
+        if (controls.size() + 1U >= limits_.maximum_messages_per_payload) {
+            return pre_resource_failure(
+                PreResourceServiceErrorCode::message_limit_exceeded,
+                offset, std::nullopt, std::nullopt,
+                "Pre-resource controls exceed the configured message bound");
+        }
+        const auto control_offset = offset;
+        const auto control_opcode = std::to_integer<std::uint8_t>(payload.bytes[offset]);
+        if (control_opcode == kPreResourceComplexBoundaryOpcode) {
+            if (!extra_info_seen) {
+                return pre_resource_failure(
+                    PreResourceServiceErrorCode::missing_post_server_info_control,
+                    offset, control_opcode, std::nullopt,
+                    "Delta descriptions precede the required extra-info control");
+            }
+            break;
+        }
+        if (control_opcode ==
+            static_cast<std::uint8_t>(ServiceMessageOpcode::no_operation)) {
+            controls.push_back(PreResourceControl{
+                control_opcode, offset, 1U, 0U, 0U});
+            ++offset;
+            continue;
+        }
+        if (control_opcode ==
+            static_cast<std::uint8_t>(ServiceMessageOpcode::director)) {
+            ByteReader reader{std::span<const std::byte>{payload.bytes}.subspan(offset+1U)};
+            const auto body=reader.read_uint8_sized_bytes();
+            if (!body) {
+                return pre_resource_failure(
+                    PreResourceServiceErrorCode::truncated_post_server_info_control,
+                    payload.bytes.size(), control_opcode, std::nullopt,
+                    "Pre-resource director control explicit-length body is truncated");
+            }
+            const auto message_size=1U+reader.position();
+            controls.push_back(PreResourceControl{
+                control_opcode, control_offset, message_size, 0U, 0U});
+            offset+=message_size;
+            // A director envelope never substitutes for required extra-info.
+            continue;
+        }
+        const bool extra_info = control_opcode == kPreResourceSimpleControlOpcode;
+        const bool inert_text = control_opcode ==
+                static_cast<std::uint8_t>(ServiceMessageOpcode::text_control) ||
+            control_opcode ==
+                static_cast<std::uint8_t>(ServiceMessageOpcode::command_text);
+        if (!extra_info && !inert_text) {
+            return pre_resource_failure(
+                control_opcode == static_cast<std::uint8_t>(
+                    ServiceMessageOpcode::complex_signon_boundary)
+                    ? PreResourceServiceErrorCode::duplicate_server_info
+                    : PreResourceServiceErrorCode::unsupported_post_server_info_opcode,
+                offset, control_opcode, std::nullopt,
+                "Unexpected service opcode in the pre-resource control stream");
+        }
+        if (extra_info && extra_info_seen) {
+            return pre_resource_failure(
+                PreResourceServiceErrorCode::invalid_post_server_info_control,
+                offset, control_opcode, std::nullopt,
+                "Duplicate extra-info control in the pre-resource stream");
+        }
+        ++offset;
+        const auto string_offset = offset;
+        const auto available = payload.bytes.size() - string_offset;
+        const auto scan_count = std::min(available, limits_.maximum_string_length + 1U);
+        std::optional<std::size_t> terminator;
+        for (std::size_t index = 0U; index < scan_count; ++index) {
+            if (payload.bytes[string_offset + index] == std::byte{0U}) {
+                terminator = string_offset + index;
+                break;
+            }
+        }
+        if (!terminator) {
+            const bool too_long = available > limits_.maximum_string_length;
+            return pre_resource_failure(
+                too_long ? PreResourceServiceErrorCode::invalid_post_server_info_control
+                         : PreResourceServiceErrorCode::truncated_post_server_info_control,
+                too_long ? string_offset + limits_.maximum_string_length
+                         : payload.bytes.size(),
+                control_opcode, std::nullopt,
+                "Pre-resource control string has no NUL within its bounded body");
+        }
+        const auto string_length = *terminator - string_offset;
+        offset = *terminator + 1U;
+        std::uint8_t control_value = 0U;
+        if (extra_info) {
+            if (offset == payload.bytes.size()) {
+                return pre_resource_failure(
+                    PreResourceServiceErrorCode::truncated_post_server_info_control,
+                    offset, control_opcode, std::nullopt,
+                    "Extra-info control is missing its trailing flag byte");
+            }
+            control_value = std::to_integer<std::uint8_t>(payload.bytes[offset++]);
+            extra_info_seen = true;
+        }
+        // Retain only numeric framing data: no fallback path lookup, command
+        // execution, cheat setting, or external side effect belongs here.
+        controls.push_back(PreResourceControl{
+            control_opcode, control_offset, offset - control_offset,
+            string_length, control_value});
     }
-    const auto complex_opcode = std::to_integer<std::uint8_t>(payload.bytes[offset]);
-    if (complex_opcode != kPreResourceComplexBoundaryOpcode) {
-        const auto code = complex_opcode ==
-                                  static_cast<std::uint8_t>(
-                                      ServiceMessageOpcode::complex_signon_boundary)
-                              ? PreResourceServiceErrorCode::duplicate_server_info
-                              : PreResourceServiceErrorCode::
-                                    unsupported_post_server_info_opcode;
-        return pre_resource_failure(
-            code,
-            offset,
-            complex_opcode,
-            std::nullopt,
-            "Unexpected service opcode follows the confirmed opcode-54 control");
-    }
 
+    const auto complex_opcode = kPreResourceComplexBoundaryOpcode;
     const auto complex_offset = offset;
     ++offset;
     if (offset == payload.bytes.size()) {
@@ -715,6 +836,7 @@ PreResourceServiceDecodeResult ServiceMessageStreamDecoder::continue_to_pre_reso
         parsed.bytes_consumed,
     };
 
+    const auto required_event_count = controls.size() + 2U;
     return PreResourceServiceDecodeResult{
         PreResourceSignonState{
             std::move(*parsed.state),
@@ -723,7 +845,7 @@ PreResourceServiceDecodeResult ServiceMessageStreamDecoder::continue_to_pre_reso
             source_payload,
         },
         std::nullopt,
-        3U,
+        required_event_count,
     };
 }
 

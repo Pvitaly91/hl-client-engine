@@ -3,11 +3,13 @@
 #include <hlclient/goldsrc/entity_baseline_decoder.hpp>
 #include <hlclient/game_api/game_client_host.hpp>
 #include <hlclient/games/halflife/client_module.hpp>
+#include <hlclient/app/multiplayer_presentation_diagnostics.hpp>
 
 #include "delta_test_fixture.hpp"
 #include "event_test_fixture.hpp"
 #include "crossbow_test_fixture.hpp"
 #include "snark_sound_pop_test_fixture.hpp"
+#include "weapon_suite_test_fixture.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -541,6 +543,82 @@ void finish_entities(fixture::BitWriter& writer)
     return *found;
 }
 
+TEST_CASE("Normal replay weapon diagnostics join canonical map identity without changing module epochs",
+          "[diagnostic-map-identity][multiplayer-diagnostics][runtime-replay][no-stock]") {
+    namespace d=hlclient::core;
+    namespace api=hlclient::game_api;
+    namespace f=hlclient::tests::weapon_suite_fixture;
+    struct Sink final:d::MultiplayerDiagnosticSink {
+        bool on{true};std::vector<d::MultiplayerDiagnosticEvent> events;
+        bool enabled()const noexcept override{return on;}
+        bool observe(const d::MultiplayerDiagnosticEvent& event)noexcept override {
+            try{events.push_back(event);return true;}catch(...){return false;}
+        }
+    } sink;
+    hlclient::app::MultiplayerPresentationDiagnostics bridge{sink};
+    std::array<std::uint64_t,2> canonical{1,263};std::size_t identity_reads{};
+    auto init=initialization();init.receiving_player_entity=1;
+    const auto host=init.game_client;
+    host->set_diagnostic_sink(&bridge);
+    host->set_diagnostic_generations([&]{++identity_reads;return canonical;});
+    client::ClientWorldState world;
+    const auto replay=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(replay);
+    const auto prepare=[&](std::uint64_t generation,double at) {
+        auto observed=f::state(4);observed.generation=generation;
+        observed.client_metadata.generation=generation;
+        api::GameRecordState committed;committed.multiplayer.maximum_clients=8;
+        committed.weapon_hud=observed.weapon_hud;committed.lifecycle=observed.lifecycle;
+        host->commit_record(std::move(committed));
+        auto model=f::model(4);model.generation=generation;host->bind_model(model);
+        host->observe(observed,at);
+    };
+    const auto submit=[&](std::uint64_t generation,std::uint32_t command,double at) {
+        auto value=f::command(command,at);value.generation=generation;host->submit(value,at);
+    };
+    const auto actions=[&] {
+        std::vector<const d::MultiplayerDiagnosticEvent*> result;
+        for(const auto& event:sink.events)
+            if(const auto* p=std::get_if<d::MultiplayerActionPayload>(&event.payload);
+                p && p->phase==d::MultiplayerActionPhase::accepted)result.push_back(&event);
+        return result;
+    };
+    const auto geometry_count=[&] {
+        return std::ranges::count_if(sink.events,[](const auto& event) {
+            return std::holds_alternative<d::MultiplayerGeometryPayload>(event.payload);
+        });
+    };
+    prepare(1,0);
+    hlclient::renderer::RenderScene shown;
+    shown.camera.position={100,80,80};shown.camera.target={101,80,80};
+    bridge.completed_frame(shown,17,1,263,d::multiplayer_diagnostic_now_ns(),640,480);
+    sink.events.clear();submit(1,1,1.0);
+    const auto first=actions();REQUIRE(first.size()==1);
+    CHECK(first[0]->identity.network_generation==1);
+    CHECK(first[0]->identity.map_generation==263);
+    REQUIRE(first[0]->identity.action_id);CHECK(first[0]->identity.command_id==1);
+    CHECK(geometry_count()==2); // exact source frame, unknown geometry without a retained MDL pose.
+    for(const auto& event:sink.events)if(std::holds_alternative<d::MultiplayerGeometryPayload>(event.payload)) {
+        CHECK(event.identity.network_generation==1);CHECK(event.identity.map_generation==263);
+        CHECK(event.identity.command_id==1);CHECK(event.identity.action_id==first[0]->identity.action_id);
+        CHECK(event.identity.render_frame==17);CHECK(event.knowledge==d::MultiplayerKnowledge::local_proxy);
+    }
+    CHECK(identity_reads>0);
+    auto next=initialization(2);next.receiving_player_entity=1;next.game_client=host;
+    REQUIRE_FALSE(replay.session->reset_generation(next));canonical={2,264};prepare(2,0);
+    sink.events.clear();submit(1,99,2.0);CHECK(sink.events.empty()); // deferred previous-generation command.
+    submit(2,1,2.0);const auto second=actions();REQUIRE(second.size()==1);
+    CHECK(second[0]->identity.network_generation==2);CHECK(second[0]->identity.map_generation==264);
+    CHECK(geometry_count()==0); // old completed frame must not be joined to a new generation.
+    bridge.completed_frame(shown,18,2,264,d::multiplayer_diagnostic_now_ns(),640,480);
+    sink.events.clear();submit(2,2,2.2);REQUIRE(actions().size()==1);CHECK(geometry_count()==2);
+    for(const auto& event:sink.events)if(std::holds_alternative<d::MultiplayerGeometryPayload>(event.payload)) {
+        CHECK(event.identity.network_generation==2);CHECK(event.identity.map_generation==264);
+        CHECK(event.identity.command_id==2);CHECK(event.identity.render_frame==18);
+    }
+    const auto reads=identity_reads;sink.on=false;submit(2,3,2.4);CHECK(identity_reads==reads);
+    host->set_diagnostic_sink(nullptr);
+}
+
 TEST_CASE("E14 replay exact registered bindings names receipt clock and rollback", "[e14][runtime-replay]") {
     namespace api = hlclient::game_api;
     auto init = initialization();init.max_clients=2U;init.receiving_player_entity=1U;
@@ -585,6 +663,88 @@ TEST_CASE("E14 replay exact registered bindings names receipt clock and rollback
     CHECK(hud_text("Eve"));CHECK_FALSE(hud_text("Alice [9mmhandgun] Bob",false,7.0));
     auto next=initialization(2U);next.max_clients=2U;next.receiving_player_entity=1U;next.game_client=host;
     REQUIRE_FALSE(session.session->reset_generation(std::move(next)));CHECK_FALSE(hud_text("Alice"));CHECK_FALSE(hud_text("Eve"));
+}
+
+TEST_CASE("Server ping values reach local and remote scoreboard slots atomically",
+          "[pings][runtime-replay][integration][no-stock]") {
+    namespace api = hlclient::game_api;
+    auto init = initialization();
+    init.max_clients = 2U;
+    init.receiving_player_entity = 1U;
+    auto host = init.game_client;
+    client::ClientWorldState world;
+    auto session = goldsrc::RuntimeReplaySession::initialize(std::move(init), world);
+    REQUIRE(session);
+    const auto info = [](std::vector<std::byte>& bytes, std::uint8_t index,
+                         std::uint32_t uid, std::string_view name) {
+        bytes.push_back(std::byte{13}); bytes.push_back(static_cast<std::byte>(index));
+        for (unsigned i=0U; i<4U; ++i) bytes.push_back(static_cast<std::byte>((uid>>(8U*i))&255U));
+        const auto value = uid ? "\\name\\"+std::string{name} : std::string{};
+        for (const unsigned char c : value) bytes.push_back(static_cast<std::byte>(c));
+        bytes.push_back(std::byte{0}); bytes.resize(bytes.size()+16U, std::byte{0});
+    };
+    const auto pings = [](std::vector<std::byte>& bytes,
+                         std::initializer_list<std::array<std::uint32_t,3U>> entries) {
+        fixture::BitWriter writer;
+        writer.write(17U,8U);
+        for (const auto& entry : entries) {
+            writer.write(1U,1U); writer.write(entry[0],5U);
+            writer.write(entry[1],12U); writer.write(entry[2],7U);
+        }
+        writer.write(0U,1U); writer.align_zero();
+        const auto encoded=writer.bytes(); bytes.insert(bytes.end(),encoded.begin(),encoded.end());
+    };
+    const auto state = [&]() {
+        const auto* observation = world.runtime_observation().get();
+        REQUIRE(observation);
+        const auto staged = host->stage_record({observation,*observation,{},1U,2U});
+        REQUIRE(staged);
+        return staged.state->multiplayer;
+    };
+    std::vector<std::byte> wire;
+    info(wire,0U,11U,"Local"); info(wire,1U,12U,"Remote");
+    pings(wire,{{0U,37U,0U},{1U,148U,3U}});
+    REQUIRE(session.session->apply_record(record(wire,100U,19001U,1U)));
+    auto displayed=state();
+    CHECK(displayed.local_slot==1U);
+    CHECK(displayed.players[0].ping_ms==37U); CHECK(displayed.players[0].packet_loss==0U);
+    CHECK(displayed.players[1].ping_ms==148U); CHECK(displayed.players[1].packet_loss==3U);
+    const auto canonical=world.runtime_observation()->canonical_state_hash;
+
+    wire.clear(); pings(wire,{{0U,55U,1U},{1U,200U,5U}});
+    pings(wire,{{0U,29U,2U},{0U,0U,0U}}); // Stable borrowed views; duplicate slots are last-wins.
+    REQUIRE(session.session->apply_record(record(wire,101U,19002U,2U)));
+    displayed=state();
+    CHECK(displayed.players[0].ping_ms==0U); CHECK(displayed.players[0].packet_loss==0U);
+    CHECK(displayed.players[1].ping_ms==200U);
+    CHECK(world.runtime_observation()->canonical_state_hash==canonical);
+
+    wire.clear(); pings(wire,{{0U,77U,2U}}); wire.push_back(std::byte{255});
+    CHECK_FALSE(session.session->apply_record(record(wire,102U,19003U,3U)));
+    CHECK(state().players[0].ping_ms==0U); // Bad suffix cannot partially publish.
+    wire.clear(); pings(wire,{{2U,77U,2U}}); // Wire-valid slot, outside negotiated maxclients.
+    CHECK_FALSE(session.session->apply_record(record(wire,102U,19003U,3U)));
+    CHECK(state().players[0].ping_ms==0U);
+
+    wire.clear(); pings(wire,{{1U,333U,1U}}); info(wire,1U,13U,"Replacement");
+    REQUIRE(session.session->apply_record(record(wire,102U,19003U,3U)));
+    CHECK(state().players[1].name=="Replacement");
+    CHECK_FALSE(state().players[1].ping_ms); // Old occupant's ping is not inherited.
+    wire.clear(); pings(wire,{{1U,82U,2U}});
+    REQUIRE(session.session->apply_record(record(wire,103U,19004U,4U)));
+    CHECK(state().players[1].ping_ms==82U);
+    host->set_hud_context({640U,480U,true});
+    const auto hud=host->hud(*world.runtime_observation(),1.0);
+    CHECK(std::any_of(hud.draw.texts.begin(),hud.draw.texts.end(),[](const auto& text){
+        return text.text=="PING MS";
+    }));
+    CHECK(api::valid_hud_draw_commands(hud.draw));
+    wire.clear(); info(wire,1U,0U,""); pings(wire,{{1U,199U,0U}});
+    REQUIRE(session.session->apply_record(record(wire,104U,19005U,5U)));
+    CHECK_FALSE(state().players[1].present); CHECK_FALSE(state().players[1].ping_ms);
+    auto next=initialization(2U); next.max_clients=2U; next.receiving_player_entity=1U; next.game_client=host;
+    REQUIRE_FALSE(session.session->reset_generation(std::move(next)));
+    CHECK_FALSE(state().players[0].ping_ms); CHECK_FALSE(state().players[1].ping_ms);
 }
 
 TEST_CASE("Runtime replay reference profile and limits are explicit",
@@ -1474,6 +1634,39 @@ TEST_CASE("E13 advertised render effect and amount are neutral bounded atomic pr
         CHECK(world.runtime_observation()==after_delta);
         auto next=initialization(2U);REQUIRE_FALSE(session.session->reset_generation(next));
         CHECK(world.runtime_observation()->packet_entities.empty());
+    }
+}
+
+TEST_CASE("Studio render colors retain advertised byte values as optional visual state",
+    "[studio-translucency][goldsrc][runtime-replay]") {
+    for(const auto color_type:{1U,8U}) {
+        auto init=initialization(1U,4096U,false,true);goldsrc::DeltaSchemaRegistryBuilder builder;
+        for(const auto name:{"entity_state_t","entity_state_player_t","clientdata_t","weapon_data_t"}) {
+            if(std::string_view{name}!="entity_state_t") {REQUIRE(builder.insert(*init.schemas->find_exact(name)));continue;}
+            std::vector<fixture::Field> fields{std::begin(kEntityFields),std::end(kEntityFields)};
+            fields.push_back({"rendercolor.r",color_type,700U,8U});fields.push_back({"rendercolor.g",color_type,701U,8U});
+            fields.push_back({"rendercolor.b",color_type,702U,8U});
+            const auto parsed=goldsrc::DeltaDescriptionParser{}.parse(fixture::schema(name,fields),0);
+            REQUIRE(parsed);REQUIRE(builder.insert(*parsed.schema));
+        }
+        init.schemas=std::make_shared<const goldsrc::DeltaSchemaRegistryState>(std::move(builder).publish());
+        init.baselines=make_baselines(*init.schemas,1U,true);client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        fixture::BitWriter writer;time_prefix(writer,100.0F);entity_header(writer,goldsrc::kGoldSrcSvcPacketEntitiesOpcode,1);
+        writer.write(0,1);writer.write(0,1);writer.write(2U,6);writer.write(0,1);writer.write(0,1);
+        writer.write(2U,3);writer.write(0xc0U,8);writer.write(1U,8);
+        writer.write(32U,8);writer.write(128U,8);writer.write(255U,8);finish_entities(writer);
+        const auto applied=session.session->apply_record(record(writer.bytes(),100,13001,1));
+        INFO((applied.error ? applied.error->context : "published"));REQUIRE(applied);
+        const auto published=world.runtime_observation();REQUIRE(published);
+        const auto& color=published->packet_entities[0].render_color;
+        CHECK(color[0]==32U);CHECK(color[1]==128U);CHECK(color[2]==255U);
+        auto changed=*published;changed.packet_entities[0].render_color[1]=64U;
+        CHECK(client::runtime_observation_canonical_hash(changed)==published->canonical_state_hash);
+        CHECK(client::runtime_observation_visual_hash_v3(changed)!=client::runtime_observation_visual_hash_v3(*published));
+        changed.packet_entities[0].render_color[1]=256U;CHECK_FALSE(client::valid_runtime_observation(changed));
+        auto truncated=writer.bytes();truncated.pop_back();
+        REQUIRE_FALSE(session.session->apply_record(record(truncated,101,13002,2)));CHECK(world.runtime_observation()==published);
     }
 }
 

@@ -14,6 +14,44 @@ namespace {
 using hlclient::core::parse_command_line;
 using hlclient::core::RendererBackend;
 
+TEST_CASE("E33 idle client startup is explicit and does not invent a connection",
+          "[e33][core][command-line][no-stock]") {
+    const std::array<std::string_view,1> idle{"--open-client"};
+    const auto opened=parse_command_line(idle);REQUIRE(opened);
+    CHECK(opened.options->open_client);CHECK_FALSE(opened.options->connect_endpoint);
+    CHECK_FALSE(opened.options->base_directory);CHECK_FALSE(opened.options->external_server_client);
+    const auto defaults=parse_command_line({});REQUIRE(defaults);CHECK_FALSE(defaults.options->open_client);
+    const std::array<std::string_view,3> configured{"--open-client","--basedir","D:/licensed Half Life"};
+    const auto with_assets=parse_command_line(configured);REQUIRE(with_assets);
+    CHECK(with_assets.options->base_directory=="D:/licensed Half Life");
+    const std::array<std::string_view,2> duplicate{"--open-client","--open-client"};
+    CHECK_FALSE(parse_command_line(duplicate));
+    const std::array<std::string_view,3> autoconnect{"--open-client","--connect","192.168.0.104:27016"};
+    CHECK_FALSE(parse_command_line(autoconnect));
+    const std::array<std::string_view,5> replay{"--open-client","--renderer","null","--runtime-replay-fixture","basic-mixed"};
+    CHECK_FALSE(parse_command_line(replay));
+    CHECK(hlclient::core::command_line_help().find("--open-client")!=std::string_view::npos);
+}
+
+TEST_CASE("E33 external idle launch preserves the exact config and durable identity contract",
+          "[e33][core][command-line][no-stock]") {
+    const std::vector<std::string_view> base{"--external-config","D:/fixture/launch-config.json",
+        "--session-receipt-root","D:/fixture","--session-run-id","0123456789abcdef0123456789abcdef",
+        "--session-role","A"};
+    auto args=base;args.emplace_back("--open-client");
+    const auto opened=parse_command_line(args);REQUIRE(opened);
+    CHECK(opened.options->external_server_client);CHECK(opened.options->open_client);
+    CHECK(opened.options->external_config=="D:/fixture/launch-config.json");
+    CHECK(opened.options->session_run_id=="0123456789abcdef0123456789abcdef");
+    CHECK_FALSE(opened.options->connect_endpoint);
+    args.insert(args.begin(),"--open-client");CHECK_FALSE(parse_command_line(args));
+    args={"--external-config","D:/fixture/launch-config.json","--open-client"};
+    CHECK_FALSE(parse_command_line(args));
+    args=base;args.insert(args.end(),{"--open-client","--renderer","null"});
+    CHECK_FALSE(parse_command_line(args));
+    const auto connected=parse_command_line(base);REQUIRE(connected);CHECK_FALSE(connected.options->open_client);
+}
+
 TEST_CASE("E32 movement diagnostics remain explicit and external snapshots own forwarding", "[e32][core][command-line]") {
     const auto defaults=parse_command_line({});REQUIRE(defaults);
     CHECK_FALSE(defaults.options->movement_diagnostics);

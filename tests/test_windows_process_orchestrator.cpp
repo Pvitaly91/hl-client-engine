@@ -1967,6 +1967,27 @@ TEST_CASE("Abrupt guard loss retains redundant isolation until both Jobs are zer
     CHECK_FALSE(redundant_owner_active);
 }
 
+TEST_CASE("Held diagnostic pipe writer has a bounded truthful terminal deadline",
+          "[reporting-cache][platform][windows][orchestrator][logs][no-stock]")
+{
+    auto log=windows::BoundedProcessLogCapture::create({1024U,64U,16U,128U});
+    REQUIRE(log);
+    HANDLE duplicate{};
+    REQUIRE(::DuplicateHandle(::GetCurrentProcess(),
+        static_cast<HANDLE>(log->inherited_write_handle()),::GetCurrentProcess(),
+        &duplicate,0U,FALSE,DUPLICATE_SAME_ACCESS)!=FALSE);
+    TestHandle held_writer{duplicate}; // No EOF until after finish returns.
+    log->close_parent_write_handle();
+    const auto start=std::chrono::steady_clock::now();
+    const auto result=log->finish(std::chrono::milliseconds{20});
+    const auto elapsed=std::chrono::steady_clock::now()-start;
+    CHECK(elapsed<std::chrono::seconds{3}); // Existing timeout + 2s cancellation grace.
+    CHECK(result.capture_failed);
+    CHECK(result.native_error==WAIT_TIMEOUT);
+    CHECK_FALSE(windows::bounded_process_log_snapshot_complete(result));
+    CHECK(result.bytes.size()<=1024U);
+}
+
 TEST_CASE("Long manual diagnostic logs preserve bounded startup and terminal windows",
           "[platform][windows][orchestrator][logs][manual-timing]")
 {

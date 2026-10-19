@@ -79,14 +79,15 @@ void LocalWeaponPresentationController::prepare_snark(const IStaticEffectTrace& 
     PlacementTraceRequest request{offset(20),offset(64),generation_,receiving,2U,3U};
     snark_.last_trace=request;const auto result=query.placement_trace(request);snark_.last_result=result;
     if(!result.valid || !std::isfinite(result.fraction) || result.fraction<0 || result.fraction>1) {
-        ++snark_.unavailable;return;
+        ++snark_.unavailable;diagnostic_rejection(c,"local_placement_query_unavailable");return;
     }
-    if(result.start_solid || result.all_solid || result.fraction<=.25) {++snark_.blocked;return;}
+    if(result.start_solid || result.all_solid || result.fraction<=.25) {++snark_.blocked;diagnostic_rejection(c,"local_placement_trace_blocked");return;}
     start(LocalWeaponAction::throw_release,c.sequence,c.sample_end_seconds,snark_throw_sequence,0,
         now+1.25,false,false);
     if(!action_)return;
     if(pending.event_only) {action_->identity.sub_identity=pending.event_ordinal+1;
         action_->visual.source=LocalWeaponAnimationSource::service_event;}
+    diagnostic_action(core::MultiplayerActionPhase::accepted);
     receipt->identity=action_->identity;receipt->pre_record=action_->pre_record_ordinal;
     receipt->reserved=!pending.event_only;
     if(receipt->reserved)++snark_.reserved_ammo;

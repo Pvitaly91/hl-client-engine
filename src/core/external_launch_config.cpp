@@ -30,6 +30,53 @@ bool safe_path_string(const std::string_view s) noexcept
     for(const auto c:s)if(static_cast<unsigned char>(c)<32 || c=='"' || c=='*' || c=='?' || c=='|' || c=='<' || c=='>')return false;
     return s.size()>3 && ((s[0]>='A' && s[0]<='Z') || (s[0]>='a' && s[0]<='z')) && s[1]==':' && (s[2]=='/' || s[2]=='\\') && s.find(':',2)==std::string_view::npos;
 }
+char permission_lower(const char c) noexcept
+{
+    return c>='A' && c<='Z'?static_cast<char>(c-'A'+'a'):c;
+}
+std::optional<std::string> permission_component(const std::string_view component)
+{
+    if(component.empty() || component.size()>255 || component=="." || component==".." ||
+        component.front()==' ' || component.back()==' ' || component.back()=='.')return {};
+    std::string normalized;
+    normalized.reserve(component.size());
+    for(const unsigned char c:component) {
+        // Do not guess Windows Unicode case folding or accept Win32 aliases.
+        if(c<32 || c>126 || c=='/' || c=='\\' || c==':' || c=='"' ||
+            c=='*' || c=='?' || c=='|' || c=='<' || c=='>')return {};
+        normalized+=permission_lower(static_cast<char>(c));
+    }
+    auto stem=std::string_view{normalized}.substr(0,normalized.find('.'));
+    while(!stem.empty() && stem.back()==' ')stem.remove_suffix(1);
+    if(stem=="con" || stem=="prn" || stem=="aux" || stem=="nul" ||
+        stem=="conin$" || stem=="conout$" || stem=="clock$" ||
+        (stem.size()==4 && (stem.starts_with("com") || stem.starts_with("lpt")) &&
+            stem[3]>='0' && stem[3]<='9'))return {};
+    return normalized;
+}
+std::optional<std::string> permission_installation_root(std::string_view root)
+{
+    if(root.size()<=3 || root.size()>4096 ||
+        !((root[0]>='A' && root[0]<='Z') || (root[0]>='a' && root[0]<='z')) ||
+        root[1]!=':' || (root[2]!='/' && root[2]!='\\'))return {};
+    // One conventional trailing separator is equivalent. Empty interior
+    // components, duplicate trailing separators and drive roots are not.
+    if(root.back()=='/' || root.back()=='\\')root.remove_suffix(1);
+    if(root.size()<=3 || root.back()=='/' || root.back()=='\\')return {};
+    std::string normalized{permission_lower(root[0]),':','/'};
+    std::size_t at=3;
+    while(at<root.size()) {
+        const auto separator=root.find_first_of("/\\",at);
+        const auto end=separator==std::string_view::npos?root.size():separator;
+        const auto component=permission_component(root.substr(at,end-at));
+        if(!component)return {};
+        normalized+=*component;
+        if(end==root.size())break;
+        normalized+='/';
+        at=end+1;
+    }
+    return normalized;
+}
 using Value=std::variant<std::string,double,bool>;
 class Parser final {
 public:
@@ -79,7 +126,7 @@ private:
 std::string number(float v){std::array<char,40> b{};const auto r=std::to_chars(b.data(),b.data()+b.size(),v);return {b.data(),r.ptr};}
 }
 
-std::optional<std::string> normalize_external_endpoint(std::string_view s)
+std::optional<std::string> normalize_external_endpoint(std::string_view s,const bool allow_loopback)
 {
     if(s.empty() || s.size()>128)return {};
     while(!s.empty() && (s.front()==' ' || s.front()=='\t'))s.remove_prefix(1);
@@ -90,10 +137,40 @@ std::optional<std::string> normalize_external_endpoint(std::string_view s)
     if(colon!=std::string_view::npos){const auto p=s.substr(colon+1);auto r=std::from_chars(p.data(),p.data()+p.size(),port);if(p.empty() || r.ec!=std::errc{} || r.ptr!=p.data()+p.size() || port==0 || port>65535)return {};}
     std::array<unsigned,4> octets{};std::size_t start=0;
     for(std::size_t i=0;i<4;++i){const auto dot=address.find('.',start);if((i<3)==(dot==std::string_view::npos))return {};const auto part=address.substr(start,dot==std::string_view::npos?dot:dot-start);if(part.empty() || part.size()>3)return {};const auto r=std::from_chars(part.data(),part.data()+part.size(),octets[i]);if(r.ec!=std::errc{} || r.ptr!=part.data()+part.size() || octets[i]>255)return {};start=dot+1;}
-    // No unspecified, loopback, multicast, limited/direct .255 broadcast or
-    // class-E destination. This mode intentionally selects one LAN unicast.
-    if(octets[0]==0 || octets[0]==127 || octets[0]>=224 || octets[3]==255)return {};
+    // No unspecified, multicast, limited/direct .255 broadcast or class-E
+    // destination. Loopback is explicit console opt-in, never a LAN default.
+    if(octets[0]==0 || (!allow_loopback && octets[0]==127) || octets[0]>=224 || octets[3]==255)return {};
     return std::to_string(octets[0])+'.'+std::to_string(octets[1])+'.'+std::to_string(octets[2])+'.'+std::to_string(octets[3])+':'+std::to_string(port);
+}
+bool approved_installation_file_checks(const std::string_view json,
+    const std::string_view endpoint,const std::string_view asset_root,
+    const std::string_view game_directory) noexcept
+{
+    try {
+        if(json.empty() || json.size()>kInstallationFileChecksMaximumBytes)return false;
+        const auto fields=Parser{json}.object();
+        if(!fields || fields->size()!=4)return false;
+        const auto str=[&](const char* key)->const std::string* {
+            const auto found=fields->find(key);
+            return found==fields->end()?nullptr:std::get_if<std::string>(&found->second);
+        };
+        const auto schema=str("schema"), granted_endpoint=str("endpoint"),
+            granted_root=str("asset_root"), granted_game=str("game_directory");
+        if(!schema || *schema!=kInstallationFileChecksSchema || !granted_endpoint ||
+            !granted_root || !granted_game)return false;
+        const auto actual_endpoint=normalize_external_endpoint(endpoint);
+        const auto expected_endpoint=normalize_external_endpoint(*granted_endpoint);
+        const auto actual_root=permission_installation_root(asset_root);
+        const auto expected_root=permission_installation_root(*granted_root);
+        const auto actual_game=permission_component(game_directory);
+        const auto expected_game=permission_component(*granted_game);
+        return actual_endpoint && expected_endpoint && *actual_endpoint==*expected_endpoint &&
+            actual_root && expected_root && *actual_root==*expected_root &&
+            actual_game && expected_game && *actual_game==*expected_game;
+    } catch(...) {
+        // Permission must never be inferred when parsing/allocation fails.
+        return false;
+    }
 }
 bool valid_external_player_name(const std::string_view s) noexcept
 {
@@ -164,6 +241,36 @@ std::optional<std::string> encode_external_launch_configuration(const ExternalLa
     return "{\n\"schema\":"+external_json_string(kExternalLaunchSchema)+",\n\"version\":3,\n\"endpoint\":"+external_json_string(*normalize_external_endpoint(c.endpoint))+",\n\"name\":"+external_json_string(c.name)+",\n\"asset_root\":"+external_json_string(c.asset_root)+",\n\"steam_api_runtime\":"+external_json_string(c.steam_api_runtime)+",\n\"display_index\":"+std::to_string(c.video.display_index)+",\n\"window_mode\":"+external_json_string(mode)+",\n\"width\":"+std::to_string(c.video.width)+",\n\"height\":"+std::to_string(c.video.height)+",\n\"vsync\":"+(c.video.vsync?"true":"false")+",\n\"brightness\":"+number(c.image.brightness)+",\n\"gamma\":"+number(c.image.gamma)+",\n\"contrast\":"+number(c.image.contrast)+",\n\"volume\":"+std::to_string(c.volume)+",\n\"msaa_samples\":"+std::to_string(c.video.msaa_samples)+",\n\"hud_scale_auto\":"+(c.hud_scale.automatic?"true":"false")+",\n\"hud_scale\":"+number(c.hud_scale.scale)+",\n\"movement_diagnostics\":"+(c.movement_diagnostics?"true":"false")+"\n}\n";
 }
 bool ExternalLauncherLifecycle::busy() const noexcept{return phase_==ExternalLauncherPhase::starting || phase_==ExternalLauncherPhase::active || phase_==ExternalLauncherPhase::cancelling;}
+std::optional<ExternalLaunchConfiguration> merge_external_launch_configuration(
+    const ExternalLaunchConfiguration& baseline,const ExternalLaunchConfiguration& edited,
+    const ExternalLaunchConfiguration& current)
+{
+    if(!validate_external_launch_configuration(baseline).empty() ||
+        !validate_external_launch_configuration(edited).empty() ||
+        !validate_external_launch_configuration(current).empty())return {};
+    auto out=current;
+    const auto apply=[](const auto& before,const auto& after,auto& destination) {
+        if(before!=after)destination=after;
+    };
+    apply(baseline.endpoint,edited.endpoint,out.endpoint);
+    apply(baseline.name,edited.name,out.name);
+    apply(baseline.asset_root,edited.asset_root,out.asset_root);
+    apply(baseline.steam_api_runtime,edited.steam_api_runtime,out.steam_api_runtime);
+    apply(baseline.video.display_index,edited.video.display_index,out.video.display_index);
+    apply(baseline.video.mode,edited.video.mode,out.video.mode);
+    apply(baseline.video.width,edited.video.width,out.video.width);
+    apply(baseline.video.height,edited.video.height,out.video.height);
+    apply(baseline.video.vsync,edited.video.vsync,out.video.vsync);
+    apply(baseline.video.msaa_samples,edited.video.msaa_samples,out.video.msaa_samples);
+    apply(baseline.image.brightness,edited.image.brightness,out.image.brightness);
+    apply(baseline.image.gamma,edited.image.gamma,out.image.gamma);
+    apply(baseline.image.contrast,edited.image.contrast,out.image.contrast);
+    apply(baseline.hud_scale.automatic,edited.hud_scale.automatic,out.hud_scale.automatic);
+    apply(baseline.hud_scale.scale,edited.hud_scale.scale,out.hud_scale.scale);
+    apply(baseline.volume,edited.volume,out.volume);
+    apply(baseline.movement_diagnostics,edited.movement_diagnostics,out.movement_diagnostics);
+    return validate_external_launch_configuration(out).empty()?std::optional{std::move(out)}:std::nullopt;
+}
 std::optional<SceneAntialiasingObservation> decode_external_msaa_observation(
         const std::string_view json,const std::string_view expected_run_id)
 {

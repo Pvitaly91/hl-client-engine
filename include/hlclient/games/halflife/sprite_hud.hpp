@@ -57,6 +57,11 @@ private:
     std::array<History,4U> history_{};
     std::size_t history_next_{};
     std::array<std::optional<double>,8U> damage_expiry_{};
+    // Four source sprite frames: front, right, rear, left. Fresh committed
+    // Damage values wait only until this frame's presentation pose is ready.
+    std::array<float,4U> pain_intensity_{};
+    std::array<std::array<double,3>,16U> pending_pain_{};
+    std::size_t pending_pain_count_{};
     std::optional<client::RuntimeObservationSource> damage_high_water_, reset_source_;
     std::uint64_t generation_{}, life_{}, deaths_{};
     bool menu_open_{};

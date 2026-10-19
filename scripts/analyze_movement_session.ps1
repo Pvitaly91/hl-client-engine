@@ -15,7 +15,9 @@ pwsh -NoProfile -File scripts/analyze_movement_session.ps1 -RunDirectory C:/Repo
 param(
     [Parameter(Mandatory, ParameterSetName = 'Report')][string]$ReportPath,
     [Parameter(Mandatory, ParameterSetName = 'Run')][string]$RunDirectory,
-    [switch]$Json
+    [switch]$Json,
+    [switch]$PublishSummary,
+    [switch]$Open
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -59,6 +61,40 @@ function Get-Number($Object, [string]$Name, [switch]$Required, [switch]$Integer)
         [decimal]$value -gt [decimal][UInt64]::MaxValue)) { throw 'invalid_report_counter' }
     return $value
 }
+function Get-PredictionWork($Object) {
+    if ($null -eq $Object) { return $null }
+    if ($Object -isnot [Collections.IDictionary]) { throw 'invalid_prediction_work_object' }
+    $durationNames = @('command_ms', 'replay_ms', 'collision_query_ms')
+    $counterNames = @('trace_queries', 'position_queries', 'contents_queries', 'traversal_steps')
+    $knownNames = @($durationNames) + @($counterNames)
+    if ($Object.Count -ne $knownNames.Count) { throw 'invalid_prediction_work_shape' }
+    foreach ($key in $Object.Keys) {
+        if (($key -isnot [string]) -or ([string]$key) -cnotin $knownNames) {
+            throw 'invalid_prediction_work_shape'
+        }
+    }
+    $result = [ordered]@{}
+    foreach ($name in $durationNames) {
+        $value = Get-Field $Object $name
+        if ($null -eq $value -or $value -is [string] -or $value -is [bool] -or
+            $value -is [Collections.IEnumerable]) { throw 'invalid_prediction_work_duration' }
+        try { $number = [double]$value } catch { throw 'invalid_prediction_work_duration' }
+        if (-not [double]::IsFinite($number) -or $number -lt 0 -or $number -gt 1e9) {
+            throw 'invalid_prediction_work_duration'
+        }
+        $result[$name] = $number
+    }
+    foreach ($name in $counterNames) {
+        $value = Get-Field $Object $name
+        if ($null -eq $value -or $value -is [string] -or $value -is [bool] -or
+            $value -is [Collections.IEnumerable]) { throw 'invalid_prediction_work_counter' }
+        try { $number = [decimal]$value } catch { throw 'invalid_prediction_work_counter' }
+        if ($number -lt 0 -or $number -ne [decimal]::Truncate($number) -or
+            $number -gt [decimal][UInt64]::MaxValue) { throw 'invalid_prediction_work_counter' }
+        $result[$name] = [UInt64]$number
+    }
+    return $result
+}
 function Get-Boolean($Object, [string]$Name) {
     $value = Get-Field $Object $Name
     if ($value -isnot [bool]) { throw 'invalid_report_boolean' }
@@ -97,7 +133,319 @@ function Get-Summary($Object) {
     return [ordered]@{
         counts = Get-Counts (Get-Object $Object 'counts' -Required)
         metrics = Get-Metrics (Get-Object $Object 'metrics' -Required)
+        producer_correction_maximum = Get-ProducerMaximum (Get-Object $Object 'producer_correction_maximum')
     }
+}
+function Get-CorrectionIdentity($Object) {
+    if ($null -eq $Object) { return $null }
+    $item = [ordered]@{}
+    foreach ($name in @('event_ordinal','network_generation','map_generation','life_epoch','life_deaths','source_record_identity')) {
+        $item[$name] = Get-Number $Object $name -Required -Integer
+    }
+    if ($item.event_ordinal -eq 0) { throw 'invalid_correction_event_identity' }
+    return $item
+}
+function Get-ProducerMaximum($Object) {
+    if ($null -eq $Object) { return [ordered]@{ status = 'not_recorded_in_older_build' } }
+    if ((Get-Field $Object 'scope') -cne 'exact_producer_events_not_legacy_frame_ordinal_samples') { throw 'invalid_producer_maximum_scope' }
+    $item = [ordered]@{
+        events = Get-Number $Object 'events' -Required -Integer
+        raw_error = Get-Number $Object 'raw_error'
+        witness_identity = Get-CorrectionIdentity (Get-Object $Object 'witness_identity')
+        status = Get-Field $Object 'status'
+    }
+    if ($item.status -cnotin @('available','witness_missing','not_measured') -or
+        ($item.events -gt 0) -ne ($null -ne $item.raw_error) -or
+        ($item.events -gt 0) -ne ($null -ne $item.witness_identity) -or
+        ($item.events -eq 0) -ne ($item.status -eq 'not_measured')) { throw 'invalid_producer_maximum' }
+    return $item
+}
+function Get-CaptureToken($Object, [string]$Name, [int]$Maximum = 96) {
+    $value = Get-Field $Object $Name
+    if ($value -isnot [string] -or $value.Length -gt $Maximum -or $value -cnotmatch '^[a-z0-9_-]*$') { throw 'invalid_capture_token' }
+    return $value
+}
+function Get-WeaponCommandToken($Object) {
+    $value = Get-Field $Object 'command'
+    # Registry command case is significant (the standard MP5 is weapon_9mmAR).
+    # Do not relax the lowercase-only contract for capture reason enums.
+    if ($value -isnot [string] -or $value.Length -gt 48 -or
+        $value -cnotmatch '^[A-Za-z0-9_-]+$') { throw 'invalid_weapon_capability_command' }
+    return $value
+}
+function Get-CriticalCorrections($Object, [bool]$Enabled, [bool]$Legacy) {
+    if ($null -eq $Object) {
+        if ($Enabled -and -not $Legacy) { throw 'missing_critical_corrections' }
+        return [ordered]@{ availability = $(if ($Legacy) { 'not_recorded_in_older_build' } else { 'disabled' }) }
+    }
+    if ((Get-Field $Object 'schema') -cne 'hlclient.critical-corrections.v1' -or
+        -not (Get-Boolean $Object 'enabled') -or -not $Enabled -or
+        (Get-Number $Object 'maximum_top_witnesses' -Required -Integer) -ne 8 -or
+        (Get-Number $Object 'maximum_recent_witnesses' -Required -Integer) -ne 16) { throw 'invalid_critical_corrections_profile' }
+    $facts = [ordered]@{ availability = 'ready' }
+    foreach ($name in @('accepted_events','events_with_raw','retained_witnesses','duplicates','invalid','evictions')) {
+        $facts[$name] = Get-Number $Object $name -Required -Integer
+    }
+    $facts.delivery_status = 'unknown_not_recorded'
+    $facts.delivery_counter_policy = Get-Field $Object 'delivery_counter_policy'
+    if ($null -eq $facts.delivery_counter_policy) { $facts.delivery_counter_policy = 'not_recorded_in_older_build' }
+    elseif ($facts.delivery_counter_policy -cne 'generation_qualified_cumulative_deltas_reset_baselines_mark_partial') {
+        throw 'invalid_correction_delivery_policy'
+    }
+    $deliveryFields = @('delivery_observations','delivery_sink_failures','delivery_published_events','delivery_counter_resets',
+        'delivery_generation_boundaries','delivery_duplicate_observations','delivery_stale_generation_observations')
+    $deliveryStatus = Get-Field $Object 'delivery_status'
+    if ($null -ne $deliveryStatus) {
+        foreach ($name in $deliveryFields) { $facts[$name] = Get-Number $Object $name -Required -Integer }
+        $expectedDelivery = if ($facts.delivery_observations -eq 0) { 'not_observed' }
+            elseif ($facts.delivery_sink_failures -gt 0 -or $facts.delivery_counter_resets -gt 0 -or
+                $facts.delivery_stale_generation_observations -gt 0) { 'partial' } else { 'complete' }
+        if ($deliveryStatus -cne $expectedDelivery) { throw 'invalid_correction_delivery_status' }
+        $facts.delivery_status = $deliveryStatus
+    } else {
+        foreach ($name in $deliveryFields) {
+            if ($null -ne (Get-Field $Object $name)) { throw 'correction_delivery_counters_without_status' }
+            $facts[$name] = $null
+        }
+    }
+    $facts.maximum_raw_position_error = Get-Number $Object 'maximum_raw_position_error'
+    $facts.maximum_witness_identity = Get-CorrectionIdentity (Get-Object $Object 'maximum_witness_identity')
+    $facts.maximum_witness_status = Get-Field $Object 'maximum_witness_status'
+    $identities = [Collections.Generic.HashSet[string]]::new()
+    $facts.witnesses = @(foreach ($witness in (Get-RemoteArray $Object 'witnesses' 24)) {
+        $identity = Get-CorrectionIdentity (Get-Object $witness 'identity' -Required)
+        if (-not $identities.Add(($identity.Values -join '/'))) { throw 'duplicate_correction_witness' }
+        $item = [ordered]@{ identity = $identity }
+        foreach ($name in @('accepted_ordinal','source_record_ordinal','source_sequence','scene_record_identity','scene_revision',
+            'before_prediction_epoch','after_prediction_epoch','carrier_history_revision','collision_world_revision','collision_scene_signature',
+            'observed_ns','source_commit_ns','observed_us','carrier_acknowledgement','carrier_outgoing_sequence','boundary_command',
+            'history_anchor_command','history_latest_command','history_size','suffix_first_command','suffix_last_command','suffix_commands',
+            'suffix_milliseconds','replayed_commands','command_msec','command_buttons')) {
+            $item[$name] = Get-Number $witness $name -Integer
+        }
+        foreach ($name in @('owner_time_ns','command_sample_ns','presentation_requested_ns','presentation_before_ns','presentation_after_ns')) {
+            $value = Get-RemoteSignedNumber $witness $name
+            if ($null -ne $value -and ([decimal]$value -ne [decimal]::Truncate([decimal]$value) -or
+                [decimal]$value -gt [decimal][Int64]::MaxValue -or [decimal]$value -lt [decimal][Int64]::MinValue)) { throw 'invalid_correction_time' }
+            $item[$name] = $value
+        }
+        foreach ($name in @('authoritative_origin','authoritative_velocity','matched_origin','matched_velocity','rebase_origin','rebase_velocity',
+            'position_delta','velocity_delta','rebase_position_delta','before_eye','after_eye','query_start','query_end','plane_normal')) {
+            $item[$name] = Get-RemoteVector $witness $name
+        }
+        foreach ($name in @('raw_position_error','raw_velocity_error','same_time_camera_delta','source_server_time_s','scene_server_time_s',
+            'trace_fraction','residual_units','support_entity','support_model','blocking_entity','blocking_model','collision_plane_index','blocking_instance')) {
+            $item[$name] = Get-Number $witness $name
+        }
+        $item.support_velocity_z = Get-RemoteSignedNumber $witness 'support_velocity_z'
+        foreach ($name in @('prediction_owner_state','classification','camera_status','predecessor_decision','source_freshness',
+            'authoritative_origin_freshness','authoritative_velocity_freshness','matched_freshness','scene_freshness','collision_freshness',
+            'presentation_freshness','support_freshness','raw_error_basis','rebase_status','anchor_status','collision_stage','blocking_kind',
+            'presentation_before_kind','presentation_after_kind')) {
+            $item[$name] = Get-Number $witness $name -Required -Integer
+            if ($item[$name] -gt 255) { throw 'invalid_correction_classification' }
+        }
+        foreach ($name in @('hull','mode')) {
+            $item[$name] = Get-Number $witness $name -Integer
+        }
+        if ($item.classification -gt 4 -or $item.camera_status -gt 3 -or $item.prediction_owner_state -gt 4 -or
+            $item.predecessor_decision -gt 5 -or $item.raw_error_basis -gt 2) { throw 'invalid_correction_enum' }
+        foreach ($name in @('source_freshness','authoritative_origin_freshness','authoritative_velocity_freshness','matched_freshness',
+            'scene_freshness','collision_freshness','presentation_freshness','support_freshness')) {
+            if ($item[$name] -gt 5) { throw 'invalid_correction_freshness' }
+        }
+        foreach ($name in @('accepted','control_active','source_matches_scene','source_reliable','reassembled','contemporaneous_fragment_suffix')) {
+            $item[$name] = Get-Boolean $witness $name
+        }
+        foreach ($name in @('alive','startsolid','allsolid','grounded')) {
+            $value = Get-Field $witness $name
+            if ($null -ne $value -and $value -isnot [bool]) { throw 'invalid_optional_correction_boolean' }
+            $item[$name] = $value
+        }
+        $item.reason = Get-CaptureToken $witness 'reason'
+        $item.presentation_reason = Get-CaptureToken $witness 'presentation_reason' 40
+        $item.raw_error_comparison = Get-Field $witness 'raw_error_comparison'
+        if ($item.raw_error_comparison -cnotin @('matched_to_derived_rebase_seed','matched_to_authoritative_origin','not_measured')) { throw 'invalid_correction_error_basis' }
+        $item.camera_measurement = Get-Field $witness 'camera_measurement'
+        if ($item.camera_measurement -cnotin @('not_measured','same_time_samples','different_time_samples','incompatible_context') -or
+            ($null -ne $item.same_time_camera_delta -and ($item.camera_measurement -ne 'same_time_samples' -or
+            $null -eq $item.presentation_requested_ns -or $item.presentation_before_ns -ne $item.presentation_requested_ns -or
+            $item.presentation_after_ns -ne $item.presentation_requested_ns -or $item.presentation_before_kind -ne 1 -or $item.presentation_after_kind -ne 1))) {
+            throw 'invalid_same_time_correction_measurement'
+        }
+        [pscustomobject]$item
+    })
+    if ($facts.retained_witnesses -ne $facts.witnesses.Count -or $facts.events_with_raw -gt $facts.accepted_events -or
+        $facts.retained_witnesses -gt $facts.accepted_events -or
+        $facts.maximum_witness_status -cnotin @('available','not_measured') -or
+        ($facts.events_with_raw -gt 0) -ne ($facts.maximum_witness_status -eq 'available') -or
+        ($facts.events_with_raw -gt 0) -ne ($null -ne $facts.maximum_raw_position_error) -or
+        ($facts.events_with_raw -gt 0) -ne ($null -ne $facts.maximum_witness_identity)) { throw 'critical_correction_counts_or_maximum_invalid' }
+    if ($facts.maximum_witness_identity -and -not $identities.Contains(($facts.maximum_witness_identity.Values -join '/'))) { throw 'critical_maximum_witness_missing' }
+    if ($facts.maximum_witness_identity) {
+        $maximumKey=$facts.maximum_witness_identity.Values -join '/'
+        $maximumWitness=@($facts.witnesses | Where-Object { ($_.identity.Values -join '/') -ceq $maximumKey })[0]
+        if ($maximumWitness.raw_position_error -ne $facts.maximum_raw_position_error -or
+            @($facts.witnesses | Where-Object { $null -ne $_.raw_position_error -and $_.raw_position_error -gt $facts.maximum_raw_position_error }).Count) {
+            throw 'critical_maximum_value_identity_mismatch'
+        }
+    }
+    return $facts
+}
+function Get-ExactCaptureFrame($Object) {
+    if ($Object -isnot [Collections.IDictionary]) { throw 'invalid_exact_capture_frame' }
+    $frame = [ordered]@{}
+    foreach ($name in @('monotonic_us','frame_number','network_generation','map_generation')) {
+        $frame[$name] = Get-Number $Object $name -Required -Integer
+    }
+    foreach ($name in @('source_sequence','correction_ordinal','authoritative_source_record_identity','authoritative_source_sequence',
+        'anchor_command','input_sample_us','render_submit_us','limiter_wait_us','yield_wait_us')) {
+        $frame[$name] = Get-Number $Object $name -Integer
+    }
+    foreach ($name in @('frame_interval','cpu_update','prediction','collision','studio','render_submission','present_wait','gpu',
+        'raw_correction','camera_jump','state_age')) { $frame[$name] = Get-Number $Object $name }
+    foreach ($name in @('raw_server_origin','predicted_origin','presented_eye','velocity','authoritative_velocity',
+        'matched_origin_before_correction','matched_velocity_before_correction')) { $frame[$name] = Get-RemoteVector $Object $name }
+    foreach ($name in @('prediction_active','startsolid','allsolid','grounded','previous_iteration_waits_known')) {
+        $value = Get-Field $Object $name
+        if ($null -ne $value -and $value -isnot [bool]) { throw 'invalid_exact_capture_boolean' }
+        $frame[$name] = $value
+    }
+    foreach ($name in @('fallback_reason','presentation_reason')) {
+        if ($null -ne (Get-Field $Object $name)) { $frame[$name] = Get-CaptureToken $Object $name }
+    }
+    $frame.prediction_work = Get-PredictionWork (Get-Field $Object 'prediction_work')
+    $command = Get-Object $Object 'command'
+    if ($null -ne $command) {
+        $frame.command = [ordered]@{}
+        foreach ($name in @('sequence','sample_us','msec','buttons')) { $frame.command[$name] = Get-Number $command $name -Required -Integer }
+        if ($frame.command.sequence -gt [UInt32]::MaxValue -or $frame.command.msec -gt 255 -or
+            $frame.command.buttons -gt [UInt16]::MaxValue -or $frame.command.sample_us -gt $frame.monotonic_us) { throw 'invalid_exact_capture_command' }
+        foreach ($name in @('angle_turns','movement')) {
+            $parts = Get-RemoteArray $command $name 3
+            if ($parts.Count -ne 3) { throw 'invalid_exact_capture_command_vector' }
+            $frame.command[$name] = @(foreach ($part in $parts) {
+                $value = Get-RemoteSignedNumber @{ component=$part } 'component'
+                if ($null -eq $value -or [decimal]$value -ne [decimal]::Truncate([decimal]$value) -or
+                    ($name -eq 'angle_turns' -and ($value -lt 0 -or $value -gt 65535)) -or
+                    ($name -eq 'movement' -and ($value -lt -32768 -or $value -gt 32767))) { throw 'invalid_exact_capture_command_component' }
+                $value
+            })
+        }
+    }
+    return $frame
+}
+function Get-PriorityCapture($Report, [bool]$Enabled, [bool]$Legacy) {
+    if ($Legacy -or -not $Enabled) { return [ordered]@{ availability = $(if ($Legacy) { 'legacy_one_second_policy_or_not_recorded' } else { 'disabled' }) } }
+    $policy = Get-Object $Report 'capture_policy' -Required
+    if ((Get-Field $policy 'schema') -cne 'hlclient.priority-movement-capture.v1' -or
+        (Get-Number $policy 'maximum_decisions' -Required -Integer) -ne 128 -or
+        (Get-Field $policy 'coalescing') -cne 'same_network_map_life_fixed_post_deadline' -or
+        (Get-Field $policy 'replacement') -cne 'completed_automatic_lowest_priority_then_oldest_ordinal_never_manual') { throw 'invalid_capture_policy' }
+    $limits = Get-Object $Report 'limits' -Required
+    foreach ($pair in @(@('recent_frames',961),@('incident_frames',480),@('manual_pre_incident_us',4000000),
+        @('manual_sampling_interval_us',12500),@('automatic_sampling_interval_us',8333),@('maximum_capacity_bytes',8MB),@('maximum_encoded_bytes',16MB))) {
+        if ((Get-Number $limits $pair[0] -Required -Integer) -ne $pair[1]) { throw 'invalid_capture_limits' }
+    }
+    $facts = [ordered]@{ availability = 'ready'; requested_manual_pre_us = 4000000; manual_sampling_interval_us = 12500
+        decision_evictions = Get-Number $policy 'decision_evictions' -Required -Integer }
+    $facts.decisions = @(foreach ($decision in (Get-RemoteArray $policy 'decisions' 128)) {
+        $item = [ordered]@{}
+        foreach ($name in @('ordinal','monotonic_us','frame_number','network_generation','map_generation','life_epoch','source_record_identity',
+            'source_sequence','correction_ordinal','incident_ordinal','replacement_ordinal','trigger','priority','context','owner_state')) {
+            $item[$name] = Get-Number $decision $name -Integer
+        }
+        $item.decision = Get-Field $decision 'decision'; $item.reason = Get-CaptureToken $decision 'reason'
+        if ($item.decision -cnotin @('accepted','coalesced','expected_lifecycle','cooldown','manual_reservation','capacity','lower_priority',
+            'active_windows','allocation_failed','replaced','invalid_timestamp') -or $item.trigger -notin @(1,2,4,8) -or
+            $item.context -gt 3 -or $item.owner_state -gt 4 -or $item.priority -gt 100) { throw 'invalid_capture_decision' }
+        [pscustomobject]$item
+    })
+    $ordinals = [Collections.Generic.HashSet[UInt64]]::new()
+    $facts.incidents = @(foreach ($incident in (Get-RemoteArray $Report 'incidents' 8)) {
+        $item = [ordered]@{}
+        foreach ($name in @('ordinal','trigger_us','planned_end_us','triggers','network_generation','map_generation','priority','life_epoch',
+            'requested_pre_us','requested_post_us','sampling_interval_us','retained_samples','actual_pre_us','actual_post_us',
+            'background_samples_omitted','exact_samples_omitted','omitted_manual_markers','encoded_samples_omitted','encoded_actual_pre_us','encoded_actual_post_us')) {
+            $item[$name] = Get-Number $incident $name -Integer -Required:($name -notin @('life_epoch','encoded_actual_pre_us','encoded_actual_post_us'))
+        }
+        $item.complete = Get-Boolean $incident 'complete'
+        $item.initial_trigger_us = Get-Number $incident 'initial_trigger_us' -Integer
+        $item.initial_trigger_status = if ($null -eq $item.initial_trigger_us) { 'not_recorded_in_older_build' } else { 'recorded' }
+        $item.end_status = Get-Field $incident 'end_status'
+        $item.coverage_reason = Get-Field $incident 'coverage_reason'
+        $item.manual_marker_us = @(foreach ($stamp in (Get-RemoteArray $incident 'manual_marker_us' 8)) {
+            Get-Number @{ stamp=$stamp } 'stamp' -Required -Integer
+        })
+        if ($item.ordinal -eq 0 -or -not $ordinals.Add([UInt64]$item.ordinal) -or $item.triggers -lt 1 -or $item.triggers -gt 15 -or
+            $item.retained_samples -gt 480 -or $item.encoded_samples_omitted -gt $item.retained_samples -or
+            $item.actual_pre_us -gt $item.requested_pre_us -or $item.actual_post_us -gt $item.requested_post_us -or
+            ($null -ne $item.initial_trigger_us -and $item.initial_trigger_us -gt $item.trigger_us) -or
+            $item.end_status -cnotin @('generation_boundary','life_boundary','post_window_complete','session_close_before_post_window') -or
+            $item.complete -ne ($item.end_status -eq 'post_window_complete') -or
+            $item.coverage_reason -cnotin @('capacity_detail_omitted','generation_boundary','life_boundary',
+                'start_or_generation_boundary_or_recent_capacity','session_close_before_post_window','time_bucket_sampling','full_available_window')) {
+            throw 'invalid_capture_coverage'
+        }
+        $frames = Get-RemoteArray $incident 'frames' 480
+        if ($frames.Count + $item.encoded_samples_omitted -ne $item.retained_samples) { throw 'invalid_encoded_capture_count' }
+        if ($frames.Count) {
+            $firstStamp=Get-Number $frames[0] 'monotonic_us' -Required -Integer
+            $lastStamp=Get-Number $frames[-1] 'monotonic_us' -Required -Integer
+            $expectedPre=if($firstStamp -le $item.trigger_us){$item.trigger_us-$firstStamp}else{$null}
+            $expectedPost=if($lastStamp -ge $item.trigger_us){$lastStamp-$item.trigger_us}else{$null}
+            if ($firstStamp -gt $lastStamp -or $expectedPre -ne $item.encoded_actual_pre_us -or
+                $expectedPost -ne $item.encoded_actual_post_us) { throw 'invalid_encoded_capture_coverage' }
+        } elseif ($null -ne $item.encoded_actual_pre_us -or $null -ne $item.encoded_actual_post_us) { throw 'encoded_coverage_without_frames' }
+        [pscustomobject]$item
+    })
+    $facts.exact_frames_availability = if ($null -eq (Get-Field $policy 'exact_frames')) { 'not_recorded_in_older_build' } else { 'recorded' }
+    $facts.exact_frames = @()
+    $exactIdentities = [Collections.Generic.HashSet[string]]::new()
+    if ($facts.exact_frames_availability -eq 'recorded') {
+        $facts.exact_frames = @(foreach ($entry in (Get-RemoteArray $policy 'exact_frames' 72)) {
+            $ordinal = Get-Number $entry 'incident_ordinal' -Required -Integer
+            $owners = @($facts.incidents | Where-Object { $_.ordinal -eq $ordinal })
+            if ($owners.Count -ne 1) { throw 'exact_capture_incident_missing' }
+            $owner = $owners[0]
+            $frame = Get-ExactCaptureFrame (Get-Object $entry 'frame' -Required)
+            if (-not $exactIdentities.Add(('{0}/{1}' -f $ordinal,$frame.frame_number)) -or
+                $frame.network_generation -ne $owner.network_generation -or $frame.map_generation -ne $owner.map_generation -or
+                $frame.monotonic_us -lt ($owner.trigger_us-$owner.actual_pre_us) -or
+                $frame.monotonic_us -gt ($owner.trigger_us+$owner.actual_post_us)) { throw 'invalid_exact_capture_identity_or_range' }
+            $roles = @()
+            if ($null -ne $owner.initial_trigger_us -and $frame.monotonic_us -eq $owner.initial_trigger_us) { $roles += 'initial_trigger' }
+            if ($owner.manual_marker_us -contains $frame.monotonic_us) { $roles += 'manual_marker' }
+            if (-not $roles.Count) {
+                if ($null -ne $owner.initial_trigger_us) { throw 'exact_capture_not_trigger_or_marker' }
+                $roles += 'original_trigger_unknown_in_older_build'
+            }
+            $original = @((Get-Field $Report 'incidents') | Where-Object { (Get-Field $_ 'ordinal') -eq $ordinal })[0]
+            $encoded = Get-RemoteArray $original 'frames' 480
+            $matching = @($encoded | Where-Object { (Get-Field $_ 'frame_number') -eq $frame.frame_number -and
+                (Get-Field $_ 'monotonic_us') -eq $frame.monotonic_us })
+            if ($owner.encoded_samples_omitted -eq 0 -and -not $matching.Count) { throw 'exact_capture_not_in_retained_frames' }
+            [pscustomobject][ordered]@{ incident_ordinal=$ordinal; roles=$roles; frame=$frame }
+        })
+        foreach ($owner in $facts.incidents) {
+            $original = @((Get-Field $Report 'incidents') | Where-Object { (Get-Field $_ 'ordinal') -eq $owner.ordinal })[0]
+            foreach ($encoded in (Get-RemoteArray $original 'frames' 480)) {
+                $stamp = Get-Number $encoded 'monotonic_us' -Required -Integer
+                if (($null -ne $owner.initial_trigger_us -and $stamp -eq $owner.initial_trigger_us) -or $owner.manual_marker_us -contains $stamp) {
+                    $frameNumber = Get-Number $encoded 'frame_number' -Required -Integer
+                    if (-not $exactIdentities.Contains(('{0}/{1}' -f $owner.ordinal,$frameNumber))) { throw 'retained_exact_capture_prefix_missing' }
+                }
+            }
+        }
+    }
+    foreach ($owner in $facts.incidents) {
+        $owner | Add-Member -NotePropertyName marker_witnesses -NotePropertyValue @(foreach ($stamp in $owner.manual_marker_us) {
+            $matching = @($facts.exact_frames | Where-Object { $_.incident_ordinal -eq $owner.ordinal -and $_.frame.monotonic_us -eq $stamp })
+            [pscustomobject]@{ marker_us=$stamp; status=$(if ($matching.Count) { 'available' } elseif ($facts.exact_frames_availability -ne 'recorded') {
+                'not_recorded_in_older_build' } else { 'not_retained_or_not_same_time_sample' }) }
+        })
+    }
+    return $facts
 }
 function Get-FramePacing($Object) {
     if ($null -eq $Object) { return [ordered]@{ availability = 'not_recorded_in_older_build'; episodes = @() } }
@@ -158,6 +506,7 @@ function Get-FramePacing($Object) {
         $prediction = Get-Field $entry 'prediction_active'
         if ($null -ne $prediction -and $prediction -isnot [bool]) { throw 'invalid_frame_pacing_prediction_status' }
         $item.prediction_active = $prediction
+        $item.prediction_work = Get-PredictionWork (Get-Field $entry 'prediction_work')
         [pscustomobject]$item
     })
     return $facts
@@ -202,7 +551,8 @@ $remoteClockReasons = @('initial_anchor', 'explicit_reset', 'generation_changed'
     'server_time_regressed', 'snapshot_gap', 'application_gap', 'mapped_time_invalid',
     'mapped_time_drift', 'oldest_underflow', 'newest_underflow')
 $remoteTriggers = @('first_observation', 'disappearance', 'reentry', 'generation_boundary',
-    'lifetime_boundary', 'new_boundary', 'decision_change', 'displacement_threshold')
+    'lifetime_boundary', 'new_boundary', 'decision_change', 'displacement_threshold',
+    'render_state_change', 'support_change')
 function Get-RemoteSample($Object) {
     if ($Object -isnot [Collections.IDictionary]) { throw 'invalid_remote_sample' }
     $sample = [ordered]@{}
@@ -218,7 +568,8 @@ function Get-RemoteSample($Object) {
         $sample[$name] = Get-RemoteVector $Object $name
     }
     foreach ($name in @('previous_source_ordinal', 'current_source_ordinal', 'latest_source_ordinal',
-        'selected_main', 'selected_gait', 'selected_weapon', 'raw_main', 'raw_gait', 'raw_weapon', 'raw_effects')) {
+        'selected_main', 'selected_gait', 'selected_weapon', 'raw_main', 'raw_gait', 'raw_weapon', 'raw_effects',
+        'raw_render_mode', 'raw_render_amount', 'raw_render_effect', 'support_entity', 'support_model')) {
         $sample[$name] = Get-Number $Object $name -Integer
         if ($name -notlike '*source_ordinal' -and $null -ne $sample[$name] -and
             $sample[$name] -gt [UInt32]::MaxValue) { throw 'invalid_remote_actor_field' }
@@ -227,6 +578,10 @@ function Get-RemoteSample($Object) {
         $sample[$name] = Get-Number $Object $name
         if ($null -ne $sample[$name] -and $sample[$name] -gt 1000000000) { throw 'remote_server_time_out_of_bounds' }
     }
+    $sample.rendered_opacity = Get-Number $Object 'rendered_opacity'
+    if ($null -ne $sample.rendered_opacity -and $sample.rendered_opacity -gt 1) { throw 'invalid_remote_rendered_opacity' }
+    $sample.support_offset_z = Get-RemoteSignedNumber $Object 'support_offset_z'
+    if ($null -ne $sample.support_offset_z -and [Math]::Abs($sample.support_offset_z) -gt 128) { throw 'invalid_remote_support_offset' }
     foreach ($name in @('pose_submitted', 'visible')) {
         $value = Get-Field $Object $name
         if ($null -ne $value -and $value -isnot [bool]) { throw 'invalid_remote_optional_boolean' }
@@ -489,6 +844,293 @@ function Get-RankingMaximum($Metrics, [string]$Name) {
     return $metric.maximum
 }
 
+function Read-AdjacentIdentityManifest([IO.DirectoryInfo]$Directory,[string]$Leaf) {
+    # Only these two literal neighbouring files are eligible. JSON references
+    # never supply a path, and no executable/configuration is read or hashed.
+    if($Leaf -cnotin @('launch-manifest.json','process-manifest.json')){throw 'invalid_identity_manifest_leaf'}
+    for($ancestor=$Directory;$null -ne $ancestor;$ancestor=$ancestor.Parent) {
+        if($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'identity_manifest_reparse_directory'}
+    }
+    $path=Join-Path $Directory.FullName $Leaf
+    if(-not (Test-Path -LiteralPath $path)){return $null}
+    $item=Get-Item -LiteralPath $path -Force
+    if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'identity_manifest_not_regular_file'}
+    if([IO.Path]::GetDirectoryName($item.FullName) -cne $Directory.FullName){throw 'identity_manifest_not_adjacent'}
+    $manifestStream=[IO.File]::Open($item.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try {
+        if($manifestStream.Length -eq 0 -or $manifestStream.Length -gt 16KB){throw 'identity_manifest_size_out_of_bounds'}
+        $buffer=[byte[]]::new([int]$manifestStream.Length);$readTotal=0
+        while($readTotal -lt $buffer.Length) {
+            $read=$manifestStream.Read($buffer,$readTotal,$buffer.Length-$readTotal)
+            if($read -eq 0){throw 'identity_manifest_changed_during_read'}
+            $readTotal+=$read
+        }
+        if($manifestStream.ReadByte() -ne -1){throw 'identity_manifest_changed_during_read'}
+        $after=Get-Item -LiteralPath $path -Force
+        if($after.PSIsContainer -or ($after.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'identity_manifest_changed_during_read'}
+    } finally {$manifestStream.Dispose()}
+    try {$value=ConvertFrom-Json -InputObject ([Text.UTF8Encoding]::new($false,$true).GetString($buffer)) -AsHashtable -Depth 8}
+    catch {throw 'identity_manifest_invalid_utf8_or_json'}
+    if($value -isnot [Collections.IDictionary]){throw 'identity_manifest_not_object'}
+    return $value
+}
+function Get-ManifestSha256($Manifest,[string]$Name) {
+    $value=Get-Field $Manifest $Name
+    if($value -isnot [string] -or $value -cnotmatch '^[0-9a-fA-F]{64}$'){throw 'identity_manifest_invalid_sha256'}
+    return $value.ToLowerInvariant()
+}
+function Get-AdjacentRunIdentity([string]$Path,[string]$RunId,$ProcessId,$ProcessCreation) {
+    $reportFile=Get-Item -LiteralPath $Path -Force
+    if($reportFile.PSIsContainer -or ($reportFile.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'identity_report_not_regular_file'}
+    $launch=Read-AdjacentIdentityManifest $reportFile.Directory 'launch-manifest.json'
+    $process=Read-AdjacentIdentityManifest $reportFile.Directory 'process-manifest.json'
+    $facts=[ordered]@{availability='not_recorded_older_or_fixture';scope='stored_manifest_consistency_only'
+        launch_present=($null -ne $launch);process_present=($null -ne $process)
+        recorded_identity_consistent=$null;current_binaries_rehashed=$false}
+    if($null -eq $launch -and $null -eq $process){return $facts}
+    $launchClient=$null;$processClient=$null
+    if($null -ne $launch) {
+        if((Get-Field $launch 'schema') -cne 'hlclient.external-launch-identity.v1'){throw 'unsupported_launch_identity_schema'}
+        if((Get-Field $launch 'run_id') -cne $RunId){throw 'launch_run_identity_mismatch'}
+        $launchClient=Get-ManifestSha256 $launch 'client_sha256'
+        $facts.launcher_sha256=Get-ManifestSha256 $launch 'launcher_sha256'
+        $facts.config_sha256=Get-ManifestSha256 $launch 'config_sha256'
+        # The current launcher writes its launch manifest before spawn. If a
+        # future producer includes process fields, both must agree exactly.
+        $launchPid=Get-Field $launch 'process_id';$launchCreation=Get-Field $launch 'process_creation'
+        if($null -ne $launchPid -or $null -ne $launchCreation) {
+            if([decimal](Get-Number $launch 'process_id' -Required -Integer) -ne [decimal]$ProcessId -or
+                [decimal](Get-Number $launch 'process_creation' -Required -Integer) -ne [decimal]$ProcessCreation){throw 'launch_process_identity_mismatch'}
+        }
+    }
+    if($null -ne $process) {
+        if((Get-Field $process 'schema') -cne 'hlclient.external-process-identity.v1'){throw 'unsupported_process_identity_schema'}
+        if((Get-Field $process 'run_id') -cne $RunId){throw 'process_run_identity_mismatch'}
+        if([decimal](Get-Number $process 'process_id' -Required -Integer) -ne [decimal]$ProcessId -or
+            [decimal](Get-Number $process 'process_creation' -Required -Integer) -ne [decimal]$ProcessCreation){throw 'process_identity_mismatch'}
+        $processClient=Get-ManifestSha256 $process 'client_sha256'
+    }
+    if($null -eq $launch -or $null -eq $process){$facts.availability='partial_manifest_identity_unknown';return $facts}
+    if($launchClient -cne $processClient){throw 'client_binary_manifest_identity_mismatch'}
+    $facts.availability='consistent_manifest_pair';$facts.recorded_identity_consistent=$true
+    $facts.client_sha256=$launchClient
+    return $facts
+}
+
+function Get-MultiplayerTimeline($Object) {
+    if ($null -eq $Object) { return [ordered]@{ availability='not_recorded_in_older_build'; classifications=@(); action_chains=@() } }
+    if ((Get-Field $Object 'schema') -cne 'hlclient.multiplayer-timeline.v1') { throw 'unsupported_multiplayer_timeline_schema' }
+    if ((Get-Field $Object 'encoding_failed') -eq $true) { return [ordered]@{ availability='encoding_failed'; classifications=@(); action_chains=@() } }
+    if (-not (Get-Boolean $Object 'enabled')) {
+        return [ordered]@{ availability=$(if((Get-Field $Object 'availability') -eq 'allocation_failed'){'allocation_failed'}else{'disabled'})
+            server_outcome_default='unknown'; classifications=@(); action_chains=@() }
+    }
+    if ((Get-Field $Object 'local_clock') -cne 'steady_epoch_nanoseconds') { throw 'unsupported_multiplayer_clock' }
+    $enabled=Get-Boolean $Object 'enabled'
+    $facts=[ordered]@{ availability=$(if($enabled){'ready'}else{'disabled'}); server_outcome_default='unknown'
+        scope='retained_causal_details_not_unthinned_fps_statistics'; classifications=@(); action_chains=@()
+        encoded_events_omitted=(Get-Number $Object 'encoded_events_omitted' -Required -Integer)
+        encoding_deadline_reached=(Get-Boolean $Object 'encoding_deadline_reached')
+        missing_evidence=@('actual_server_command_execution','server_rewind_pose','physical_input_and_scanout_time') }
+    $statistics=Get-Object $Object 'statistics' -Required
+    $facts.statistics=[ordered]@{}
+    foreach($name in @('observed','accepted','invalid','duplicates','stale_generation','sampled_out','recent_evictions','exact_evictions',
+        'manual_omissions','manual_marks','manual_marks_dropped','coverage_omissions','allocation_failures','capacity_bytes')) {
+        $facts.statistics[$name]=Get-Number $statistics $name -Required -Integer
+    }
+    if($facts.statistics.capacity_bytes -gt 2MB){throw 'multiplayer_capacity_out_of_bounds'}
+    $all=[Collections.Generic.List[object]]::new()
+    foreach($window in (Get-RemoteArray $Object 'manual_windows' 8)) {
+        $begin=Get-Number $window 'begin_ns' -Required -Integer;$end=Get-Number $window 'end_ns' -Required -Integer
+        $trigger=Get-Number $window 'trigger_ns' -Required -Integer
+        if($end -lt $trigger -or $begin -gt $trigger -or $trigger-$begin -gt 4000000000 -or $end-$trigger -ne 1000000000){throw 'invalid_multiplayer_manual_window'}
+        foreach($event in (Get-RemoteArray $window 'events' 64)){$all.Add($event)}
+    }
+    foreach($event in (Get-RemoteArray $Object 'exact_transitions' 512)){$all.Add($event)}
+    foreach($event in (Get-RemoteArray $Object 'recent_events' 1280)){$all.Add($event)}
+    $events=[Collections.Generic.List[object]]::new();$seen=@{}
+    foreach($event in $all) {
+        $identity=Get-Object $event 'identity' -Required;$payload=Get-Object $event 'payload' -Required
+        $id=[ordered]@{}
+        foreach($name in @('producer','producer_event_id','network_generation','map_generation')){$id[$name]=Get-Number $identity $name -Required -Integer}
+        if($id.producer -gt 11 -or $id.producer_event_id -eq 0){throw 'invalid_multiplayer_identity'}
+        foreach($name in @('local_life','actor_entity','actor_occupant','actor_visual_lifetime','actor_model_revision','input_sequence','command_id','action_id',
+            'carrier_packet','source_sequence','source_record','source_record_ordinal','source_message_bit_offset','source_entry_ordinal','source_event',
+            'simulation_iteration','render_frame','scene_revision','pose_revision','related_action_id','related_actor_entity','source_query_id')){$id[$name]=Get-Number $identity $name -Integer}
+        $stamp=Get-Number $event 'local_steady_ns' -Required -Integer
+        $type=Get-Number $payload 'type' -Required -Integer;$knowledge=Get-Number $event 'knowledge' -Required -Integer
+        $provenance=Get-Number $event 'provenance' -Required -Integer;$edge=Get-Number $event 'edge' -Required -Integer
+        $domain=Get-Number $event 'server_time_domain' -Required -Integer;$serverSeconds=Get-RemoteSignedNumber $event 'server_seconds'
+        if($stamp -eq 0 -or $type -gt 9 -or $knowledge -gt 10 -or $provenance -gt 5 -or $edge -gt 3 -or $domain -gt 3){throw 'invalid_multiplayer_event_enum'}
+        $key='{0}/{1}/{2}/{3}' -f $id.producer,$id.network_generation,$id.map_generation,$id.producer_event_id
+        $fingerprint=$event|ConvertTo-Json -Compress -Depth 12
+        if($seen.ContainsKey($key)){if($seen[$key] -cne $fingerprint){throw 'conflicting_multiplayer_event_identity'};continue}
+        $seen[$key]=$fingerprint
+        $events.Add([pscustomobject]@{identity=$id;local_steady_ns=$stamp;type=$type;payload=$payload;knowledge=$knowledge;provenance=$provenance;edge=$edge;domain=$domain;server_seconds=$serverSeconds})
+    }
+    $ordered=@($events|Sort-Object local_steady_ns,@{Expression={$_.identity.producer}},@{Expression={$_.identity.producer_event_id}})
+    $findings=[Collections.Generic.List[object]]::new();$chains=[Collections.Generic.List[object]]::new();$receiveLinks=[Collections.Generic.List[object]]::new()
+    $commands=@{};$carriers=@{};$receives=@{};$frames=@{};$movement=@{}
+    $findingsOmitted=0;$receiveLinksOmitted=0
+    function Add-MultiplayerFinding($Event,[string]$Class,[string]$Code,[string]$Confidence,$Measurements,[string[]]$Missing=@()) {
+        if($findings.Count -ge 128){$script:multiplayerFindingOmissions++;return}
+        $findings.Add([ordered]@{classification=$Class;code=$Code;confidence=$Confidence;identity=$Event.identity;local_steady_ns=$Event.local_steady_ns
+            evidence_kind=@('unknown','runtime_observed','derived_estimate','source_model','synthetic','user_report')[[int]$Event.provenance]
+            measurements=$Measurements;missing_evidence=$Missing;server_hit_or_miss='not_inferred'})
+    }
+    $script:multiplayerFindingOmissions=0
+    # First pass joins ONLY explicit generation-qualified command/frame IDs.
+    # A nearby timestamp never invents an action or shooter association.
+    foreach($event in $ordered) {
+        $id=$event.identity;$p=$event.payload
+        if($null -ne $id.command_id -and $event.type -eq 0 -and (Get-Number $p 'phase' -Required -Integer) -in @(2,3,5)) {
+            $commands[('{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$id.command_id)]=$event
+        }
+        if($event.type -eq 1 -and (Get-Number $p 'phase' -Required -Integer) -eq 3) {
+            $members=Get-RemoteArray $p 'command_ids' 64
+            $backups=Get-Number $p 'backup_count' -Integer;$newCommands=Get-Number $p 'command_count' -Integer
+            $membershipKnown=$null -ne $backups -and $null -ne $newCommands -and $backups+$newCommands -eq $members.Count
+            for($member=0;$member -lt $members.Count;$member++) {
+                $command=$members[$member]
+                $number=Get-Number @{value=$command} 'value' -Required -Integer
+                $key='{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$number
+                if(-not $carriers.ContainsKey($key)) {
+                    $carriers[$key]=@{event=$event;membership=$(if(-not $membershipKnown){'unknown'}elseif($member -lt $backups){'backup'}else{'new'})
+                        retained_count=1}
+                } else {$carriers[$key].retained_count++}
+            }
+        }
+        if($event.type -eq 1 -and (Get-Number $p 'phase' -Required -Integer) -eq 4 -and $null -ne $id.source_sequence) {
+            $key='{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$id.source_sequence
+            $begin=Get-Number $p 'begin_ns' -Integer;$end=Get-Number $p 'end_ns' -Integer
+            if(-not $receives.ContainsKey($key)){$receives[$key]=@{event=$event;begin=$begin;end=$end;ambiguous=$false}}
+            elseif($receives[$key].begin -ne $begin -or $receives[$key].end -ne $end){$receives[$key].ambiguous=$true}
+        }
+        if($event.type -eq 4 -and $null -ne $id.render_frame) {
+            $key='{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$id.render_frame
+            # Swap timing, delayed GPU results and pose metadata are separate
+            # owner facts for one exact frame. An absent measurement must never
+            # erase an already observed value from a different owner event.
+            foreach($scope in @('frame_ms','present_ms','gpu_ms')) {
+                $measurement=Get-Number $p $scope
+                if($null -ne $measurement) {
+                    if(-not $frames.ContainsKey($key)){$frames[$key]=@{}}
+                    $frames[$key][$scope]=@{value=$measurement;identity=$id}
+                }
+            }
+        }
+    }
+    foreach($event in $ordered) {
+        $id=$event.identity;$p=$event.payload
+        if($null -ne $event.server_seconds -and $event.domain -eq 0) {
+            Add-MultiplayerFinding $event 'clock_units_metadata_mismatch' 'server_seconds_without_clock_domain' 'exact_record_inconsistency' @{}
+        }
+        if($event.type -eq 1) {
+            $phase=Get-Number $p 'phase' -Required -Integer
+            if($event.knowledge -gt 5){Add-MultiplayerFinding $event 'server_contract_evidence_missing' 'transport_promoted_to_gameplay_outcome' 'exact_record_inconsistency' @{knowledge=$event.knowledge}}
+            if($phase -eq 8 -and (Get-Field $p 'atomic_commit') -eq $true){Add-MultiplayerFinding $event 'client_receive_commit_backlog' 'rollback_marked_committed' 'exact_record_inconsistency' @{}}
+            if($phase -eq 7) {
+                $commit=Get-Number $p 'commit_ns' -Integer;$receive=$null
+                if($null -ne $id.source_sequence) {
+                    $receiveKey='{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$id.source_sequence
+                    if($receives.ContainsKey($receiveKey)){$receive=$receives[$receiveKey]}
+                }
+                $timing='unknown_receive_not_retained';$elapsed=$null;$afterRead=$null
+                if($receive -and $receive.ambiguous){$timing='unknown_ambiguous_receive_identity'}
+                elseif($receive -and $null -ne $receive.begin -and $null -ne $receive.end -and $null -ne $commit) {
+                    if($receive.begin -le $receive.end -and $receive.end -le $commit) {
+                        $timing='measured_exact_source_sequence';$elapsed=[double]($commit-$receive.begin)/1e6;$afterRead=[double]($commit-$receive.end)/1e6
+                        if($elapsed -ge 20.) {
+                            Add-MultiplayerFinding $event 'client_receive_commit_backlog' 'measured_receive_to_commit_interval' 'observed_interval_not_cause' @{
+                                milliseconds=$elapsed;after_socket_read_ms=$afterRead;receive_identity=$receive.event.identity}
+                        }
+                    } else {$timing='unknown_clock_order_inconsistent'}
+                } elseif($receive){$timing='unknown_required_timestamp_missing'}
+                if($receiveLinks.Count -lt 128) {
+                    $receiveLinks.Add([ordered]@{commit_identity=$id;receive_identity=$(if($receive){$receive.event.identity}else{$null})
+                        timing_status=$timing;receive_begin_to_commit_ms=$elapsed;receive_end_to_commit_ms=$afterRead})
+                } else {$receiveLinksOmitted++}
+            }
+        } elseif($event.type -eq 0) {
+            $phase=Get-Number $p 'phase' -Required -Integer
+            $lerp=Get-Number $p 'lerp_msec' -Integer;$effective=Get-Number $p 'effective_interpolation_seconds'
+            if($phase -in @(2,3,5) -and $null -ne $lerp -and $null -ne $effective -and [Math]::Abs([double]$lerp-1000.*$effective) -gt 1.) {
+                Add-MultiplayerFinding $event 'clock_units_metadata_mismatch' 'wire_lerp_differs_from_declared_effective_delay' 'exact_record_inconsistency' @{lerp_msec=$lerp;effective_delay_ms=(1000.*$effective)} @('actual_server_rewind_contract')
+            }
+        } elseif($event.type -eq 2) {
+            $phase=Get-Number $p 'phase' -Required -Integer
+            if($phase -eq 8 -and $event.knowledge -in @(7,8)){Add-MultiplayerFinding $event 'cosmetic_feedback_mismatch' 'cosmetic_feedback_promoted_to_server_outcome' 'exact_record_inconsistency' @{}}
+            if($phase -eq 6){Add-MultiplayerFinding $event 'expected_gameplay' 'local_action_rejected_reason_retained' 'local_observation' @{reason=(Get-CaptureToken $p 'reason' 48)}}
+            if($phase -in @(1,2) -and $chains.Count -lt 128) {
+                $key='{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$id.command_id
+                $normalized=$(if($null -ne $id.command_id -and $commands.ContainsKey($key)){$commands[$key]}else{$null})
+                $carrier=$(if($null -ne $id.command_id -and $carriers.ContainsKey($key)){$carriers[$key]}else{$null})
+                $chains.Add([ordered]@{action_identity=$id;local_steady_ns=$event.local_steady_ns;local_acceptance_observed=($event.knowledge -eq 2)
+                    immutable_command=$(if($normalized){$normalized.identity}else{$null});sent_carrier=$(if($carrier){$carrier.event.identity}else{$null})
+                    sent_carrier_selection='earliest_retained_successful_carrier';first_actual_send='unknown_if_earlier_details_omitted'
+                    sent_carrier_membership=$(if($carrier){$carrier.membership}else{'unknown'})
+                    retained_sent_carrier_count=$(if($carrier){$carrier.retained_count}else{0});original_send_latency_ms=$null
+                    server_execution='unknown';server_damage='unknown';correlation='generation_qualified_explicit_command_id_only'
+                    missing_evidence=@($(if(-not $normalized){'immutable_command_not_retained'}),$(if(-not $carrier){'sent_carrier_not_retained'}),'server_action_execution_or_damage')|Where-Object{$_}})
+                if($normalized) {
+                    $angles=Get-RemoteVector $p 'command_angles_degrees';$turns=Get-RemoteArray $normalized.payload 'angle_turns' 3
+                    if($angles -and $turns.Count -eq 3) {
+                        $maximumDifference=0.
+                        for($axis=0;$axis -lt 3;$axis++){$delta=(([double]$turns[$axis]*360./65536.-[double]$angles[$axis]+540.)%360.)-180.;$maximumDifference=[Math]::Max($maximumDifference,[Math]::Abs($delta))}
+                        if($maximumDifference -gt 0.02){Add-MultiplayerFinding $event 'weapon_eligibility_mode_spread_ray' 'action_and_immutable_wire_aim_disagree' 'exact_command_identity' @{maximum_angle_difference_degrees=$maximumDifference} @('cause_units_boundary_or_double_punch_not_established')}
+                    }
+                }
+            }
+        } elseif($event.type -eq 4) {
+            $sample=Get-RemoteSignedNumber $p 'sample_seconds';$pose=Get-RemoteSignedNumber $p 'pose_seconds'
+            if($null -ne $sample -and $null -ne $pose -and [Math]::Abs($sample-$pose) -gt 0.001){Add-MultiplayerFinding $event 'remote_interpolation_pose_attachment' 'pose_origin_sample_times_disagree' 'same_record_observation' @{origin_sample_seconds=$sample;pose_sample_seconds=$pose}}
+            $configured=Get-Number $p 'configured_delay_seconds';$effective=Get-Number $p 'effective_delay_seconds'
+            if($null -ne $configured -and $null -ne $effective -and [Math]::Abs($configured-$effective) -gt 0.002){Add-MultiplayerFinding $event 'remote_interpolation_pose_attachment' 'configured_effective_interpolation_disagreement' 'same_record_observation' @{configured_seconds=$configured;effective_seconds=$effective} @('whether_policy_clamp_or_double_delay')}
+            foreach($scope in @('present_ms','gpu_ms')) {
+                $delay=Get-Number $p $scope
+                if($null -ne $delay -and $delay -ge 20.) {
+                    $measurements=@{milliseconds=$delay;frame_ms=$null;frame_measurement_identity=$null}
+                    $frameKey='{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$id.render_frame
+                    if($null -ne $id.render_frame -and $frames.ContainsKey($frameKey) -and $frames[$frameKey].ContainsKey('frame_ms')) {
+                        $measurements.frame_ms=$frames[$frameKey].frame_ms.value
+                        $measurements.frame_measurement_identity=$frames[$frameKey].frame_ms.identity
+                    }
+                    Add-MultiplayerFinding $event 'cpu_render_present_delay' ('measured_'+$scope) 'measured_scope_not_physics_cause' $measurements
+                }
+            }
+        } elseif($event.type -eq 6) {
+            if($event.knowledge -in @(7,8)){Add-MultiplayerFinding $event 'server_contract_evidence_missing' 'proxy_query_promoted_to_server_hit_or_miss' 'exact_record_inconsistency' @{}}
+            if((Get-Field $p 'world_blocked') -eq $true){Add-MultiplayerFinding $event 'expected_gameplay' 'read_only_world_blocker_observed' 'local_proxy_not_server_result' @{fraction=(Get-Number $p 'fraction')}}
+        } elseif($event.type -eq 8) {
+            $key='{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$id.local_life
+            $predicted=Get-RemoteVector $p 'predicted_origin';$raw=Get-RemoteVector $p 'raw_server_origin';$velocity=Get-RemoteVector $p 'velocity'
+            if($movement.ContainsKey($key) -and $predicted -and $raw -and $velocity) {
+                $previous=$movement[$key];$oldPredicted=Get-RemoteVector $previous.payload 'predicted_origin';$oldRaw=Get-RemoteVector $previous.payload 'raw_server_origin'
+                $dt=([double]$event.local_steady_ns-[double]$previous.local_steady_ns)/1e9
+                $frameKey='{0}/{1}/{2}' -f $id.network_generation,$id.map_generation,$id.render_frame
+                if($oldPredicted -and $oldRaw -and $dt -ge 0.1 -and $dt -le 1. -and $id.command_id -gt $previous.identity.command_id -and $frames.ContainsKey($frameKey)) {
+                    $frameMs=$(if($frames[$frameKey].ContainsKey('frame_ms')){$frames[$frameKey].frame_ms.value}else{$null});$pd=0.;$rd=0.;$speed=0.
+                    for($axis=0;$axis -lt 3;$axis++){$pd+=[Math]::Pow($predicted[$axis]-$oldPredicted[$axis],2);$rd+=[Math]::Pow($raw[$axis]-$oldRaw[$axis],2);$speed+=$velocity[$axis]*$velocity[$axis]}
+                    if($null -ne $frameMs -and $frameMs -le 10. -and $pd -lt 0.0001 -and $rd -gt 1. -and $speed -gt 1.){Add-MultiplayerFinding $event 'local_simulation_collision' 'prediction_hold_despite_source_motion_and_fast_render' 'candidate' @{interval_seconds=$dt;render_frame_ms=$frameMs} @('intermediate_simulation_collision_steps')}
+                }
+            }
+            if(-not $movement.ContainsKey($key) -or ($event.local_steady_ns-$movement[$key].local_steady_ns) -gt 200000000){$movement[$key]=$event}
+        } elseif($event.type -eq 3 -and (Get-Number $p 'kind' -Required -Integer) -in @(3,4,5,6)) {
+            Add-MultiplayerFinding $event 'expected_gameplay' 'lifecycle_boundary_observed' 'observed_not_a_suppression_rule' @{kind=(Get-Number $p 'kind' -Required -Integer)}
+        }
+    }
+    $facts.retained_unique_events=$events.Count;$facts.classifications=@($findings.ToArray());$facts.action_chains=@($chains.ToArray())
+    $facts.receive_commit_links=@($receiveLinks.ToArray())
+    $facts.receive_commit_links_omitted=$receiveLinksOmitted
+    $facts.classifications_omitted=$script:multiplayerFindingOmissions
+    if($findings.Count -eq 0){$facts.verdict='not_established'}else{$facts.verdict='classified_observations_not_global_health_pass'}
+    $facts.action_coverage=@(foreach($row in (Get-RemoteArray $Object 'action_coverage' 256)) {
+        [ordered]@{weapon_id=(Get-Number $row 'weapon_id' -Required -Integer);mode=(Get-Number $row 'mode' -Required -Integer)
+            kind=(Get-Number $row 'kind' -Required -Integer);phase=(Get-Number $row 'phase' -Required -Integer);observations=(Get-Number $row 'observations' -Required -Integer)}
+    })
+    return $facts
+}
+
 $expectedRunId = $null
 if ($PSCmdlet.ParameterSetName -eq 'Latest') {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { throw 'local_app_data_unavailable' }
@@ -528,7 +1170,9 @@ try {
     $text = [Text.UTF8Encoding]::new($false, $true).GetString($data)
     $report = ConvertFrom-Json -InputObject $text -AsHashtable -Depth 64
 } catch { throw 'report_invalid_utf8_or_json' }
-if ((Get-Field $report 'schema') -cne 'hlclient.external-movement.v1') { throw 'unsupported_report_schema' }
+$sourceSchema = Get-Field $report 'schema'
+if ($sourceSchema -cnotin @('hlclient.external-movement.v1','hlclient.external-movement.v2')) { throw 'unsupported_report_schema_expected_external_movement_v1_or_v2' }
+$legacyCapture = $sourceSchema -ceq 'hlclient.external-movement.v1'
 $runId = Get-Field $report 'run_id'
 if ($runId -isnot [string] -or $runId -cnotmatch '^[0-9a-f]{32}$') { throw 'invalid_run_identity' }
 if ($null -ne $expectedRunId -and $expectedRunId -cne $runId) { throw 'run_identity_mismatch' }
@@ -536,7 +1180,8 @@ $processId = Get-Number $report 'process_id' -Required -Integer
 $processCreation = Get-Number $report 'process_creation' -Required -Integer
 if ($processId -eq 0 -or $processId -gt [UInt32]::MaxValue -or $processCreation -eq 0) { throw 'invalid_process_identity' }
 $result = [ordered]@{
-    schema = 'hlclient.movement-session-analysis.v1'
+    schema = 'hlclient.movement-session-analysis.v2'
+    source_schema = $sourceSchema
     run_id = $runId
     process_id = $processId
     process_creation = $processCreation
@@ -553,7 +1198,32 @@ $result = [ordered]@{
         'frame_stage_times_can_overlap_do_not_sum',
         'no_automated_prediction_health_or_cause_verdict')
 }
+$result.identity_evidence = Get-AdjacentRunIdentity $ReportPath $runId $processId $processCreation
+$result.capture = Get-PriorityCapture $report $result.enabled $legacyCapture
+$result.critical_corrections = Get-CriticalCorrections (Get-Object $report 'critical_corrections') $result.enabled $legacyCapture
 $result.remote_players = Get-RemotePlayers (Get-Object $report 'remote_players')
+$result.multiplayer = Get-MultiplayerTimeline (Get-Object $report 'multiplayer_timeline')
+$capabilities=Get-Field $report 'game_diagnostic_capabilities'
+if($null -ne $capabilities) {
+    $result.multiplayer.capability_matrix=@(foreach($capability in (Get-RemoteArray $report 'game_diagnostic_capabilities' 32)) {
+        $weapon=Get-Number $capability 'weapon_id' -Required -Integer
+        $command=Get-WeaponCommandToken $capability
+        $modes=Get-RemoteArray $capability 'modes' 5
+        if($modes.Count -ne 5){throw 'invalid_weapon_capability_modes'}
+        for($mode=0;$mode -lt 5;$mode++) {
+            $kind=Get-Number @{value=$modes[$mode]} 'value' -Required -Integer
+            if($kind -gt 17){throw 'invalid_weapon_capability_kind'}
+            $observations=0
+            if($result.multiplayer.availability -eq 'ready') {
+                foreach($row in $result.multiplayer.action_coverage){if($row.weapon_id -eq $weapon -and $row.mode -eq $mode){$observations+=$row.observations}}
+            }
+            [ordered]@{weapon_id=$weapon;command=$command;mode=$mode;kind=$kind;capability_declared=($kind -ne 0)
+                held_primary=(Get-Boolean $capability 'held_primary');persistent_objects=(Get-Boolean $capability 'persistent_objects')
+                runtime_observations=$observations;runtime_status=$(if($kind -eq 0){'unsupported'}elseif($observations){'runtime_observed'}else{'runtime_not_observed'})
+                fixture_status='see_versioned_build_test_evidence_not_inferred_from_run'}
+        }
+    })
+} else {$result.multiplayer.capability_matrix_availability='not_recorded_in_older_build'}
 $result.encoded_local_frames_omitted = Get-Number $report 'encoded_local_frames_omitted' -Integer
 $session = Get-Object $report 'session_summary'
 $sessionEnabled = $false
@@ -635,6 +1305,7 @@ if (-not $sessionEnabled) {
             counts = Get-Counts (Get-Object $bin 'counts' -Required)
             controlled_alive_counts = Get-Counts (Get-Object $bin 'controlled_alive_counts' -Required)
             metrics = Get-Metrics (Get-Object $bin 'metrics' -Required) -Timeline
+            producer_correction_maximum = Get-ProducerMaximum (Get-Object $bin 'producer_correction_maximum')
             generation_boundaries = Get-Number $bin 'generation_boundaries' -Integer
             manual_markers = Get-Number $bin 'manual_markers' -Integer
             datagrams_delta = Get-Number $bin 'datagrams_delta' -Integer
@@ -665,8 +1336,65 @@ if (-not $sessionEnabled) {
     }
 }
 
+if($Open -and -not $PublishSummary){throw 'open_requires_explicit_publish_summary'}
+if($PublishSummary) {
+    $summaryRoot=(Get-Item -LiteralPath (Split-Path -Parent ([IO.Path]::GetFullPath($ReportPath)))).FullName
+    if((Get-Item -LiteralPath $summaryRoot).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'summary_directory_reparse_rejected'}
+    $summaryPath=[IO.Path]::GetFullPath((Join-Path $summaryRoot 'multiplayer-analysis.html'))
+    if([IO.Path]::GetDirectoryName($summaryPath) -cne $summaryRoot){throw 'summary_path_escape_rejected'}
+    if((Test-Path -LiteralPath $summaryPath) -and ((Get-Item -LiteralPath $summaryPath).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'summary_file_reparse_rejected'}
+    $summaryJson=$result|ConvertTo-Json -Depth 32
+    if([Text.Encoding]::UTF8.GetByteCount($summaryJson) -gt 4MB){throw 'analysis_summary_size_out_of_bounds'}
+    $summaryHtml='<!doctype html><meta charset="utf-8"><title>HL Client multiplayer diagnostics</title><style>body{font:15px system-ui;background:#17191d;color:#eee;margin:2rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}h1{color:#f5a936}</style><h1>HL Client multiplayer diagnostics</h1><p>Bounded client observations. Missing server execution, rewind and damage evidence stay unknown. No live parity verdict.</p><pre>'+[Net.WebUtility]::HtmlEncode($summaryJson)+'</pre>'
+    $temporary=Join-Path $summaryRoot ('multiplayer-analysis-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+    try{[IO.File]::WriteAllText($temporary,$summaryHtml,[Text.UTF8Encoding]::new($false));[IO.File]::Move($temporary,$summaryPath,$true)}
+    finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary}}
+    $result.summary_path=$summaryPath
+    if($Open){Start-Process -FilePath $summaryPath}
+}
 if ($Json) { $result | ConvertTo-Json -Depth 32; return }
+if($result.multiplayer.availability -eq 'ready') {
+    Write-Output ('Комплексна діагностика: {0} унікальних збережених подій; пропущено деталей кодування {1}; висновок {2}.' -f $result.multiplayer.retained_unique_events,$result.multiplayer.encoded_events_omitted,$result.multiplayer.verdict)
+    foreach($finding in $result.multiplayer.classifications){Write-Output ('  {0}: {1}; evidence={2}, confidence={3}.' -f $finding.classification,$finding.code,$finding.evidence_kind,$finding.confidence)}
+}
 Write-Output ('Запис {0}; процес {1}.' -f $result.run_id, $result.process_id)
+Write-Output ('Ідентичність запису: {0}; поточні виконувані файли повторно не хешувалися.' -f $result.identity_evidence.availability)
+Write-Output ('Профіль запису: {0}; формат {1}.' -f $(if ($result.enabled) { 'увімкнений' } else { 'вимкнений або недоступний' }), $result.source_schema)
+if ($result.capture.availability -eq 'ready') {
+    $manuals = @($result.capture.incidents | Where-Object { $_.manual_marker_us.Count -gt 0 })
+    Write-Output ('Пріоритетний запис: вікон {0}, ручних вікон F8 {1}; витіснено старих записів рішень {2}.' -f
+        $result.capture.incidents.Count, $manuals.Count, $result.capture.decision_evictions)
+    foreach ($incident in $result.capture.incidents) {
+        Write-Output ('Вікно #{0}: triggers={1}, priority={2}; до/після запит {3}/{4} с, фактично {5}/{6} с; зразків {7}, інтервал фону {8} мс; пропуск фону/точних/кодування {9}/{10}/{11}; coverage={12}.' -f
+            $incident.ordinal, $incident.triggers, $incident.priority, (Format-Scaled $incident.requested_pre_us 1000000),
+            (Format-Scaled $incident.requested_post_us 1000000), (Format-Scaled $incident.encoded_actual_pre_us 1000000),
+            (Format-Scaled $incident.encoded_actual_post_us 1000000), $incident.retained_samples,
+            (Format-Scaled $incident.sampling_interval_us 1000), $incident.background_samples_omitted,
+            $incident.exact_samples_omitted, $incident.encoded_samples_omitted, $incident.coverage_reason)
+        Write-Output ('  Завершення: {0}; початковий trigger {1} мкс; пропущено детальних F8-позначок: {2}.' -f
+            $incident.end_status,(Format-Value $incident.initial_trigger_us),(Format-Value $incident.omitted_manual_markers))
+        foreach ($marker in $incident.marker_witnesses) { Write-Output ('  F8 {0} мкс: точний кадр={1}.' -f $marker.marker_us,$marker.status) }
+        if($incident.encoded_samples_omitted -gt 0) {
+            Write-Output ('  До кодування збережено {0}/{1} с до/після; фактичне покриття вище — тільки доставлені кадри у файлі.' -f
+                (Format-Scaled $incident.actual_pre_us 1000000),(Format-Scaled $incident.actual_post_us 1000000))
+        }
+    }
+    foreach ($group in @($result.capture.decisions | Group-Object decision)) {
+        Write-Output ('Рішення запису {0}: {1}.' -f $group.Name,$group.Count)
+    }
+    Write-Output 'Фонові зразки проріджені за часом; це не повний покадровий запис. Точні події корекцій зберігаються окремо.'
+} elseif ($legacyCapture) {
+    Write-Output 'Старий формат: розширення F8 до 4 секунд і точні producer witnesses ще не записувалися. Відсутні дані не відновлюються припущеннями.'
+}
+if ($result.critical_corrections.availability -eq 'ready') {
+    $critical = $result.critical_corrections
+    Write-Output ('Точні події корекцій: прийнято {0}, збережено {1}; max raw {2} од., доказ={3}; витіснення recent {4}, невалідних {5}.' -f
+        $critical.accepted_events,$critical.retained_witnesses,(Format-Value $critical.maximum_raw_position_error),
+        $critical.maximum_witness_status,$critical.evictions,$critical.invalid)
+    Write-Output ('Доставка producer witnesses: {0}; спостережень {1}, помилок sink {2}, опубліковано {3}, скидань лічильника {4}, старих generations {5}.' -f
+        $critical.delivery_status,(Format-Value $critical.delivery_observations),(Format-Value $critical.delivery_sink_failures),
+        (Format-Value $critical.delivery_published_events),(Format-Value $critical.delivery_counter_resets),(Format-Value $critical.delivery_stale_generation_observations))
+}
 Write-RemotePlayers $result.remote_players
 if ($null -ne $result.encoded_local_frames_omitted -and $result.encoded_local_frames_omitted -gt 0) {
     Write-Output ('Ліміт розміру звіту: не серіалізовано {0} детальних локальних кадрів; це не втрачені мережеві пакети. Агрегати сесії та FPS наведено окремо.' -f $result.encoded_local_frames_omitted)

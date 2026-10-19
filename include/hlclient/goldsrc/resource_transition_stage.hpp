@@ -7,6 +7,7 @@
 #include <hlclient/goldsrc/user_info_signon_stage.hpp>
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -19,6 +20,10 @@ namespace hlclient::goldsrc {
 
 class ResourceListStage;
 
+// Latest typed identity observation per wire client slot. Fixed-size retention
+// keeps repeated sign-on joins/renames/disconnects bounded without losing state.
+using SignonUserInfoUpdates = std::array<std::optional<RuntimeControlUserInfoUpdate>, 32U>;
+
 using ResourceTransitionStageClock = UserInfoSignonStageClock;
 using ResourceTransitionStageTimePoint = UserInfoSignonStageTimePoint;
 
@@ -30,6 +35,10 @@ inline constexpr std::size_t kMaximumResourceTransitionStageEvents = 256U;
 inline constexpr std::size_t kDefaultMaximumResourceTransitionDriverEventsPerUpdate = 32U;
 inline constexpr std::size_t kMaximumResourceTransitionDriverEventsPerUpdate = 256U;
 inline constexpr std::size_t kResourceTransitionStageDiagnosticTextLimit = 256U;
+inline constexpr std::size_t kDefaultMaximumTransitionPreAckPayloads = 16U;
+inline constexpr std::size_t kMaximumTransitionPreAckPayloads = 64U;
+inline constexpr std::size_t kDefaultMaximumTransitionPreAckBytes = 65'536U;
+inline constexpr std::size_t kMaximumTransitionPreAckBytes = 1'048'576U;
 
 struct ResourceTransitionStageConfig {
     UserInfoSignonStageConfig user_info;
@@ -43,6 +52,8 @@ struct ResourceTransitionStageConfig {
         kDefaultMaximumResourceTransitionStageEvents};
     std::size_t maximum_driver_events_per_update{
         kDefaultMaximumResourceTransitionDriverEventsPerUpdate};
+    std::size_t maximum_pre_ack_payloads{kDefaultMaximumTransitionPreAckPayloads};
+    std::size_t maximum_pre_ack_payload_bytes{kDefaultMaximumTransitionPreAckBytes};
 };
 
 [[nodiscard]] bool valid_resource_transition_stage_configuration(
@@ -150,6 +161,10 @@ struct ResourceTransitionFailureMetadata final {
     std::size_t intermediate_message_count{0U};
     std::optional<RuntimeControlDecodeErrorCode> intermediate_parser_error;
     std::optional<ResourceTransitionControlErrorCode> parser_error;
+    // Numeric error position may be within a body/string, not an opcode.
+    // Never copy the byte at this offset into actual_opcode unless the parser
+    // has established that it is the next service-message boundary.
+    std::optional<std::size_t> parser_error_byte_offset;
 };
 
 struct ResourceTransitionStageError {
@@ -223,6 +238,7 @@ public:
     ~ResourceTransitionState() = default;
 
     [[nodiscard]] const UserInfoSignonState& user_info() const noexcept;
+    [[nodiscard]] const SignonUserInfoUpdates& user_info_updates() const noexcept;
     [[nodiscard]] const ResourceTransitionRequest& request() const noexcept;
     [[nodiscard]] const ResourceTransitionControlState& control() const noexcept;
     [[nodiscard]] const Opcode43Boundary& boundary() const noexcept;
@@ -238,13 +254,15 @@ private:
         ResourceTransitionRequest request,
         ResourceTransitionControlState control,
         Opcode43Boundary boundary,
-        ResourceTransitionSourcePayloadMetadata source_payload) noexcept;
+        ResourceTransitionSourcePayloadMetadata source_payload,
+        SignonUserInfoUpdates user_info_updates) noexcept;
 
     UserInfoSignonState user_info_;
     ResourceTransitionRequest request_;
     ResourceTransitionControlState control_;
     Opcode43Boundary boundary_;
     ResourceTransitionSourcePayloadMetadata source_payload_;
+    SignonUserInfoUpdates user_info_updates_;
 };
 
 enum class ResourceTransitionStageEventType {
@@ -398,6 +416,7 @@ private:
         OwnedNetchanPayload payload,
         ResourceTransitionStageTimePoint now);
     void decode_pending_payload(ResourceTransitionStageTimePoint now);
+    void promote_pre_ack_payload() noexcept;
     void fail_from_user_info() noexcept;
     void fail_from_driver(ResourceTransitionStageTimePoint now) noexcept;
     void fail(
@@ -434,7 +453,8 @@ private:
     std::optional<ResourceTransitionState> result_;
     std::optional<ResourceTransitionRequest> request_;
     std::optional<ResourceTransitionStageError> error_;
-    std::optional<OwnedNetchanPayload> pre_ack_payload_;
+    std::vector<OwnedNetchanPayload> pre_ack_payloads_;
+    std::size_t pre_ack_payload_bytes_{0U};
     std::optional<OwnedNetchanPayload> pending_decode_payload_;
     std::optional<std::size_t> pre_ack_payload_ordinal_;
     std::optional<std::size_t> pending_decode_payload_ordinal_;
@@ -450,6 +470,7 @@ private:
     std::optional<std::size_t> last_intermediate_payload_ordinal_;
     std::optional<std::uint32_t> last_intermediate_source_sequence_;
     std::size_t intermediate_message_count_{0U};
+    SignonUserInfoUpdates user_info_updates_;
     bool request_transmitted_{false};
     bool request_acknowledged_{false};
     bool cleanup_done_{false};

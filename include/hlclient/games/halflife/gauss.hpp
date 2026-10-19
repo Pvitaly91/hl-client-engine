@@ -6,6 +6,7 @@ namespace hlclient::games::halflife {
 // transport, asset IO, clock, renderer or persistent engine pointer.
 class GaussPresentation final {
 public:
+    void set_weapon_diagnostic_observer(game_api::WeaponDiagnosticObserver* observer) noexcept { diagnostic_observer_=observer; }
     void reset(game_api::GameSessionIdentity) noexcept;
     void configure(std::span<const game_api::ScriptedEventBinding>) noexcept;
     void maximum_clients(std::uint32_t n) noexcept {if(n>=1 && n<=32) {multiplayer_=n>1;multiplayer_known_=true;}}
@@ -26,6 +27,8 @@ public:
     game_api::BeamEffectsFrame frame(const game_api::IStaticEffectTrace&,double,std::optional<assets::AssetVector3>) noexcept;
     static std::span<const game_api::LocalSoundReference> resources() noexcept;
 private:
+    game_api::WeaponDiagnosticObserver* diagnostic_observer_{};
+    std::optional<game_api::LocalWeaponActionIdentity> diagnostic_charge_;
     using V=assets::AssetVector3;
     using Identity=game_api::LocalWeaponActionIdentity;
     enum class Discharge { primary, released, exhausted };

@@ -352,6 +352,23 @@ private:
     return *decoded.packet;
 }
 
+[[nodiscard]] std::vector<std::byte> with_resource_location(
+    std::vector<std::byte> payload,
+    const std::string_view location)
+{
+    std::vector<std::byte> message{std::byte{56U}};
+    for (const char character : location) {
+        message.push_back(static_cast<std::byte>(
+            static_cast<unsigned char>(character)));
+    }
+    message.push_back(std::byte{0U});
+    payload.insert(
+        payload.begin() + static_cast<std::ptrdiff_t>(
+            goldsrc::kResourceTransitionControlMessageSize),
+        message.begin(), message.end());
+    return payload;
+}
+
 struct DrivenTransition {
     goldsrc::ClientToServerNetchanPacket initial_request;
     goldsrc::ClientToServerNetchanPacket transition_request;
@@ -686,6 +703,363 @@ TEST_CASE("Resource-transition dispatcher decodes svc_nop before exact opcode 45
     CHECK(observed_nop);
 }
 
+TEST_CASE("Resource-transition stage preserves the exact boundary after compressed FastDL metadata",
+          "[goldsrc][resource-transition][stage][fastdl][bzip2][cursor][regression]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'430U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(
+        stage, transport, remote, epoch);
+    // '+' is byte 43 and '8' is byte 56: neither is a service boundary
+    // inside the NUL-terminated location string.
+    constexpr std::string_view location{"https://cdn.invalid/hl/+8/"};
+    auto semantic = with_resource_location(second_semantic_payload(), location);
+    semantic.insert(semantic.begin(), std::byte{1U});
+    const auto expected_boundary = 1U +
+        goldsrc::kResourceTransitionControlMessageSize + location.size() + 2U;
+    transport.queue(
+        remote,
+        server_packet(
+            2U,
+            false,
+            driven.transition_request.header.sequence.sequence.value(),
+            false,
+            service_envelope(semantic)));
+    stage.update(epoch + 4ms);
+
+    REQUIRE(stage.state() ==
+            goldsrc::ResourceTransitionStageState::neutral_opcode43_boundary_reached);
+    REQUIRE(stage.result());
+    CHECK_FALSE(stage.error());
+    CHECK(stage.result()->control().source_message_offset() == 1U);
+    CHECK(stage.result()->control().body_bytes() == 8U);
+    CHECK(stage.result()->boundary().opcode() == 43U);
+    CHECK(stage.result()->boundary().byte_offset() == expected_boundary);
+    CHECK(stage.result()->boundary().remaining_byte_count() == 1U);
+    CHECK(stage.result()->boundary().source_payload_size() == semantic.size());
+    CHECK(stage.result()->source_payload().decompressed());
+    CHECK(stage.result()->source_payload().decompressed_byte_count() == semantic.size());
+    CHECK(stage.transition_request_queue_count() == 1U);
+    CHECK(stage.transition_request_acknowledged());
+    CHECK(stage.cleanup_count() == 1U);
+}
+
+TEST_CASE("Resource-transition benign controls keep their exact cursor and remain inert",
+          "[goldsrc][resource-transition][stage][dispatch][public-server][security][no-stock]")
+{
+    const bool separate_payload = GENERATE(false, true);
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'450U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+    // The query ID and string contain 45/43: neither is a boundary inside a body.
+    const std::vector<std::byte> controls{
+        std::byte{8U}, std::byte{'h'}, std::byte{0U},
+        std::byte{9U}, std::byte{'q'}, std::byte{'u'}, std::byte{'i'}, std::byte{'t'}, std::byte{0U},
+        std::byte{57U}, std::byte{'x'}, std::byte{45U}, std::byte{43U}, std::byte{0U},
+        std::byte{58U}, std::byte{45U}, std::byte{43U}, std::byte{0U}, std::byte{0U},
+        std::byte{'y'}, std::byte{45U}, std::byte{43U}, std::byte{0U}, std::byte{1U}};
+    auto semantic = controls;
+    if (!separate_payload) {
+        const auto transition = second_semantic_payload();
+        semantic.insert(semantic.end(), transition.begin(), transition.end());
+    }
+    transport.queue(remote, server_packet(2U, false,
+        driven.transition_request.header.sequence.sequence.value(), false,
+        service_envelope(semantic)));
+    stage.update(epoch + 4ms);
+    if (separate_payload) {
+        REQUIRE(stage.state() == goldsrc::ResourceTransitionStageState::waiting_for_server_transfer);
+        CHECK_FALSE(stage.result());
+        transport.queue(remote, server_packet(3U, false,
+            driven.transition_request.header.sequence.sequence.value(), false,
+            service_envelope(second_semantic_payload())));
+        stage.update(epoch + 5ms);
+    }
+    REQUIRE(stage.state() == goldsrc::ResourceTransitionStageState::neutral_opcode43_boundary_reached);
+    REQUIRE(stage.result());
+    const auto control_offset = separate_payload ? 0U : controls.size();
+    CHECK(stage.result()->control().source_message_offset() == control_offset);
+    CHECK(stage.result()->boundary().byte_offset() == control_offset + 9U);
+    CHECK(stage.transition_request_queue_count() == 1U);
+    std::vector<unsigned> observed;
+    std::vector<std::size_t> offsets, lengths;
+    while (const auto event = stage.poll_event()) {
+        if (event->type == goldsrc::ResourceTransitionStageEventType::intermediate_message_decoded) {
+            REQUIRE(event->opcode);
+            observed.push_back(*event->opcode);
+            offsets.push_back(event->byte_offset);
+            lengths.push_back(event->byte_count);
+        }
+    }
+    CHECK(observed == std::vector<unsigned>{8U, 9U, 57U, 58U, 1U});
+    CHECK(offsets == std::vector<std::size_t>{0U, 3U, 9U, 14U, 23U});
+    CHECK(lengths == std::vector<std::size_t>{3U, 6U, 5U, 9U, 1U});
+    // Only the fixed initial/sendres messages and transport ACKs can be sent.
+    for (const auto& sent : transport.sent) {
+        const auto packet = decode_sent(sent);
+        if (packet.payload.empty()) continue;
+        const auto opcode = std::to_integer<unsigned>(packet.payload.front());
+        CHECK(opcode != 10U); // clc_cvarvalue
+        CHECK(opcode != 11U); // clc_cvarvalue2
+    }
+}
+
+TEST_CASE("Resource-transition retains raced userinfo without scanning into identity bytes",
+          "[goldsrc][resource-transition][stage][userinfo][public-server]")
+{
+    const bool pre_ack = GENERATE(false, true);
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28468U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+    const auto first = user_fixture::make_message(2U, 123U, "\\name\\Old-+\\model\\gman");
+    const auto latest = user_fixture::make_message(2U, 123U, "\\name\\Newest-+\\model\\barney");
+    auto combined = latest;
+    const auto boundary = second_semantic_payload();
+    combined.insert(combined.end(), boundary.begin(), boundary.end());
+    if (pre_ack) {
+        transport.queue(remote, server_packet(2U, true,
+            driven.transition_request.header.sequence.sequence.value(), true, service_envelope(first)));
+        stage.update(epoch + 4ms);
+        REQUIRE(stage.state() == goldsrc::ResourceTransitionStageState::waiting_for_request_ack);
+        CHECK_FALSE(stage.result());
+        const auto ack = decode_sent(transport.sent.back()).header.sequence.sequence.value();
+        REQUIRE(ack > driven.transition_request.header.sequence.sequence.value());
+        transport.queue(remote, server_packet(3U, false, ack, false, service_envelope(combined)));
+        stage.update(epoch + 5ms);
+        stage.update(epoch + 6ms);
+    } else {
+        combined.insert(combined.begin(), first.begin(), first.end());
+        transport.queue(remote, server_packet(2U, false,
+            driven.transition_request.header.sequence.sequence.value(), false, service_envelope(combined)));
+        stage.update(epoch + 4ms);
+    }
+    INFO((stage.error() ? stage.error()->context : std::string{}));
+    REQUIRE(stage.result());
+    const auto& update = stage.result()->user_info_updates()[2U];
+    REQUIRE(update);
+    REQUIRE(update->identity);
+    CHECK(update->identity->player_display_name() == "Newest-+");
+    CHECK(stage.result()->control().source_message_offset() == latest.size() + (pre_ack ? 0U : first.size()));
+    CHECK(stage.transition_request_queue_count() == 1U);
+}
+
+TEST_CASE("Resource-transition malformed userinfo cannot resync at a later resource boundary",
+          "[goldsrc][resource-transition][stage][userinfo][security]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28469U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+    auto body = user_fixture::make_message(32U, 123U, "\\name\\Bad-+");
+    const auto boundary = second_semantic_payload();
+    body.insert(body.end(), boundary.begin(), boundary.end());
+    transport.queue(remote, server_packet(2U, false,
+        driven.transition_request.header.sequence.sequence.value(), false, service_envelope(body)));
+    stage.update(epoch + 4ms);
+    REQUIRE(stage.error());
+    CHECK_FALSE(stage.result());
+    CHECK(stage.error()->code == goldsrc::ResourceTransitionStageErrorCode::intermediate_message_decode_failed);
+    CHECK(stage.error()->intermediate_control_code == goldsrc::RuntimeControlDecodeErrorCode::user_info_update_failed);
+    REQUIRE(stage.error()->failure_metadata);
+    CHECK(stage.error()->failure_metadata->actual_opcode == 13U);
+    CHECK(stage.error()->failure_metadata->cursor_byte_offset == 0U);
+}
+
+TEST_CASE("Resource-transition queries remain bounded and malformed bodies never resync",
+          "[goldsrc][resource-transition][stage][dispatch][public-server][security][no-stock]")
+{
+    const auto opcode = GENERATE(8U, 9U, 57U, 58U);
+    std::vector<std::byte> control{static_cast<std::byte>(opcode)};
+    if (opcode == 58U) {
+        control.insert(control.end(), {std::byte{45U}, std::byte{43U}, std::byte{0U}, std::byte{0U}});
+    }
+    control.insert(control.end(), {std::byte{'x'}, std::byte{45U}, std::byte{43U}, std::byte{0U}});
+    for (std::size_t size = 1U; size < control.size(); ++size) {
+        INFO("opcode " << opcode << " prefix " << size);
+        auto prefix = control;
+        prefix.resize(size);
+        FakeTransport transport;
+        const auto remote = network::NetworkAddress::loopback(28'451U);
+        const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+        goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+        const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+        transport.queue(remote, server_packet(2U, false,
+            driven.transition_request.header.sequence.sequence.value(), false,
+            service_envelope(prefix)));
+        stage.update(epoch + 4ms);
+        CHECK(stage.state() == goldsrc::ResourceTransitionStageState::protocol_error);
+        CHECK_FALSE(stage.result());
+        REQUIRE(stage.error());
+        CHECK(stage.error()->intermediate_control_code == goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+        REQUIRE(stage.error()->failure_metadata);
+        CHECK(stage.error()->failure_metadata->actual_opcode == opcode);
+        CHECK(stage.error()->failure_metadata->cursor_byte_offset == 0U);
+        while (const auto event = stage.poll_event()) {
+            CHECK(event->type != goldsrc::ResourceTransitionStageEventType::transition_control_decoded);
+            CHECK(event->type != goldsrc::ResourceTransitionStageEventType::intermediate_message_decoded);
+        }
+    }
+}
+
+TEST_CASE("Resource-transition still rejects unrelated decoder-validated controls",
+          "[goldsrc][resource-transition][stage][dispatch][public-server][security][no-stock]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'452U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+    auto semantic = second_semantic_payload();
+    semantic.insert(semantic.begin(), {std::byte{56U}, std::byte{0U}});
+    transport.queue(remote, server_packet(2U, false,
+        driven.transition_request.header.sequence.sequence.value(), false,
+        service_envelope(semantic)));
+    stage.update(epoch + 4ms);
+    CHECK(stage.state() == goldsrc::ResourceTransitionStageState::unsupported_message);
+    CHECK_FALSE(stage.result());
+    REQUIRE(stage.error());
+    CHECK(stage.error()->code == goldsrc::ResourceTransitionStageErrorCode::unexpected_intermediate_message);
+    REQUIRE(stage.error()->failure_metadata);
+    CHECK(stage.error()->failure_metadata->actual_opcode == 56U);
+}
+
+TEST_CASE("Resource-transition queries enforce the runtime decoder string cap",
+          "[goldsrc][resource-transition][stage][dispatch][public-server][limits][no-stock]")
+{
+    const auto opcode = GENERATE(57U, 58U);
+    const bool overlong = GENERATE(false, true);
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'453U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+    std::vector<std::byte> semantic{static_cast<std::byte>(opcode)};
+    if (opcode == 58U) semantic.insert(semantic.end(), 4U, std::byte{0U});
+    semantic.insert(semantic.end(), overlong ? 256U : 255U, std::byte{'x'});
+    semantic.push_back(std::byte{0U});
+    const auto expected_offset = semantic.size();
+    const auto transition = second_semantic_payload();
+    semantic.insert(semantic.end(), transition.begin(), transition.end());
+    transport.queue(remote, server_packet(2U, false,
+        driven.transition_request.header.sequence.sequence.value(), false,
+        service_envelope(semantic)));
+    stage.update(epoch + 4ms);
+    if (overlong) {
+        CHECK(stage.state() == goldsrc::ResourceTransitionStageState::protocol_error);
+        CHECK_FALSE(stage.result());
+        REQUIRE(stage.error());
+        CHECK(stage.error()->intermediate_control_code == goldsrc::RuntimeControlDecodeErrorCode::invalid_numeric_value);
+    } else {
+        REQUIRE(stage.result());
+        CHECK(stage.result()->control().source_message_offset() == expected_offset);
+    }
+}
+
+TEST_CASE("Resource-transition FastDL failures report boundary offsets without exposing location bytes",
+          "[goldsrc][resource-transition][stage][fastdl][diagnostics][negative][security]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'431U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(
+        stage, transport, remote, epoch);
+    constexpr std::string_view location{"https://cdn.invalid/hl/+8/"};
+    auto semantic = with_resource_location(second_semantic_payload(), location);
+    semantic.insert(semantic.begin(), std::byte{1U});
+    const auto next_boundary = 1U +
+        goldsrc::kResourceTransitionControlMessageSize + location.size() + 2U;
+
+    auto expected_error = goldsrc::ResourceTransitionControlErrorCode::wrong_next_boundary_opcode;
+    auto expected_parser_offset = next_boundary;
+    auto expected_cursor_offset = next_boundary;
+    std::optional<std::uint8_t> expected_opcode{55U};
+    std::uint8_t expected_required_opcode = 43U;
+
+    SECTION("unknown message after complete location is not skipped")
+    {
+        semantic.insert(
+            semantic.begin() + static_cast<std::ptrdiff_t>(next_boundary),
+            std::byte{55U});
+    }
+    SECTION("EOF after location is the exact missing boundary")
+    {
+        semantic.resize(next_boundary);
+        expected_error = goldsrc::ResourceTransitionControlErrorCode::missing_next_boundary;
+        expected_opcode.reset();
+    }
+    SECTION("opcode 43 without its body remains a boundary error")
+    {
+        semantic.resize(next_boundary + 1U);
+        expected_error = goldsrc::ResourceTransitionControlErrorCode::truncated_next_boundary_body;
+        expected_opcode = 43U;
+    }
+    SECTION("unterminated location never turns its raw bytes into an opcode")
+    {
+        semantic.resize(next_boundary - 1U);
+        expected_error = goldsrc::ResourceTransitionControlErrorCode::truncated_resource_location;
+        expected_parser_offset = semantic.size();
+        expected_cursor_offset = 1U;
+        expected_opcode = 45U;
+        expected_required_opcode = 45U;
+    }
+    SECTION("overlong location reports a numeric body offset not its raw byte")
+    {
+        std::array<char, 129U> overlong_location;
+        overlong_location.fill('x');
+        semantic = with_resource_location(
+            second_semantic_payload(),
+            std::string_view{overlong_location.data(), overlong_location.size()});
+        semantic.insert(semantic.begin(), std::byte{1U});
+        expected_error = goldsrc::ResourceTransitionControlErrorCode::resource_location_too_long;
+        expected_parser_offset = 1U +
+            goldsrc::kResourceTransitionControlMessageSize + 1U + 128U;
+        expected_cursor_offset = 1U;
+        expected_opcode = 45U;
+        expected_required_opcode = 45U;
+    }
+
+    transport.queue(
+        remote,
+        server_packet(
+            2U,
+            false,
+            driven.transition_request.header.sequence.sequence.value(),
+            false,
+            service_envelope(semantic)));
+    stage.update(epoch + 4ms);
+    REQUIRE(stage.state() == goldsrc::ResourceTransitionStageState::protocol_error);
+    CHECK_FALSE(stage.result());
+    REQUIRE(stage.error());
+    CHECK(stage.error()->control_code == expected_error);
+    CHECK(stage.error()->context.find(location) == std::string_view::npos);
+    REQUIRE(stage.error()->failure_metadata);
+    const auto& metadata = *stage.error()->failure_metadata;
+    CHECK(metadata.parser_error == expected_error);
+    CHECK(metadata.parser_error_byte_offset == expected_parser_offset);
+    CHECK(metadata.cursor_byte_offset == expected_cursor_offset);
+    CHECK(metadata.cursor_bit_offset == 0U);
+    CHECK(metadata.expected_opcode == expected_required_opcode);
+    CHECK(metadata.actual_opcode == expected_opcode);
+    CHECK(metadata.cursor_byte_value == expected_opcode);
+    CHECK(metadata.cursor_boundary_kind ==
+          goldsrc::ResourceTransitionCursorBoundaryKind::validated_message_boundary);
+    CHECK(metadata.wire_encoding == goldsrc::ResourceTransitionWireEncodingKind::bzip2);
+    CHECK(metadata.decoded_byte_count == semantic.size());
+    CHECK(stage.cleanup_count() == 1U);
+    while (const auto event = stage.poll_event()) {
+        CHECK(event->type != goldsrc::ResourceTransitionStageEventType::transition_control_decoded);
+        CHECK(event->type != goldsrc::ResourceTransitionStageEventType::neutral_opcode43_boundary);
+    }
+}
+
 TEST_CASE("Resource transfer waiting for a new client packet progresses after non-reliable sendres ACK",
           "[goldsrc][resource-transition][stage][idle-poll][regression]") {
     FakeTransport transport;
@@ -852,6 +1226,21 @@ TEST_CASE("User-info and resource-transition stage limits are positive and hard 
     CHECK_FALSE(goldsrc::valid_resource_transition_stage_configuration(transition));
     transition.maximum_driver_events_per_update =
         goldsrc::kMaximumResourceTransitionDriverEventsPerUpdate + 1U;
+    CHECK_FALSE(goldsrc::valid_resource_transition_stage_configuration(transition));
+
+    transition = goldsrc::ResourceTransitionStageConfig{};
+    transition.maximum_pre_ack_payloads = 0U;
+    CHECK_FALSE(goldsrc::valid_resource_transition_stage_configuration(transition));
+    transition.maximum_pre_ack_payloads = goldsrc::kMaximumTransitionPreAckPayloads;
+    CHECK(goldsrc::valid_resource_transition_stage_configuration(transition));
+    ++transition.maximum_pre_ack_payloads;
+    CHECK_FALSE(goldsrc::valid_resource_transition_stage_configuration(transition));
+    transition = goldsrc::ResourceTransitionStageConfig{};
+    transition.maximum_pre_ack_payload_bytes = 0U;
+    CHECK_FALSE(goldsrc::valid_resource_transition_stage_configuration(transition));
+    transition.maximum_pre_ack_payload_bytes = goldsrc::kMaximumTransitionPreAckBytes;
+    CHECK(goldsrc::valid_resource_transition_stage_configuration(transition));
+    ++transition.maximum_pre_ack_payload_bytes;
     CHECK_FALSE(goldsrc::valid_resource_transition_stage_configuration(transition));
 
     FakeTransport transport;
@@ -1262,13 +1651,15 @@ TEST_CASE("Resource-transition stage buffers one transfer until the matching ACK
     CHECK(count_exact_transition_packets(transport) == 2U);
 }
 
-TEST_CASE("Resource-transition stage rejects a second complete pre-ACK payload",
+TEST_CASE("Resource-transition stage enforces an explicitly single pre-ACK payload bound",
           "[goldsrc][resource-transition][stage][pre-ack][overflow][negative]")
 {
     FakeTransport transport;
     const auto remote = network::NetworkAddress::loopback(28'413U);
     const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
-    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    auto config = test_config();
+    config.maximum_pre_ack_payloads = 1U;
+    goldsrc::ResourceTransitionStage stage{transport, remote, config};
     const auto driven = drive_to_transition_request(
         stage, transport, remote, epoch);
 
@@ -1302,7 +1693,80 @@ TEST_CASE("Resource-transition stage rejects a second complete pre-ACK payload",
     CHECK(stage.error()->code ==
           goldsrc::ResourceTransitionStageErrorCode::
               service_payload_before_ack_overflow);
+    CHECK(stage.error()->context.find("count=1") != std::string::npos);
     CHECK(stage.cleanup_count() == 1U);
+}
+
+TEST_CASE("Resource-transition pre-ACK queue preserves query ordering and source provenance",
+          "[goldsrc][resource-transition][stage][pre-ack][queue][public-server][no-stock]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'460U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+    const std::vector<std::vector<std::byte>> payloads{
+        {std::byte{57U}, std::byte{'a'}, std::byte{0U}},
+        {std::byte{58U}, std::byte{3U}, std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{'b'}, std::byte{0U}},
+        second_semantic_payload()};
+    for (std::size_t index = 0U; index < payloads.size(); ++index) {
+        transport.queue(remote, server_packet(static_cast<std::uint32_t>(index + 2U), index == 0U,
+            driven.transition_request.header.sequence.sequence.value(), true,
+            service_envelope(payloads[index])));
+        stage.update(epoch + std::chrono::milliseconds{static_cast<int>(index + 4U)});
+        REQUIRE(stage.state() == goldsrc::ResourceTransitionStageState::waiting_for_request_ack);
+        CHECK_FALSE(stage.result());
+        CHECK_FALSE(stage.transition_request_acknowledged());
+    }
+    std::vector<unsigned> observed;
+    while (const auto event = stage.poll_event())
+        CHECK(event->type != goldsrc::ResourceTransitionStageEventType::intermediate_message_decoded);
+    // The first reliable carrier caused a real later client transport ACK.
+    // Changing only the reliable bit of an already seen numeric ACK is not
+    // a new acknowledgement and must not release the queued transfer.
+    const auto covering_ack = decode_sent(transport.sent.back()).header.sequence.sequence.value();
+    REQUIRE(covering_ack > driven.transition_request.header.sequence.sequence.value());
+    transport.queue(remote, server_packet(5U, false, covering_ack, false, {}));
+    stage.update(epoch + 7ms);
+    REQUIRE(stage.transition_request_acknowledged());
+    stage.update(epoch + 8ms);
+    stage.update(epoch + 9ms);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->source_payload().source_sequence() == 4U);
+    CHECK(stage.result()->source_payload().received_at() == epoch + 6ms);
+    while (const auto event = stage.poll_event())
+        if (event->type == goldsrc::ResourceTransitionStageEventType::intermediate_message_decoded) {
+            REQUIRE(event->opcode);
+            observed.push_back(*event->opcode);
+        }
+    CHECK(observed == std::vector<unsigned>{57U, 58U});
+    CHECK(stage.transition_request_queue_count() == 1U);
+}
+
+TEST_CASE("Resource-transition pre-ACK queue enforces aggregate bytes without early decode",
+          "[goldsrc][resource-transition][stage][pre-ack][queue][limits][no-stock]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'461U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    const auto payload = service_envelope(std::vector<std::byte>{std::byte{1U}});
+    auto config = test_config();
+    config.maximum_pre_ack_payload_bytes = payload.size();
+    goldsrc::ResourceTransitionStage stage{transport, remote, config};
+    const auto driven = drive_to_transition_request(stage, transport, remote, epoch);
+    for (std::uint32_t sequence_value = 2U; sequence_value <= 3U; ++sequence_value) {
+        transport.queue(remote, server_packet(sequence_value, false,
+            driven.transition_request.header.sequence.sequence.value(), true, payload));
+        stage.update(epoch + std::chrono::milliseconds{sequence_value + 2U});
+    }
+    REQUIRE(stage.error());
+    CHECK(stage.error()->code == goldsrc::ResourceTransitionStageErrorCode::service_payload_before_ack_overflow);
+    CHECK(stage.error()->context.find("count=1") != std::string::npos);
+    CHECK(stage.error()->context.find("bytes=" + std::to_string(payload.size())) != std::string::npos);
+    CHECK_FALSE(stage.transition_request_acknowledged());
+    CHECK_FALSE(stage.result());
+    while (const auto event = stage.poll_event())
+        CHECK(event->type != goldsrc::ResourceTransitionStageEventType::intermediate_message_decoded);
 }
 
 TEST_CASE("Resource-transition stage rejects malformed second-transfer envelopes",
@@ -1362,6 +1826,11 @@ TEST_CASE("Resource-transition stage enforces exact opcode-43 cursor",
         CHECK(stage.error()->control_code ==
               goldsrc::ResourceTransitionControlErrorCode::
                   wrong_next_boundary_opcode);
+        REQUIRE(stage.error()->failure_metadata);
+        CHECK(stage.error()->failure_metadata->expected_opcode == 43U);
+        CHECK(stage.error()->failure_metadata->actual_opcode == 42U);
+        CHECK(stage.error()->failure_metadata->cursor_byte_offset == 9U);
+        CHECK(stage.error()->failure_metadata->parser_error_byte_offset == 9U);
     }
 
     SECTION("truncated boundary opcode")
@@ -1390,6 +1859,12 @@ TEST_CASE("Resource-transition stage enforces exact opcode-43 cursor",
         CHECK(stage.error()->control_code ==
               goldsrc::ResourceTransitionControlErrorCode::
                   missing_next_boundary);
+        REQUIRE(stage.error()->failure_metadata);
+        CHECK(stage.error()->failure_metadata->expected_opcode == 43U);
+        CHECK_FALSE(stage.error()->failure_metadata->actual_opcode);
+        CHECK_FALSE(stage.error()->failure_metadata->cursor_byte_value);
+        CHECK(stage.error()->failure_metadata->cursor_byte_offset == 9U);
+        CHECK(stage.error()->failure_metadata->parser_error_byte_offset == 9U);
     }
 }
 
@@ -1531,6 +2006,191 @@ TEST_CASE("Multi-userinfo differential repeats 20 of 20",
 {
     for (std::size_t run = 0U; run < 20U; ++run) {
         run_baseline(run, true);
+    }
+}
+
+TEST_CASE("Resource-transition consumes an exactly framed director message without scanning its body",
+          "[goldsrc][resource-transition][stage][director-signon][dispatch][security][regression]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'470U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(
+        stage, transport, remote, epoch);
+
+    // svc_director owns one uint8-sized opaque body. Every body byte is also
+    // meaningful at a service-message boundary and therefore catches resync.
+    const std::vector<std::byte> director{
+        std::byte{51U}, std::byte{4U}, std::byte{11U},
+        std::byte{43U}, std::byte{45U}, std::byte{58U}};
+    transport.queue(
+        remote,
+        server_packet(
+            2U,
+            false,
+            driven.transition_request.header.sequence.sequence.value(),
+            false,
+            service_envelope(director)));
+    stage.update(epoch + 4ms);
+
+    REQUIRE(stage.state() ==
+            goldsrc::ResourceTransitionStageState::waiting_for_server_transfer);
+    CHECK_FALSE(stage.error());
+    CHECK_FALSE(stage.result());
+    CHECK(stage.transition_request_queue_count() == 1U);
+    std::vector<unsigned> observed_opcodes;
+    std::size_t consumed_payload_count = 0U;
+    while (const auto event = stage.poll_event()) {
+        if (event->type ==
+            goldsrc::ResourceTransitionStageEventType::
+                intermediate_message_decoded) {
+            REQUIRE(event->opcode);
+            observed_opcodes.push_back(*event->opcode);
+            CHECK(event->byte_offset == 0U);
+            CHECK(event->byte_count == director.size());
+        }
+        if (event->type ==
+            goldsrc::ResourceTransitionStageEventType::
+                intermediate_payload_consumed) {
+            ++consumed_payload_count;
+            CHECK(event->byte_count == director.size());
+        }
+    }
+    CHECK(observed_opcodes == std::vector<unsigned>{51U});
+    CHECK(consumed_payload_count == 1U);
+
+    transport.queue(
+        remote,
+        server_packet(
+            3U,
+            false,
+            driven.transition_request.header.sequence.sequence.value(),
+            false,
+            service_envelope(second_semantic_payload())));
+    stage.update(epoch + 5ms);
+
+    REQUIRE(stage.state() ==
+            goldsrc::ResourceTransitionStageState::
+                neutral_opcode43_boundary_reached);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->source_payload().source_sequence() == 3U);
+    CHECK(stage.result()->control().source_message_offset() == 0U);
+    CHECK(stage.result()->boundary().byte_offset() == 9U);
+    CHECK(stage.result()->boundary().opcode() == 43U);
+    CHECK(stage.transition_request_queue_count() == 1U);
+    for (const auto& sent : transport.sent) {
+        const auto packet = decode_sent(sent);
+        if (packet.payload.empty()) {
+            continue;
+        }
+        const auto opcode = std::to_integer<unsigned>(packet.payload.front());
+        CHECK(opcode != 10U);
+        CHECK(opcode != 11U);
+    }
+}
+
+TEST_CASE("Resource-transition rejects malformed or unknown director-adjacent framing transactionally",
+          "[goldsrc][resource-transition][stage][director-signon][negative][security][regression]")
+{
+    const auto malformed = GENERATE(
+        (std::vector<std::byte>{std::byte{51U}}),
+        (std::vector<std::byte>{
+            std::byte{51U}, std::byte{4U}, std::byte{11U},
+            std::byte{43U}, std::byte{45U}}));
+    CAPTURE(malformed.size());
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'471U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(
+        stage, transport, remote, epoch);
+
+    transport.queue(
+        remote,
+        server_packet(
+            2U,
+            false,
+            driven.transition_request.header.sequence.sequence.value(),
+            false,
+            service_envelope(malformed)));
+    stage.update(epoch + 4ms);
+
+    CHECK(stage.state() == goldsrc::ResourceTransitionStageState::protocol_error);
+    CHECK_FALSE(stage.result());
+    REQUIRE(stage.error());
+    CHECK(stage.error()->code ==
+          goldsrc::ResourceTransitionStageErrorCode::
+              intermediate_message_decode_failed);
+    CHECK(stage.error()->intermediate_control_code ==
+          goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+    REQUIRE(stage.error()->failure_metadata);
+    CHECK(stage.error()->failure_metadata->actual_opcode == 51U);
+    CHECK(stage.error()->failure_metadata->cursor_byte_offset == 0U);
+    CHECK(stage.error()->failure_metadata->intermediate_message_count == 0U);
+    CHECK(stage.transition_request_queue_count() == 1U);
+    CHECK(count_exact_transition_packets(transport) == 1U);
+    while (const auto event = stage.poll_event()) {
+        CHECK(event->type !=
+              goldsrc::ResourceTransitionStageEventType::
+                  intermediate_message_decoded);
+        CHECK(event->type !=
+              goldsrc::ResourceTransitionStageEventType::
+                  transition_control_decoded);
+        CHECK(event->type !=
+              goldsrc::ResourceTransitionStageEventType::
+                  neutral_opcode43_boundary);
+    }
+}
+
+TEST_CASE("Resource-transition does not broaden the director allowlist to an adjacent unknown opcode",
+          "[goldsrc][resource-transition][stage][director-signon][unknown-opcode][security][regression]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'472U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(
+        stage, transport, remote, epoch);
+    const std::vector<std::byte> unknown{
+        std::byte{50U}, std::byte{4U}, std::byte{11U},
+        std::byte{43U}, std::byte{45U}, std::byte{58U}};
+
+    transport.queue(
+        remote,
+        server_packet(
+            2U,
+            false,
+            driven.transition_request.header.sequence.sequence.value(),
+            false,
+            service_envelope(unknown)));
+    stage.update(epoch + 4ms);
+
+    CHECK(stage.state() ==
+          goldsrc::ResourceTransitionStageState::unsupported_message);
+    CHECK_FALSE(stage.result());
+    REQUIRE(stage.error());
+    CHECK(stage.error()->code ==
+          goldsrc::ResourceTransitionStageErrorCode::
+              intermediate_message_decode_failed);
+    CHECK(stage.error()->intermediate_control_code ==
+          goldsrc::RuntimeControlDecodeErrorCode::unsupported_opcode);
+    REQUIRE(stage.error()->failure_metadata);
+    CHECK(stage.error()->failure_metadata->actual_opcode == 50U);
+    CHECK(stage.error()->failure_metadata->cursor_byte_offset == 0U);
+    CHECK(stage.error()->failure_metadata->intermediate_message_count == 0U);
+    CHECK(stage.transition_request_queue_count() == 1U);
+    CHECK(count_exact_transition_packets(transport) == 1U);
+    while (const auto event = stage.poll_event()) {
+        CHECK(event->type !=
+              goldsrc::ResourceTransitionStageEventType::
+                  intermediate_message_decoded);
+        CHECK(event->type !=
+              goldsrc::ResourceTransitionStageEventType::
+                  transition_control_decoded);
+        CHECK(event->type !=
+              goldsrc::ResourceTransitionStageEventType::
+                  neutral_opcode43_boundary);
     }
 }
 

@@ -62,6 +62,10 @@ void EgonPresentation::start(std::uint32_t i,double at,bool narrow,std::optional
 }
 void EgonPresentation::stop(std::uint32_t i,double at,bool noise) noexcept {
     auto& e=emitters_[i];if(!e.active)return;
+    if(i==0 && snapshot_.identity && diagnostic_observer_ && diagnostic_observer_->weapon_diagnostics_enabled()) {
+        api::WeaponActionDiagnosticObservation o;o.identity=*snapshot_.identity;o.kind=core::MultiplayerActionKind::beam;
+        o.phase=core::MultiplayerActionPhase::end;diagnostic_observer_->weapon_action_observed(o);
+    }
     control(i,api::LocalVoiceControl::Operation::stop,at);
     if(noise && cue_count_<cues_.size()) {
         auto& c=cues_[cue_count_++];c={};c.reference=resources()[2];c.scheduled_seconds=at;
@@ -121,14 +125,31 @@ void EgonPresentation::command(const api::LocalWeaponSubmittedCommand& c) noexce
     command_floor_=c.sequence;last_command_seconds_=c.sample_end_seconds;
     now_=std::max(now_,c.sample_end_seconds);const auto at=c.sample_end_seconds;
     // RMB is not an Egon mode. No reload action and no local uranium burn.
-    if(!(c.buttons&1)){stop(0,at,true);require_release_=false;return;}
-    if(require_release_ || !selected_ || !eligible_ || at<cooldown_ || !c.shot_context || !finite(c.shot_context->eye) || !finite(c.shot_context->direction))return;
+    const auto rejected=[&](std::string_view reason) {
+        if(!selected_ || !diagnostic_observer_ || !diagnostic_observer_->weapon_diagnostics_enabled())return;
+        api::WeaponActionDiagnosticObservation o;
+        o.identity={identity_.network_generation,10,model_ ? model_->model_index : 0,model_ ? model_->resource_revision : 0,
+            c.sequence,api::LocalWeaponAction::primary_fire,at,revision_};
+        o.command=c;o.mode=(c.buttons&1) ? api::WeaponDiagnosticMode::primary : (c.buttons&(1U<<11)) ? api::WeaponDiagnosticMode::secondary : api::WeaponDiagnosticMode::reload;
+        o.kind=o.mode==api::WeaponDiagnosticMode::primary ? core::MultiplayerActionKind::beam : core::MultiplayerActionKind::unknown;o.phase=core::MultiplayerActionPhase::rejected;
+        o.reason=reason;o.next_attack=ready_at_;diagnostic_observer_->weapon_action_observed(o);
+    };
+    if(!(c.buttons&1)){if(c.buttons&((1U<<11)|(1U<<13)))rejected("local_mode_unsupported");stop(0,at,true);require_release_=false;return;}
+    if(require_release_ || !selected_ || !eligible_ || at<cooldown_ || !c.shot_context || !finite(c.shot_context->eye) || !finite(c.shot_context->direction)) {
+        rejected(require_release_ ? "local_release_required" : at<cooldown_ ? "local_attack_timer_gate" : !c.shot_context ? "local_command_pose_unavailable" : "local_model_or_state_unavailable");return;
+    }
+    if(!emitters_[0].active && at<ready_at_)rejected("local_attack_timer_gate");
     if(!emitters_[0].active && at>=ready_at_) {
         start(0,at,false,{});fire_started_=at;confirmed_=false;
         snapshot_.status=api::LocalWeaponActionStatus::predicted_pending;++snapshot_.actions_started;
         snapshot_.action=api::LocalWeaponAction::primary_fire;
         snapshot_.identity=api::LocalWeaponActionIdentity{identity_.network_generation,10,model_->model_index,model_->resource_revision,
             c.sequence,api::LocalWeaponAction::primary_fire,at,revision_};
+        if(diagnostic_observer_ && diagnostic_observer_->weapon_diagnostics_enabled()) {
+            api::WeaponActionDiagnosticObservation o;o.identity=*snapshot_.identity;o.command=c;
+            o.kind=core::MultiplayerActionKind::beam;o.phase=core::MultiplayerActionPhase::begin;
+            diagnostic_observer_->weapon_action_observed(o);
+        }
         fire_sequence_=5+(c.sequence+1)%4;animate(fire_sequence_,at);
     }
     if(emitters_[0].active)aim_ = api::LocalVisualContext{c.shot_context->eye,c.shot_context->direction,c.shot_context->right,c.shot_context->up,{},at};

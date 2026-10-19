@@ -148,3 +148,23 @@ TEST_CASE("E31 early protocol failure is not replaced by a disconnect that never
     CHECK(app::external_terminal_failure_reason("",true)=="disconnect_failed");
     CHECK(app::external_terminal_failure_reason("none",false)=="gameplay_receipt_incomplete");
 }
+TEST_CASE("E33 console close is clean independently of game readiness and stays a distinct receipt",
+    "[e33][external-session][receipt][no-stock]") {
+    app::SessionReceiptJournal early{{"0123456789abcdef0123456789abcdef",app::SessionReceiptRole::A,42,999}};
+    REQUIRE(early.begin_generation({}));
+    app::SessionCloseReceipt close;close.reason=app::SessionCloseReason::console_disconnect;
+    close.outcome=app::SessionCloseOutcome::cancel_without_protocol_disconnect;
+    REQUIRE(early.finish(close));CHECK(app::external_close_succeeded(early.snapshot(),false,false));
+    CHECK_FALSE(app::external_gameplay_receipt_ready(*early.snapshot()));
+    CHECK_FALSE(app::external_close_succeeded(early.snapshot(),true,false));
+    CHECK_FALSE(app::external_close_succeeded(early.snapshot(),false,true));
+    const auto encoded=app::encode_session_receipt(*early.snapshot());REQUIRE(encoded);
+    CHECK(encoded->find("close_reason=console_disconnect\n")!=std::string::npos);
+    const auto decoded=app::decode_session_receipt(*encoded);REQUIRE(decoded);
+    CHECK(decoded->close.reason==app::SessionCloseReason::console_disconnect);
+    auto window=*early.snapshot();window.close.reason=app::SessionCloseReason::window_close;
+    CHECK_FALSE(app::external_close_succeeded(&window,false,false));
+    auto cancelled=*early.snapshot();cancelled.close.reason=app::SessionCloseReason::startup_cancel;
+    CHECK(app::external_close_succeeded(&cancelled,false,false));
+    CHECK(app::to_string(cancelled.close.reason)!=app::to_string(decoded->close.reason));
+}

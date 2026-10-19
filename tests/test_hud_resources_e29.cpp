@@ -126,14 +126,57 @@ TEST_CASE("E29 actual approved installed HUD resources produce immutable full co
     auto made = hlclient::local_resources::LocalResourceEnvironment::create(std::move(*roots.roots)); REQUIRE(made);
     std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment> environment{std::move(made.environment)};
     const auto requests = hlclient::games::halflife::halflife_hud_resource_preparation();
-    g::ApprovedHudAssets assets{resources_for(environment, "maps/crossfire.bsp"), requests};
+    const auto approved_resources = resources_for(environment, "maps/crossfire.bsp");
+    g::ApprovedHudAssets assets{approved_resources, requests};
     const auto prepared = wait_prepared(assets);
     REQUIRE(prepared);
     REQUIRE(prepared->resources.descriptors.size() == 15U);
-    CHECK(prepared->ready_entries == 483U);
+    CHECK(prepared->ready_entries == 483U + 16U);
     CHECK(prepared->rejected_entries == 0U);
-    CHECK(prepared->sprites.size() == 224U);
-    CHECK(prepared->source_bytes == 9'555'520U + 20'195U);
+    CHECK(prepared->sprites.size() == 224U + 4U);
+    // Preserve the audited manifest-derived totals, adding only the four
+    // explicit pain dependencies resolved from this same approved world root.
+    constexpr std::array<std::uint32_t, 4U> pain_tiers{320U, 640U, 1280U, 2560U};
+    constexpr std::array<std::string_view, 4U> pain_roles{"pain_front", "pain_right", "pain_rear", "pain_left"};
+    REQUIRE(requests.front().supplemental_sprites.size() == 16U);
+    std::uint64_t supplemental_source_bytes{};
+    for (const auto tier : pain_tiers) {
+        CAPTURE(tier);
+        const auto name = "sprites/" + std::to_string(tier) + "_pain.spr";
+        const auto virtual_name = hlclient::local_resources::LocalVirtualResourceName::create(name); REQUIRE(virtual_name);
+        auto resolved = environment->resolve_exact_root(*virtual_name.name,
+            approved_resources.manifest->world_entry()->locator()->root_id()); REQUIRE(resolved);
+        supplemental_source_bytes += resolved.file->file_size(); resolved.file->close();
+        for (std::size_t frame_index = 0U; frame_index < pain_roles.size(); ++frame_index) {
+            const auto& entries = prepared->resources.descriptors.front().entries;
+            const auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto& value) {
+                return value.role == pain_roles[frame_index] && value.resolution == tier;
+            });
+            REQUIRE(entry != entries.end()); REQUIRE(entry->status == api::HudResourceStatus::ready);
+            CHECK(entry->sprite_name == name); CHECK(entry->frame == frame_index);
+            CHECK(entry->blend == api::HudSpriteBlend::additive);
+            const auto long_side = tier == 320U ? 64U : 128U, short_side = tier == 320U ? 24U : 48U;
+            const auto width = frame_index % 2U ? short_side : long_side;
+            const auto height = frame_index % 2U ? long_side : short_side;
+            CHECK(entry->frame_width == width); CHECK(entry->frame_height == height);
+            CHECK(entry->source == api::HudSourceRectangle{0U, 0U, width, height});
+            const auto sprite = std::find_if(prepared->sprites.begin(), prepared->sprites.end(), [&](const auto& value) {
+                return value.resource_id == entry->resource_id && value.resource_revision == entry->resource_revision;
+            });
+            REQUIRE(sprite != prepared->sprites.end()); REQUIRE(sprite->asset);
+            REQUIRE(sprite->asset->frames().size() == 4U);
+            const auto& frame = sprite->asset->frames()[frame_index];
+            CHECK(frame.profile == hlclient::entity_render::SpriteRenderTextureProfile::additive);
+            REQUIRE(frame.rgba8.size() == static_cast<std::size_t>(width) * height * 4U);
+            bool red_present = false, red_only = true;
+            for (std::size_t pixel = 0U; pixel < frame.rgba8.size(); pixel += 4U) {
+                red_present = red_present || frame.rgba8[pixel] != std::byte{0};
+                red_only = red_only && frame.rgba8[pixel + 1U] == std::byte{0} && frame.rgba8[pixel + 2U] == std::byte{0};
+            }
+            CHECK(red_present); CHECK(red_only);
+        }
+    }
+    CHECK(prepared->source_bytes == 9'555'520U + 20'195U + supplemental_source_bytes);
     CHECK(prepared->retained_decoded_bytes <= g::kMaximumHudDecodedBytes);
     CHECK(prepared->resources.descriptors.front().declared_count == 257U);
     CHECK(prepared->resources.descriptors.front().parsed_count == 247U);

@@ -8,7 +8,8 @@ namespace hlclient::app {
     using O=SessionCloseOutcome;
     if(close.outcome==O::send_failed || close.outcome==O::fatal_failure) return true;
     const bool intentional=close.reason==SessionCloseReason::window_close ||
-        close.reason==SessionCloseReason::duration_limit;
+        close.reason==SessionCloseReason::duration_limit ||
+        close.reason==SessionCloseReason::console_disconnect;
     return intentional && (close.outcome==O::pending || close.outcome==O::cancelled ||
         close.outcome==O::not_requested ||
         (close.eligible && !close.successful_send_count && !close.server_disconnect_observed));

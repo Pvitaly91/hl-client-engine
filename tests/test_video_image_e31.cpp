@@ -4,17 +4,22 @@
 #include <hlclient/core/presentation_settings.hpp>
 #include <hlclient/app/application_presentation_settings.hpp>
 #include <hlclient/app/external_session.hpp>
+#include <hlclient/app/external_observation_gate.hpp>
 #include <hlclient/audio/mixer.hpp>
 #include <hlclient/renderer/null/null_renderer.hpp>
 #include <hlclient/renderer/render_camera_math.hpp>
+#include <SDL3/SDL_events.h>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <chrono>
+#include <iostream>
 
 namespace {
 namespace core=hlclient::core;
@@ -269,6 +274,87 @@ TEST_CASE("E31 SDL window reports logical pixels display and completed resize", 
     while(window->poll_event(event))if(const auto* e=std::get_if<platform::WindowEvent>(&event))
         if(e->type==platform::WindowEventType::resized)resize_seen=true;
     CHECK(resize_seen);
+}
+
+TEST_CASE("Reporting video cache invalidates on owned geometry display and context events",
+          "[reporting-cache][e31][video][sdl][no-stock]") {
+    std::unique_ptr<platform::SdlRuntime> runtime;
+    std::unique_ptr<platform::SdlWindow> window;
+    try {
+        runtime=std::make_unique<platform::SdlRuntime>();
+        window=std::make_unique<platform::SdlWindow>(platform::SdlWindowConfig{
+            "Reporting cache hidden",128,96,true,0,core::VideoWindowMode::windowed,false});
+    } catch(const std::exception& error) {
+        if(platform::classify_opengl_startup_capability_failure(error)!=platform::OpenGlStartupCapabilityFailure::none)
+            SKIP("SDL/OpenGL startup capability unavailable: "<<error.what());
+        throw;
+    }
+    const auto drain=[&]{platform::PlatformEvent event;while(window->poll_event(event)) {}};
+    drain();
+    const auto& first=window->cached_video_state();
+    const auto refreshes=window->video_state_refresh_count();
+    for(std::size_t i=0;i<1000U;++i)CHECK(&window->cached_video_state()==&first);
+    CHECK(window->video_state_refresh_count()==refreshes);
+    const auto owned=SDL_GetWindowID(SDL_GL_GetCurrentWindow());
+    const auto push=[&](Uint32 type,SDL_WindowID id) {
+        SDL_Event event{};event.type=type;event.window.windowID=id;
+        REQUIRE(SDL_PushEvent(&event));drain();
+    };
+    auto revision=window->video_state_revision();
+    push(SDL_EVENT_WINDOW_MOVED,owned+1000U);
+    CHECK(window->video_state_revision()==revision); // Unrelated window cannot invalidate.
+    for(const auto type:{SDL_EVENT_WINDOW_MOVED,SDL_EVENT_WINDOW_RESIZED,
+        SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,SDL_EVENT_WINDOW_DISPLAY_CHANGED,
+        SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,SDL_EVENT_WINDOW_ENTER_FULLSCREEN,
+        SDL_EVENT_WINDOW_LEAVE_FULLSCREEN,SDL_EVENT_WINDOW_RESTORED,
+        SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED,SDL_EVENT_RENDER_DEVICE_RESET}) {
+        revision=window->video_state_revision();
+        const auto previous=window->video_state_refresh_count();
+        push(type,owned);
+        CHECK(window->video_state_revision()>revision);
+        CHECK(window->video_state_refresh_count()==previous); // Event never queries GL.
+        (void)window->cached_video_state();CHECK(window->video_state_refresh_count()==previous+1U);
+        (void)window->cached_video_state();CHECK(window->video_state_refresh_count()==previous+1U);
+    }
+    REQUIRE(SDL_SetWindowSize(SDL_GL_GetCurrentWindow(),224,144));REQUIRE(SDL_SyncWindow(SDL_GL_GetCurrentWindow()));
+    drain();CHECK(window->cached_video_state().window_extent==platform::PixelExtent{224,144});
+    revision=window->video_state_revision();
+    window.reset();
+    window=std::make_unique<platform::SdlWindow>(platform::SdlWindowConfig{
+        "Reporting cache replacement",128,96,true,0,core::VideoWindowMode::windowed,false});
+    CHECK(window->video_state_revision()>revision); // Reconnect/new GL context.
+    CHECK(window->video_state_refresh_count()==0U);
+    (void)window->cached_video_state();CHECK(window->video_state_refresh_count()==1U);
+}
+
+TEST_CASE("Reporting warmed stable-window fresh versus gated metadata costs",
+          "[.reporting-cache-perf][reporting-cache][e31][sdl][no-stock]") {
+    platform::SdlRuntime runtime;
+    platform::SdlWindow window{{"Reporting metadata benchmark",128,96,true,0,core::VideoWindowMode::windowed,false}};
+    platform::PlatformEvent event;while(window.poll_event(event)) {}
+    hlclient::app::ExternalObservationGate<std::uint64_t> gate;
+    const auto after=[&]{return gate.publish(window.video_state_revision(),[&]{
+        (void)window.cached_video_state();return true;});};
+    for(std::size_t i=0;i<64U;++i){(void)window.video_state();REQUIRE(after());}
+    constexpr std::size_t samples=1024U;
+    const auto measure=[&](bool fresh) {
+        std::vector<double> timings;timings.reserve(samples);
+        const auto initial_queries=window.video_state_refresh_count();
+        for(std::size_t i=0;i<samples;++i) {
+            const auto start=std::chrono::steady_clock::now();
+            if(fresh)(void)window.video_state();else (void)after();
+            timings.push_back(std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-start).count());
+        }
+        const auto queries=window.video_state_refresh_count()-initial_queries;
+        CHECK(queries==(fresh?samples:0U));
+        std::ranges::sort(timings);
+        const auto q=[&](double p){return timings[static_cast<std::size_t>(std::ceil(p*samples))-1U];};
+        std::cout<<"[reporting-cache-perf] {\"mode\":\""<<(fresh?"fresh_baseline":"gated_stable")
+            <<"\",\"samples\":"<<samples<<",\"quantiles\":\"nearest_rank\",\"unit\":\"us\""
+            <<",\"p50\":"<<q(.50)<<",\"p95\":"<<q(.95)<<",\"p99\":"<<q(.99)
+            <<",\"max\":"<<timings.back()<<",\"metadata_queries\":"<<queries<<"}\n";
+    };
+    measure(true);measure(false);measure(false);measure(true);
 }
 
 TEST_CASE("E31.1 scene AA request never leaks into SDL default framebuffer attributes", "[e311][e31][video][sdl][no-stock]") {

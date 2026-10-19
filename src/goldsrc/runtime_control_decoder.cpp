@@ -12,6 +12,56 @@
 namespace hlclient::goldsrc {
 namespace {
 
+// ReHLDS public/rehlds/custom.h: MAX_QPATH includes the NUL terminator,
+// t_world is the last valid resource type, and only RES_CUSTOM adds wire data.
+inline constexpr std::size_t kMaximumCustomizationNameBytes = 63U;
+inline constexpr std::uint8_t kMaximumCustomizationResourceType = 6U;
+inline constexpr std::uint8_t kCustomizationCustomFlag = 4U;
+inline constexpr std::size_t kCustomizationHashBytes = 16U;
+inline constexpr std::size_t kMaximumPingEntries = 32U;
+inline constexpr std::size_t kPingEntryBits = 25U;
+inline constexpr std::uint16_t kMaximumVoicePayloadBytes = 4'096U;
+// Project safety cap for auxiliary strings, not a protocol maximum. FastDL
+// retains its separately verified ReHLDS server bound of 128 non-NUL bytes.
+inline constexpr std::size_t kMaximumAuxiliaryTextBytes = 255U;
+inline constexpr std::size_t kMaximumRuntimeResourceLocationBytes = 128U;
+
+[[nodiscard]] bool valid_customization_metadata(
+    const RuntimeControlCustomization &body) noexcept {
+  return body.player_index <= kMaximumUserInfoClientIndex &&
+         body.resource_type <= kMaximumCustomizationResourceType &&
+         body.resource_name_length <= kMaximumCustomizationNameBytes &&
+         body.download_size >= 0 &&
+         body.opaque_hash_size ==
+             ((body.flags & kCustomizationCustomFlag) != 0U
+                  ? kCustomizationHashBytes : 0U);
+}
+
+[[nodiscard]] bool valid_auxiliary_metadata(
+    const RuntimeControlOpcode opcode,
+    const RuntimeControlAuxiliaryControl &body) noexcept {
+  switch (opcode) {
+  case RuntimeControlOpcode::svc_director:
+    return body.body_size >= 1U && body.body_size <= 256U &&
+        body.text_length == 0U && !body.request_id && !body.value;
+  case RuntimeControlOpcode::svc_resourcelocation:
+    return body.text_length <= kMaximumRuntimeResourceLocationBytes &&
+        body.body_size == body.text_length + 1U && !body.request_id && !body.value;
+  case RuntimeControlOpcode::svc_filetxferfailed:
+  case RuntimeControlOpcode::svc_sendcvarvalue:
+    return body.text_length <= kMaximumAuxiliaryTextBytes &&
+        body.body_size == body.text_length + 1U && !body.request_id && !body.value;
+  case RuntimeControlOpcode::svc_sendextrainfo:
+    return body.text_length <= kMaximumAuxiliaryTextBytes &&
+        body.body_size == body.text_length + 2U && !body.request_id && body.value;
+  case RuntimeControlOpcode::svc_sendcvarvalue2:
+    return body.text_length <= kMaximumAuxiliaryTextBytes &&
+        body.body_size == body.text_length + 5U && body.request_id && !body.value;
+  default:
+    return false;
+  }
+}
+
 // Valve SDK common/const.h and dlls/util.cpp (UTIL_DecalTrace and
 // UTIL_GunshotDecalTrace). No body-size guess or opcode resynchronization.
 enum class DecalLayout { world, entity, gunshot };
@@ -109,6 +159,12 @@ exact_fixed_control_body_size(const RuntimeControlOpcode opcode) noexcept {
     return 1U;
   case RuntimeControlOpcode::svc_spawnstaticsound:
     return 14U;
+  case RuntimeControlOpcode::svc_intermission:
+    return 0U;
+  case RuntimeControlOpcode::svc_cdtrack:
+    return 2U;
+  case RuntimeControlOpcode::svc_timescale:
+    return 4U;
   case RuntimeControlOpcode::svc_weaponanim:
     return 2U;
   case RuntimeControlOpcode::svc_roomtype:
@@ -612,6 +668,9 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_particle):
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_setpause):
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_spawnstaticsound):
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_intermission):
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_cdtrack):
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_timescale):
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_weaponanim):
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_roomtype):
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_addangle):
@@ -628,7 +687,17 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     }
     kind = RuntimeControlMessageKind::exact_fixed_control;
     RuntimeControlExactFixedBody fixed{*body_size};
-    if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_particle)) {
+    if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_timescale)) {
+      // GoldSrc/Xash cl_parse_gs.c reads one float here. Frame it without
+      // changing the local simulation clock or retaining the server value.
+      ByteReader fields{*bytes};
+      const auto value = fields.read_float32_le();
+      if (!value || !std::isfinite(*value)) {
+        return body_failure(RuntimeControlDecodeErrorCode::invalid_numeric_value,
+            "svc_timescale requires one finite float32",
+            input.initial_cursor, wire_opcode);
+      }
+    } else if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_particle)) {
       fixed.particle_count_color = std::array{
           std::to_integer<std::uint8_t>((*bytes)[9]),
           std::to_integer<std::uint8_t>((*bytes)[10])};
@@ -809,6 +878,101 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     temporary_entity_type = *type;
     // Pinned Valve SDK b1b5cf... common/const.h. Each branch consumes only
     // its documented body; unsupported subtypes still fail without resync.
+    if (*type == 29U) {
+      // Valve SDK dlls/util.cpp::UTIL_HudMessage writes a channel byte before
+      // the coordinates (the shorter const.h wire comment omits it).
+      RuntimeControlTextMessage observed;
+      const auto channel = reader.read_uint8();
+      const auto x = reader.read_int16_le();
+      const auto y = reader.read_int16_le();
+      const auto effect = reader.read_uint8();
+      if (!channel || !x || !y || !effect) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_TEXTMESSAGE channel, position or effect is truncated",
+            input.initial_cursor, wire_opcode);
+      }
+      observed.channel = *channel;
+      observed.position_fixed13 = {*x, *y};
+      observed.effect = *effect;
+      for (auto *color : {&observed.text_color, &observed.effect_color}) {
+        for (auto &component : *color) {
+          const auto value = reader.read_uint8();
+          if (!value) {
+            return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+                "TE_TEXTMESSAGE RGBA color is truncated",
+                input.initial_cursor, wire_opcode);
+          }
+          component = *value;
+        }
+      }
+      const auto fade_in = reader.read_uint16_le();
+      const auto fade_out = reader.read_uint16_le();
+      const auto hold = reader.read_uint16_le();
+      if (!fade_in || !fade_out || !hold) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_TEXTMESSAGE fade or hold time is truncated",
+            input.initial_cursor, wire_opcode);
+      }
+      observed.fade_in_ticks = *fade_in;
+      observed.fade_out_ticks = *fade_out;
+      observed.hold_ticks = *hold;
+      if (observed.effect == 2U) {
+        observed.effect_ticks = reader.read_uint16_le();
+        if (!observed.effect_ticks) {
+          return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+              "TE_TEXTMESSAGE effect-2 time is truncated",
+              input.initial_cursor, wire_opcode);
+        }
+      }
+      for (;;) {
+        const auto character = reader.read_uint8();
+        if (!character) {
+          return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+              "TE_TEXTMESSAGE text has no bounded NUL terminator",
+              input.initial_cursor, wire_opcode);
+        }
+        if (*character == 0U) break;
+        if (observed.text_length == kMaximumRuntimeTextMessageBytes) {
+          return body_failure(RuntimeControlDecodeErrorCode::invalid_numeric_value,
+              "TE_TEXTMESSAGE text exceeds the SDK 511-byte bound",
+              input.initial_cursor, wire_opcode);
+        }
+        ++observed.text_length;
+      }
+      kind = RuntimeControlMessageKind::temporary_entity;
+      body = observed;
+      break; // Inert metadata: no text retained or dispatched as commands.
+    }
+    if (*type == 112U) {
+      // Valve SDK UTIL_PlayerDecalTrace: player, coord[3], entity, decal.
+      // This inert custom-spray notification is not an ordinary BSP decal.
+      RuntimeControlPlayerDecal observed;
+      const auto player = reader.read_uint8();
+      if (!player) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_PLAYERDECAL player is truncated", input.initial_cursor, wire_opcode);
+      }
+      observed.player = *player;
+      for (auto &coordinate : observed.coordinate_eighths) {
+        const auto value = reader.read_int16_le();
+        if (!value) {
+          return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+              "TE_PLAYERDECAL coordinates are truncated", input.initial_cursor, wire_opcode);
+        }
+        coordinate = *value;
+      }
+      const auto entity = reader.read_uint16_le();
+      const auto decal = reader.read_uint8();
+      if (!entity || !decal) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_PLAYERDECAL entity/decal is truncated", input.initial_cursor, wire_opcode);
+      }
+      observed.entity_reference = *entity;
+      observed.decal_reference = *decal;
+      kind = RuntimeControlMessageKind::temporary_entity;
+      body = observed;
+      break;
+    }
     if (*type == 22U) {
       RuntimeControlBeamFollow observed;
       const auto entity = reader.read_int16_le();
@@ -1009,6 +1173,198 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     kind = RuntimeControlMessageKind::choke;
     body = RuntimeControlChoke{};
     break;
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_pings): {
+    // ReHLDS SV_EmitPings_internal: (1, slot:5, ping:12, loss:7)*, 0,
+    // followed by byte alignment. Slot zero maps to player entity one.
+    const auto start_bit = (initial_byte_offset + reader.position()) * 8U;
+    BitReader bits{input.payload.bytes, start_bit};
+    std::vector<RuntimeControlPingEntry> entries;
+    for (;;) {
+      const auto present = bits.read_bits(1U);
+      if (!present) {
+        bit_failure_offset = bits.bit_offset();
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "svc_pings entry/terminator bit is truncated",
+            input.initial_cursor, wire_opcode);
+      }
+      if (present.value == 0U) break;
+      if (entries.size() == kMaximumPingEntries) {
+        bit_failure_offset = bits.bit_offset();
+        return body_failure(RuntimeControlDecodeErrorCode::invalid_numeric_value,
+            "svc_pings exceeds the 32-player entry bound",
+            input.initial_cursor, wire_opcode);
+      }
+      const auto fields = bits.read_bits(kPingEntryBits - 1U);
+      if (!fields) {
+        bit_failure_offset = bits.bit_offset();
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "svc_pings slot/ping/loss entry is truncated",
+            input.initial_cursor, wire_opcode);
+      }
+      entries.push_back(RuntimeControlPingEntry{
+          static_cast<std::uint8_t>(fields.value & 31U),
+          static_cast<std::uint16_t>((fields.value >> 5U) & 4095U),
+          static_cast<std::uint8_t>((fields.value >> 17U) & 127U)});
+    }
+    const auto encoded_bits = bits.bit_offset() - start_bit;
+    const auto padding = (8U - (bits.bit_offset() % 8U)) % 8U;
+    if (!bits.read_bits(padding) ||
+        !reader.read_bytes((encoded_bits + padding) / 8U)) {
+      bit_failure_offset = bits.bit_offset();
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "svc_pings aligned body is truncated",
+          input.initial_cursor, wire_opcode);
+    }
+    kind = RuntimeControlMessageKind::player_pings;
+    body = RuntimeControlPings{entries.size(), encoded_bits, std::move(entries)};
+    break;
+  }
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_customization): {
+    // ReHLDS engine/sv_upld.cpp::SV_Customization writes this exact grammar.
+    // The byte-bounded name and optional fixed MD5 are opaque: no path use,
+    // copying, download, resource registration or opcode resynchronization.
+    const auto player_index = reader.read_uint8();
+    const auto resource_type = reader.read_uint8();
+    if (!player_index || !resource_type) {
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "svc_customization player/type header is truncated",
+          input.initial_cursor, wire_opcode);
+    }
+    if (*player_index > kMaximumUserInfoClientIndex ||
+        *resource_type > kMaximumCustomizationResourceType) {
+      return body_failure(RuntimeControlDecodeErrorCode::invalid_numeric_value,
+          "svc_customization player or resource type is outside protocol bounds",
+          input.initial_cursor, wire_opcode);
+    }
+    std::size_t name_length = 0U;
+    for (;;) {
+      const auto character = reader.read_uint8();
+      if (!character) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "svc_customization resource name has no bounded NUL terminator",
+            input.initial_cursor, wire_opcode);
+      }
+      if (*character == 0U) break;
+      if (name_length == kMaximumCustomizationNameBytes) {
+        return body_failure(RuntimeControlDecodeErrorCode::invalid_numeric_value,
+            "svc_customization resource name exceeds MAX_QPATH",
+            input.initial_cursor, wire_opcode);
+      }
+      ++name_length;
+    }
+    const auto resource_index = reader.read_uint16_le();
+    const auto download_size = reader.read_int32_le();
+    const auto flags = reader.read_uint8();
+    if (!resource_index || !download_size || !flags) {
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "svc_customization resource fields are truncated",
+          input.initial_cursor, wire_opcode);
+    }
+    if (*download_size < 0) {
+      return body_failure(RuntimeControlDecodeErrorCode::invalid_numeric_value,
+          "svc_customization resource size is negative",
+          input.initial_cursor, wire_opcode);
+    }
+    const auto hash_size = (*flags & kCustomizationCustomFlag) != 0U
+        ? kCustomizationHashBytes : 0U;
+    if (!reader.read_bytes(hash_size)) {
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "svc_customization opaque MD5 body is truncated",
+          input.initial_cursor, wire_opcode);
+    }
+    kind = RuntimeControlMessageKind::customization;
+    body = RuntimeControlCustomization{*player_index, *resource_type,
+        name_length, *resource_index, *download_size, *flags, hash_size};
+    break;
+  }
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_voicedata): {
+    // GoldSrc differs from the native Xash protocol: no frame-count byte.
+    // ReHLDS SV_ParseVoiceData sends slot, uint16 size and that many bytes.
+    const auto sender = reader.read_uint8();
+    const auto size = reader.read_uint16_le();
+    if (!sender || !size) {
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "svc_voicedata sender/size header is truncated",
+          input.initial_cursor, wire_opcode);
+    }
+    if (*sender > kMaximumUserInfoClientIndex || *size > kMaximumVoicePayloadBytes) {
+      return body_failure(RuntimeControlDecodeErrorCode::invalid_numeric_value,
+          "svc_voicedata sender or size exceeds protocol bounds",
+          input.initial_cursor, wire_opcode);
+    }
+    if (!reader.read_bytes(*size)) {
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "svc_voicedata opaque body is truncated",
+          input.initial_cursor, wire_opcode);
+    }
+    kind = RuntimeControlMessageKind::voice_data;
+    body = RuntimeControlVoiceData{*sender, *size};
+    break;
+  }
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_director): {
+    // Xash CL_ParseDirector: an explicit uint8 envelope size, then its body.
+    // No director command is dispatched or interpreted by this inert slice.
+    const auto director_body = reader.read_uint8_sized_bytes();
+    if (!director_body) {
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "svc_director explicit-length body is truncated",
+          input.initial_cursor, wire_opcode);
+    }
+    kind = RuntimeControlMessageKind::auxiliary_control;
+    body = RuntimeControlAuxiliaryControl{
+        director_body->size() + 1U, 0U, std::nullopt, std::nullopt};
+    break;
+  }
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_filetxferfailed):
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_sendextrainfo):
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_resourcelocation):
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_sendcvarvalue):
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_sendcvarvalue2): {
+    // ReHLDS SV_SendServerinfo/QueryClientCvarValue[2] and Xash GoldSrc
+    // parsing: opaque NUL strings, optional leading request ID or trailing
+    // cheat flag. Never resolve a path, execute a command, query a local cvar
+    // or generate a response from these announcements.
+    const auto body_start = reader.position();
+    RuntimeControlAuxiliaryControl observed;
+    if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_sendcvarvalue2)) {
+      observed.request_id = reader.read_int32_le();
+      if (!observed.request_id) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "auxiliary control request identifier is truncated",
+            input.initial_cursor, wire_opcode);
+      }
+    }
+    const auto maximum_text = *wire_opcode ==
+        static_cast<std::uint8_t>(RuntimeControlOpcode::svc_resourcelocation)
+        ? kMaximumRuntimeResourceLocationBytes : kMaximumAuxiliaryTextBytes;
+    for (;;) {
+      const auto character = reader.read_uint8();
+      if (!character) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "auxiliary control string has no bounded NUL terminator",
+            input.initial_cursor, wire_opcode);
+      }
+      if (*character == 0U) break;
+      if (observed.text_length == maximum_text) {
+        return body_failure(RuntimeControlDecodeErrorCode::invalid_numeric_value,
+            "auxiliary control string exceeds its safety bound",
+            input.initial_cursor, wire_opcode);
+      }
+      ++observed.text_length;
+    }
+    if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_sendextrainfo)) {
+      observed.value = reader.read_uint8();
+      if (!observed.value) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "svc_sendextrainfo trailing flag is truncated",
+            input.initial_cursor, wire_opcode);
+      }
+    }
+    observed.body_size = reader.position() - body_start;
+    kind = RuntimeControlMessageKind::auxiliary_control;
+    body = observed;
+    break;
+  }
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_voiceinit): {
     const auto remaining =
         std::span<const std::byte>{input.payload.bytes}.subspan(
@@ -1299,6 +1655,26 @@ std::optional<RuntimeControlDecodeError> RuntimeControlDecoder::apply_events(
       break;
     }
     case RuntimeControlMessageKind::temporary_entity: {
+      if (const auto *text = std::get_if<RuntimeControlTextMessage>(&event.body)) {
+        if (event.opcode != RuntimeControlOpcode::svc_temp_entity ||
+            text->text_length > kMaximumRuntimeTextMessageBytes ||
+            text->effect_ticks.has_value() != (text->effect == 2U)) {
+          return RuntimeControlDecodeError{
+              RuntimeControlDecodeErrorCode::invalid_configuration,
+              event.provenance.start_cursor, static_cast<std::uint8_t>(event.opcode),
+              "decoded TE_TEXTMESSAGE has incompatible typed metadata"};
+        }
+        break; // Explicit inert observation; untrusted HUD text is not executed.
+      }
+      if (std::holds_alternative<RuntimeControlPlayerDecal>(event.body)) {
+        if (event.opcode != RuntimeControlOpcode::svc_temp_entity) {
+          return RuntimeControlDecodeError{
+              RuntimeControlDecodeErrorCode::invalid_configuration,
+              event.provenance.start_cursor, static_cast<std::uint8_t>(event.opcode),
+              "decoded player-decal event has incompatible opcode"};
+        }
+        break;
+      }
       if (std::holds_alternative<RuntimeControlExplosion>(event.body) ||
           std::holds_alternative<RuntimeControlSmoke>(event.body) ||
           std::holds_alternative<RuntimeControlSparks>(event.body) ||
@@ -1372,6 +1748,62 @@ std::optional<RuntimeControlDecodeError> RuntimeControlDecoder::apply_events(
             "decoded choke event has an incompatible opcode or body"};
       }
       break;
+    case RuntimeControlMessageKind::player_pings: {
+      const auto *body = std::get_if<RuntimeControlPings>(&event.body);
+      if (body == nullptr || event.opcode != RuntimeControlOpcode::svc_pings ||
+          body->entry_count > kMaximumPingEntries ||
+          body->entry_count != body->entries.size() ||
+          body->encoded_body_bits != body->entry_count * kPingEntryBits + 1U ||
+          !std::all_of(body->entries.begin(), body->entries.end(),
+              [](const RuntimeControlPingEntry &entry) {
+                return entry.player_index <= kMaximumUserInfoClientIndex &&
+                    entry.ping_ms <= 4095U && entry.packet_loss <= 127U;
+              })) {
+        return RuntimeControlDecodeError{
+            RuntimeControlDecodeErrorCode::invalid_configuration,
+            event.provenance.start_cursor,
+            static_cast<std::uint8_t>(event.opcode),
+            "decoded ping-list event has incompatible typed metadata"};
+      }
+      break;
+    }
+    case RuntimeControlMessageKind::voice_data: {
+      const auto *body = std::get_if<RuntimeControlVoiceData>(&event.body);
+      if (body == nullptr || event.opcode != RuntimeControlOpcode::svc_voicedata ||
+          body->sender_index > kMaximumUserInfoClientIndex ||
+          body->payload_size > kMaximumVoicePayloadBytes) {
+        return RuntimeControlDecodeError{
+            RuntimeControlDecodeErrorCode::invalid_configuration,
+            event.provenance.start_cursor,
+            static_cast<std::uint8_t>(event.opcode),
+            "decoded voice-data event has incompatible typed metadata"};
+      }
+      break;
+    }
+    case RuntimeControlMessageKind::auxiliary_control: {
+      const auto *body = std::get_if<RuntimeControlAuxiliaryControl>(&event.body);
+      if (body == nullptr || !valid_auxiliary_metadata(event.opcode, *body)) {
+        return RuntimeControlDecodeError{
+            RuntimeControlDecodeErrorCode::invalid_configuration,
+            event.provenance.start_cursor,
+            static_cast<std::uint8_t>(event.opcode),
+            "decoded auxiliary-control event has incompatible typed metadata"};
+      }
+      break;
+    }
+    case RuntimeControlMessageKind::customization: {
+      const auto *body = std::get_if<RuntimeControlCustomization>(&event.body);
+      if (body == nullptr ||
+          event.opcode != RuntimeControlOpcode::svc_customization ||
+          !valid_customization_metadata(*body)) {
+        return RuntimeControlDecodeError{
+            RuntimeControlDecodeErrorCode::invalid_configuration,
+            event.provenance.start_cursor,
+            static_cast<std::uint8_t>(event.opcode),
+            "decoded customization event has incompatible typed metadata"};
+      }
+      break;
+    }
     case RuntimeControlMessageKind::voice_initialization: {
       const auto *body =
           std::get_if<RuntimeControlVoiceInitialization>(&event.body);
@@ -1574,6 +2006,8 @@ std::string_view to_string(const RuntimeControlOpcode opcode) noexcept {
     return "svc_updateuserinfo";
   case RuntimeControlOpcode::svc_stopsound:
     return "svc_stopsound";
+  case RuntimeControlOpcode::svc_pings:
+    return "svc_pings";
   case RuntimeControlOpcode::svc_particle:
     return "svc_particle";
   case RuntimeControlOpcode::svc_temp_entity:
@@ -1586,8 +2020,12 @@ std::string_view to_string(const RuntimeControlOpcode opcode) noexcept {
     return "svc_centerprint";
   case RuntimeControlOpcode::svc_spawnstaticsound:
     return "svc_spawnstaticsound";
+  case RuntimeControlOpcode::svc_intermission:
+    return "svc_intermission";
   case RuntimeControlOpcode::svc_finale:
     return "svc_finale";
+  case RuntimeControlOpcode::svc_cdtrack:
+    return "svc_cdtrack";
   case RuntimeControlOpcode::svc_cutscene:
     return "svc_cutscene";
   case RuntimeControlOpcode::svc_weaponanim:
@@ -1598,12 +2036,30 @@ std::string_view to_string(const RuntimeControlOpcode opcode) noexcept {
     return "svc_addangle";
   case RuntimeControlOpcode::svc_choke:
     return "svc_choke";
+  case RuntimeControlOpcode::svc_customization:
+    return "svc_customization";
   case RuntimeControlOpcode::svc_crosshairangle:
     return "svc_crosshairangle";
   case RuntimeControlOpcode::svc_soundfade:
     return "svc_soundfade";
+  case RuntimeControlOpcode::svc_filetxferfailed:
+    return "svc_filetxferfailed";
+  case RuntimeControlOpcode::svc_director:
+    return "svc_director";
   case RuntimeControlOpcode::svc_voiceinit:
     return "svc_voiceinit";
+  case RuntimeControlOpcode::svc_voicedata:
+    return "svc_voicedata";
+  case RuntimeControlOpcode::svc_sendextrainfo:
+    return "svc_sendextrainfo";
+  case RuntimeControlOpcode::svc_timescale:
+    return "svc_timescale";
+  case RuntimeControlOpcode::svc_resourcelocation:
+    return "svc_resourcelocation";
+  case RuntimeControlOpcode::svc_sendcvarvalue:
+    return "svc_sendcvarvalue";
+  case RuntimeControlOpcode::svc_sendcvarvalue2:
+    return "svc_sendcvarvalue2";
   }
   return "unknown";
 }
@@ -1640,6 +2096,14 @@ std::string_view to_string(const RuntimeControlMessageKind kind) noexcept {
     return "user_message";
   case RuntimeControlMessageKind::scripted_events:
     return "scripted_events";
+  case RuntimeControlMessageKind::customization:
+    return "customization";
+  case RuntimeControlMessageKind::player_pings:
+    return "player_pings";
+  case RuntimeControlMessageKind::voice_data:
+    return "voice_data";
+  case RuntimeControlMessageKind::auxiliary_control:
+    return "auxiliary_control";
   }
   return "unknown";
 }

@@ -58,6 +58,12 @@ void GaussPresentation::cue(std::string_view name,double now,float volume,float 
     c.kind=api::LocalSoundKind::fire;c.world_origin=origin;c.attenuation=origin ? .8F : 0;
 }
 void GaussPresentation::cancel(double now) noexcept {
+    if(diagnostic_charge_ && diagnostic_observer_ && diagnostic_observer_->weapon_diagnostics_enabled()) {
+        api::WeaponActionDiagnosticObservation o;o.identity=*diagnostic_charge_;
+        o.mode=api::WeaponDiagnosticMode::secondary;o.kind=core::MultiplayerActionKind::charge;
+        o.phase=core::MultiplayerActionPhase::end;diagnostic_observer_->weapon_action_observed(o);
+    }
+    diagnostic_charge_.reset();
     if(charge_phase_) {
         voice(api::LocalVoiceControl::Operation::stop,0,1,std::max(now,now_));
         snapshot_.visual.reset(); // no provisional spin remains after cancellation
@@ -153,10 +159,19 @@ void GaussPresentation::queue(Shot shot) noexcept {
 }
 std::optional<V> GaussPresentation::fire(const api::LocalWeaponSubmittedCommand& c,Discharge reason,float energy) noexcept {
     if(!c.shot_context || !unit(c.shot_context->direction) || !finite(c.shot_context->eye)) {++rejected_;cancel(c.sample_end_seconds);return {};}
-    const auto now=c.sample_end_seconds;const bool primary=reason==Discharge::primary;cancel(now);
+    const auto now=c.sample_end_seconds;const bool primary=reason==Discharge::primary;
+    const auto charge_command=diagnostic_charge_ ? std::optional{diagnostic_charge_->command_sequence} : std::nullopt;
+    cancel(now);
     Identity id{identity_.network_generation,9,model_->model_index,model_->resource_revision,c.sequence,
         primary ? api::LocalWeaponAction::primary_fire : api::LocalWeaponAction::secondary_fire,now,revision_};
     snapshot_.identity=id;snapshot_.action=id.kind;++snapshot_.actions_started;
+    if(diagnostic_observer_ && diagnostic_observer_->weapon_diagnostics_enabled()) {
+        api::WeaponActionDiagnosticObservation o;o.identity=id;o.command=c;
+        o.mode=primary ? api::WeaponDiagnosticMode::primary : api::WeaponDiagnosticMode::secondary;
+        o.kind=core::MultiplayerActionKind::beam;o.reserve=ammo_;o.next_attack=attack_ready_at_;
+        o.related_command_sequence=charge_command;
+        diagnostic_observer_->weapon_action_observed(o);
+    }
     if(primary)++snapshot_.primary_fire_starts;else ++snapshot_.secondary_fire_starts;
     ++snapshot_.recoil_starts;animate(6,now);
     // SDK WeaponIdle release sets an idle deadline, not an attack cooldown.
@@ -174,17 +189,35 @@ std::optional<V> GaussPresentation::command(const api::LocalWeaponSubmittedComma
         c.sequence<=command_floor_) {if(selected_ && c.sequence<=command_floor_)++snapshot_.duplicate_submissions;return {};}
     command_floor_=c.sequence;now_=std::max(now_,c.sample_end_seconds);const auto at=c.sample_end_seconds;
     const bool held=(c.buttons&(1U<<11))!=0;const bool primary=(c.buttons&1)!=0;
-    if(!eligible_ || (!charge_phase_ && (at<cooldown_ || at<attack_ready_at_)))return {};
-    if(water_==3) {cancel(at);if(held||primary) {cue("weapons/357_cock1.wav",at,.8F,1);cooldown_=at+(held ? .5 : .15);}return {};}
+    const auto rejected=[&](std::string_view reason) {
+        if(!(held||primary) || !diagnostic_observer_ || !diagnostic_observer_->weapon_diagnostics_enabled())return;
+        api::WeaponActionDiagnosticObservation o;
+        o.identity={identity_.network_generation,9,model_ ? model_->model_index : 0,model_ ? model_->resource_revision : 0,
+            c.sequence,held ? api::LocalWeaponAction::secondary_fire : api::LocalWeaponAction::primary_fire,at,revision_};
+        o.command=c;o.mode=held ? api::WeaponDiagnosticMode::secondary : api::WeaponDiagnosticMode::primary;
+        o.kind=held ? core::MultiplayerActionKind::charge : core::MultiplayerActionKind::beam;
+        o.phase=core::MultiplayerActionPhase::rejected;o.reason=reason;o.reserve=ammo_;o.next_attack=attack_ready_at_;
+        diagnostic_observer_->weapon_action_observed(o);
+    };
+    if(!eligible_) {rejected("local_model_or_state_unavailable");return {};}
+    if(!charge_phase_ && (at<cooldown_ || at<attack_ready_at_)){rejected("local_attack_timer_gate");return {};}
+    if(water_==3) {rejected("local_underwater_gate");cancel(at);if(held||primary) {cue("weapons/357_cock1.wav",at,.8F,1);cooldown_=at+(held ? .5 : .15);}return {};}
     const auto available=std::max(0,ammo_-reservations_);
     if(primary && !held) {
-        if(at<cooldown_)return {}; // also gates empty clicks during an active charge
-        if(available<2) {cue("weapons/357_cock1.wav",at,.8F,1);cooldown_=at+.5;return {};}
+        if(at<cooldown_){rejected("local_attack_timer_gate");return {};}
+        if(available<2) {rejected("local_ammo_gate");cue("weapons/357_cock1.wav",at,.8F,1);cooldown_=at+.5;return {};}
         reservations_+=2;return fire(c,Discharge::primary,20);
     }
     if(held && !charge_phase_) {
-        if(available==0) {cue("weapons/357_cock1.wav",at,.8F,1);cooldown_=at+.5;return {};}
+        if(available==0) {rejected("local_ammo_gate");cue("weapons/357_cock1.wav",at,.8F,1);cooldown_=at+.5;return {};}
         ++reservations_;charge_phase_=1;charging_seen_=false;charge_command_owned_=true;charge_started_=burn_at_=at;idle_at_=at+.5;
+        if(diagnostic_observer_ && diagnostic_observer_->weapon_diagnostics_enabled()) {
+            diagnostic_charge_=Identity{identity_.network_generation,9,model_->model_index,model_->resource_revision,
+                c.sequence,api::LocalWeaponAction::secondary_fire,at,revision_};
+            api::WeaponActionDiagnosticObservation o;o.identity=*diagnostic_charge_;o.command=c;o.reserve=ammo_;
+            o.mode=api::WeaponDiagnosticMode::secondary;o.kind=core::MultiplayerActionKind::charge;
+            o.phase=core::MultiplayerActionPhase::begin;diagnostic_observer_->weapon_action_observed(o);
+        }
         animate(3,at);voice(api::LocalVoiceControl::Operation::start,0,1.1F,at);return {};
     }
     if(!charge_phase_)return {};

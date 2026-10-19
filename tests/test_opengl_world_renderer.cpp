@@ -1286,7 +1286,20 @@ TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending 
     CHECK(timed.color_signature==baseline.color_signature);
     CHECK(gpu.gpu_timing_statistics().allocated_queries==8U);
     const auto first=gpu.poll_gpu_timing();
-    if(first) {CHECK(first->frame_number==42U);CHECK(std::isfinite(first->elapsed_ms));CHECK(first->elapsed_ms>=0.0);}
+    const auto check_passes=[](const renderer::opengl::OpenGlGpuFrameTiming& result) {
+        CHECK(result.status==renderer::opengl::OpenGlGpuTimingStatus::ready);
+        CHECK(result.valid_pass_mask==0x3fU);
+        double sum{};
+        for(const auto elapsed:result.pass_elapsed_ms) {
+            CHECK(std::isfinite(elapsed));CHECK(elapsed>=0.0F);sum+=elapsed;
+        }
+        // The total uses the pre-existing elapsed query; timestamp segments
+        // begin/end inside it, with allowance only for float encoding error.
+        CHECK(sum<=result.elapsed_ms+0.01);
+    };
+    if(first) {CHECK(first->frame_number==42U);CHECK(std::isfinite(first->elapsed_ms));CHECK(first->elapsed_ms>=0.0);check_passes(*first);}
+    CHECK(gpu.gpu_timing_statistics().allocated_pass_queries==128U);
+    CHECK(gpu.gpu_timing_statistics().pass_timestamps_supported);
     std::size_t observations=first ? 1U:0U;
     for(std::uint64_t id=43U;id<60U;++id) {
         gpu.render_with_gpu_timing(scene,extent,id);
@@ -1295,6 +1308,7 @@ TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending 
             const auto result=gpu.poll_gpu_timing();if(!result)break;
             ++observations;CHECK(result->frame_number>=42U);CHECK(result->frame_number<=id);
             CHECK(std::isfinite(result->elapsed_ms));CHECK(result->elapsed_ms>=0.0);
+            check_passes(*result);
         }
         CHECK(gpu.gpu_timing_statistics().pending<=8U);
     }
@@ -1309,12 +1323,221 @@ TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending 
     GLint still_foreign{};glGetQueryiv(GL_TIME_ELAPSED,GL_CURRENT_QUERY,&still_foreign);
     CHECK(static_cast<GLuint>(still_foreign)==foreign);
     CHECK(gpu.gpu_timing_statistics().unavailable==unavailable+1U);
+    CHECK(gpu.gpu_timing_statistics().last_submission_status==renderer::opengl::OpenGlGpuTimingStatus::invalid);
     glEndQuery(GL_TIME_ELAPSED);glDeleteQueries(1,&foreign);
     auto invalid=scene;invalid.requested_msaa_samples=3;
     CHECK_THROWS_AS(gpu.render_with_gpu_timing(invalid,extent,101U),std::invalid_argument);
     GLint active{};glGetQueryiv(GL_TIME_ELAPSED,GL_CURRENT_QUERY,&active);CHECK(active==0);
     gpu.render(scene,extent);
     CHECK(glGetError()==GL_NO_ERROR);
+
+    gpu.reset_session_resources();
+    CHECK(gpu.gpu_timing_statistics().allocated_pass_queries==0U);
+    for(std::uint64_t id=200;id<209;++id)gpu.render_with_gpu_timing(scene,extent,id);
+    CHECK(gpu.gpu_timing_statistics().pending==8U);
+    CHECK(gpu.gpu_timing_statistics().capacity_drops==1U);
+    CHECK(gpu.gpu_timing_statistics().last_submission_status==renderer::opengl::OpenGlGpuTimingStatus::capacity_dropped);
+    // Deliberately unavailable results must never call GL_QUERY_RESULT. This
+    // test-only entry-point substitution does not change the production path.
+    const auto original_available=glad_glGetQueryObjectiv;
+    const auto original_result=glad_glGetQueryObjectui64v;
+    static std::size_t pending_availability_calls{},pending_result_calls{};
+    pending_availability_calls=pending_result_calls=0U;
+    struct RestoreQueries {
+        PFNGLGETQUERYOBJECTIVPROC available;
+        PFNGLGETQUERYOBJECTUI64VPROC result;
+        ~RestoreQueries(){glad_glGetQueryObjectiv=available;glad_glGetQueryObjectui64v=result;}
+        static void GLAD_API_PTR unavailable(GLuint,GLenum name,GLint* value) {
+            if(name==GL_QUERY_RESULT_AVAILABLE)++pending_availability_calls;
+            *value=GL_FALSE;
+        }
+        static void GLAD_API_PTR result_attempt(GLuint,GLenum,GLuint64*){++pending_result_calls;}
+    } restore_queries{original_available,original_result};
+    glad_glGetQueryObjectiv=&RestoreQueries::unavailable;
+    glad_glGetQueryObjectui64v=&RestoreQueries::result_attempt;
+    CHECK_FALSE(gpu.poll_gpu_timing());
+    CHECK(pending_availability_calls==8U);
+    CHECK(pending_result_calls==0U);
+    CHECK(gpu.gpu_timing_statistics().pending==8U);
+    glad_glGetQueryObjectiv=original_available;glad_glGetQueryObjectui64v=original_result;
+    gpu.reset_session_resources();
+    CHECK(gpu.gpu_timing_statistics().pending==0U);
+    CHECK(gpu.gpu_timing_statistics().allocated_pass_queries==0U);
+    CHECK_FALSE(gpu.poll_gpu_timing());
+
+    // Query capability absence keeps the legacy whole-frame observation but
+    // cannot manufacture six zero-duration successful passes.
+    const auto original_counter=glad_glQueryCounter;
+    struct RestoreCounter {
+        PFNGLQUERYCOUNTERPROC value;
+        ~RestoreCounter(){glad_glQueryCounter=value;}
+    } restore_counter{original_counter};
+    glad_glQueryCounter=nullptr;
+    gpu.render_with_gpu_timing(scene,extent,300U);
+    glad_glQueryCounter=original_counter;
+    (void)gpu.observe_framebuffer(extent,scene.clear_color);
+    const auto unsupported=gpu.poll_gpu_timing();
+    REQUIRE(unsupported);
+    CHECK(unsupported->frame_number==300U);
+    CHECK(unsupported->status==renderer::opengl::OpenGlGpuTimingStatus::unsupported);
+    CHECK(unsupported->valid_pass_mask==0U);
+    CHECK(std::isfinite(unsupported->elapsed_ms));
+    CHECK(gpu.gpu_timing_statistics().allocated_pass_queries==0U);
+    gpu.reset_session_resources();
+
+    gpu.render_with_gpu_timing(scene,extent,301U);
+    (void)gpu.observe_framebuffer(extent,scene.clear_color);
+    static std::size_t injected_result_index{};
+    injected_result_index=0U;
+    struct NonmonotonicQueries {
+        static void GLAD_API_PTR available(GLuint,GLenum,GLint* value){*value=GL_TRUE;}
+        static void GLAD_API_PTR result(GLuint,GLenum,GLuint64* value) {
+            // Whole-frame elapsed, first boundary, then a backwards timestamp.
+            *value=(injected_result_index++==1U) ? 2'000'000U:1'000'000U;
+        }
+    };
+    glad_glGetQueryObjectiv=&NonmonotonicQueries::available;
+    glad_glGetQueryObjectui64v=&NonmonotonicQueries::result;
+    const auto disjoint=gpu.poll_gpu_timing();
+    glad_glGetQueryObjectiv=original_available;glad_glGetQueryObjectui64v=original_result;
+    REQUIRE(disjoint);
+    CHECK(disjoint->frame_number==301U);
+    CHECK(disjoint->status==renderer::opengl::OpenGlGpuTimingStatus::disjoint);
+    CHECK(disjoint->valid_pass_mask==0U);
+    CHECK_FALSE(std::isfinite(disjoint->elapsed_ms));
+    CHECK(gpu.gpu_timing_statistics().disjoint_results==1U);
+    CHECK(glGetError()==GL_NO_ERROR);
+
+    gpu.reset_session_resources();
+    gpu.render_with_gpu_timing(scene,extent,400U);
+    gpu.render_with_gpu_timing(scene,extent,401U);
+    struct QueryFailure {
+        static void GLAD_API_PTR available(GLuint,GLenum,GLint* value) {
+            *value=GL_FALSE;
+            glEnable(0xFFFFFFFFU); // Known invalid enum: inject only in optional query scope.
+        }
+    };
+    glad_glGetQueryObjectiv=&QueryFailure::available;
+    const auto failed_first=gpu.poll_gpu_timing();
+    glad_glGetQueryObjectiv=original_available;
+    REQUIRE(failed_first);CHECK(failed_first->frame_number==400U);
+    CHECK(failed_first->status==renderer::opengl::OpenGlGpuTimingStatus::invalid);
+    CHECK(failed_first->valid_pass_mask==0U);CHECK_FALSE(std::isfinite(failed_first->elapsed_ms));
+    const auto failed_second=gpu.poll_gpu_timing();
+    REQUIRE(failed_second);CHECK(failed_second->frame_number==401U);
+    CHECK(failed_second->status==renderer::opengl::OpenGlGpuTimingStatus::invalid);
+    CHECK(failed_second->valid_pass_mask==0U);CHECK_FALSE(std::isfinite(failed_second->elapsed_ms));
+    CHECK_FALSE(gpu.poll_gpu_timing());CHECK(gpu.gpu_timing_statistics().pending==0U);
+    CHECK(gpu.gpu_timing_statistics().invalid_results==2U);
+    gpu.render_with_gpu_timing(scene,extent,402U);
+    CHECK(gpu.gpu_timing_statistics().last_submission_status==renderer::opengl::OpenGlGpuTimingStatus::invalid);
+    CHECK(gpu.gpu_timing_statistics().submitted==2U);
+    CHECK(glGetError()==GL_NO_ERROR);
+    gpu.reset_session_resources();
+    gpu.render_with_gpu_timing(scene,extent,403U);
+    (void)gpu.observe_framebuffer(extent,scene.clear_color);
+    const auto recovered=gpu.poll_gpu_timing();REQUIRE(recovered);
+    CHECK(recovered->frame_number==403U);check_passes(*recovered);
+
+    // A genuine renderer error must not be consumed as an optional timer
+    // error. Inject in SkyDrawState construction (before a pass boundary),
+    // then in its destruction (after the last pass, before the final query).
+    static PFNGLBINDSAMPLERPROC original_sampler{};
+    static std::size_t sampler_calls{},fail_sampler_call{};
+    original_sampler=glad_glBindSampler;
+    struct SamplerRenderFailure {
+        PFNGLBINDSAMPLERPROC saved;
+        ~SamplerRenderFailure(){glad_glBindSampler=saved;}
+        static void GLAD_API_PTR bind(GLuint unit,GLuint sampler) {
+            original_sampler(unit,sampler);
+            if(unit==2U && ++sampler_calls==fail_sampler_call)glEnable(0xFFFFFFFFU);
+        }
+    } restore_sampler{original_sampler};
+    renderer::RenderScene empty_scene;
+    for(const auto injection:{1U,2U}) {
+        gpu.reset_session_resources();sampler_calls=0;fail_sampler_call=injection;
+        glad_glBindSampler=&SamplerRenderFailure::bind;
+        CHECK_THROWS_AS(gpu.render_with_gpu_timing(empty_scene,extent,500U+injection),
+            renderer::opengl::OpenGlRendererError);
+        glad_glBindSampler=original_sampler;
+        CHECK(sampler_calls>=injection);
+        GLint owned_query{};glGetQueryiv(GL_TIME_ELAPSED,GL_CURRENT_QUERY,&owned_query);
+        CHECK(owned_query==0);CHECK(glGetError()==GL_NO_ERROR);
+        CHECK(gpu.gpu_timing_statistics().pending==0U);
+        CHECK(gpu.gpu_timing_statistics().last_submission_status==renderer::opengl::OpenGlGpuTimingStatus::invalid);
+        // Rendering errors do not permanently disable the query capability.
+        gpu.render_with_gpu_timing(scene,extent,510U+injection);
+        (void)gpu.observe_framebuffer(extent,scene.clear_color);
+        const auto next=gpu.poll_gpu_timing();REQUIRE(next);
+        CHECK(next->frame_number==510U+injection);check_passes(*next);
+    }
+}
+
+TEST_CASE("World draw bindings reuse only immutable inputs inside one render frame",
+          "[gauss-71b97][renderer][opengl][world-bind-cache]")
+{
+    auto context=try_create_context();
+    if(!context)SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    auto& gpu=context->renderer();
+    constexpr renderer::RenderExtent extent{96,96};
+    const auto make_two_batch_package=[] {
+        fixture::FixtureOptions options;options.atlas_page_count=2;
+        auto built=fixture::make_package(options);
+        REQUIRE(built);REQUIRE(built.package);
+        return std::make_shared<const world_render::WorldRenderPackage>(std::move(*built.package));
+    };
+    const auto package=make_two_batch_package();
+    REQUIRE(package->draw_batches().size()==2U);
+    auto scene=make_scene(package);
+    scene.camera.position={24,8,60};scene.camera.target={24,8,0};scene.camera.up={0,1,0};
+    scene.camera.far_plane=128; // The vertical-wall helper's 10-unit range cannot reach these floor patches.
+    const auto render_checked=[&] {
+        const auto before=gpu.statistics();
+        gpu.render(scene,extent);
+        const auto& after=gpu.statistics();
+        // No triangles, material bindings or draws are suppressed. Only
+        // identical frame/program data stops being uploaded for each batch.
+        CHECK(after.draw_call_count-before.draw_call_count==2U);
+        CHECK(after.triangle_count-before.triangle_count==4U);
+        CHECK(after.base_texture_bind_count-before.base_texture_bind_count==2U);
+        CHECK(after.lightmap_bind_count-before.lightmap_bind_count==2U);
+        CHECK(after.program_bind_count-before.program_bind_count==1U);
+        CHECK(after.vertex_array_bind_count-before.vertex_array_bind_count==1U);
+        CHECK(after.sky_texture_bind_count-before.sky_texture_bind_count==1U);
+        CHECK(after.camera_upload_count-before.camera_upload_count==1U);
+        CHECK(after.light_upload_count-before.light_upload_count==1U);
+        CHECK(after.transform_upload_count-before.transform_upload_count==2U);
+        CHECK(glGetError()==GL_NO_ERROR);
+        return gpu.observe_framebuffer(extent,scene.clear_color,true);
+    };
+    const auto baseline=render_checked();REQUIRE(baseline);
+    const auto left=read_pixel(26,48),right=read_pixel(70,48);
+    REQUIRE_FALSE(approximately_clear(left,scene.clear_color));
+    REQUIRE_FALSE(approximately_clear(right,scene.clear_color));
+    CHECK(render_checked().color_signature==baseline.color_signature);
+
+    scene.transient_world_light=renderer::RenderPointLight{{8,8,4},16,1,{1,.5F,.25F}};
+    REQUIRE(render_checked());CHECK(read_pixel(26,48)[0]>left[0]);
+    CHECK(read_pixel(70,48)==right);
+    scene.transient_world_light.reset();
+    CHECK(render_checked().color_signature==baseline.color_signature);
+    scene.world_effect_lights[0]={{40,8,4},16,1,{.25F,.5F,1}};
+    scene.world_effect_light_count=1;
+    REQUIRE(render_checked());CHECK(read_pixel(70,48)[2]>right[2]);
+    CHECK(read_pixel(26,48)==left);
+    scene.world_effect_light_count=0;
+    CHECK(render_checked().color_signature==baseline.color_signature);
+
+    scene.camera.position.x+=4;scene.camera.target.x+=4;
+    CHECK(render_checked().color_signature!=baseline.color_signature);
+    scene.camera.position.x-=4;scene.camera.target.x-=4;
+    CHECK(render_checked().color_signature==baseline.color_signature);
+    scene.static_world->package=make_two_batch_package();
+    CHECK(scene.static_world->package!=package);
+    CHECK(render_checked().color_signature==baseline.color_signature);
+    gpu.reset_session_resources();
+    CHECK(render_checked().color_signature==baseline.color_signature);
 }
 
 TEST_CASE("OpenGL renderer uploads, caches and draws a synthetic static world",
@@ -2150,7 +2373,7 @@ TEST_CASE("OpenGL scene visibility changes commands without resource reupload",
 }
 
 TEST_CASE("OpenGL brush instances share one aggregate GPU upload",
-    "[renderer][opengl][m4.4][brush-frame]")
+    "[gauss-71b97][renderer][opengl][m4.4][brush-frame]")
 {
     auto world = make_frame_package(false, true, 0U, 0U, 0x30U);
     auto brushes = make_frame_package(false, true, 0U, 0U, 0xE0U);
@@ -2199,6 +2422,15 @@ TEST_CASE("OpenGL brush instances share one aggregate GPU upload",
     CHECK(statistics.rendered_command_count == 6U);
     CHECK(statistics.draw_call_count == 6U);
     CHECK(statistics.brush_draw_call_count == 4U);
+    // Each frame binds world and brush resources once, while both translated
+    // brush instances still receive their own matrices. No binding state is
+    // allowed to survive the render boundary.
+    CHECK(statistics.program_bind_count == 4U);
+    CHECK(statistics.vertex_array_bind_count == 4U);
+    CHECK(statistics.camera_upload_count == 4U);
+    CHECK(statistics.light_upload_count == 4U);
+    CHECK(statistics.sky_texture_bind_count == 4U);
+    CHECK(statistics.transform_upload_count == 12U);
     CHECK(statistics.visible_brush_instance_count == 2U);
     CHECK(statistics.failed_upload_count == 0U);
     CHECK(glGetError() == GL_NO_ERROR);

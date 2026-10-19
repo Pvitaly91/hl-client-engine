@@ -27,6 +27,7 @@ game_api::GameMovementPolicy make_movement_policy()
         gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::attack_primary) |
         gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::attack_secondary) |
         gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::reload) |
+        gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::scoreboard) |
         gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::use);
     policy.capture_life_scoped_buttons =
         gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::use) |

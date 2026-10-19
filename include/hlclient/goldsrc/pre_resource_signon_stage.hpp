@@ -19,8 +19,9 @@ class DeltaDescriptionStage;
 using PreResourceSignonClock = InitialSignonClock;
 using PreResourceSignonTimePoint = InitialSignonTimePoint;
 
-// Project safety limits, not stock engine maxima.
-inline constexpr std::size_t kDefaultMaximumPreResourceSignonEvents = 32U;
+// Atomic publication: controls plus the ready and boundary events.
+inline constexpr std::size_t kDefaultMaximumPreResourceSignonEvents =
+    kDefaultMaximumServiceMessagesPerPayload;
 inline constexpr std::size_t kMaximumPreResourceSignonEvents = 256U;
 inline constexpr std::size_t kPreResourceSignonDiagnosticTextLimit = 256U;
 

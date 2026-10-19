@@ -294,6 +294,8 @@ private:
         scene_;
     std::vector<ServerEntityCollisionBox> boxes_;
     bool boxes_valid_{true};
+    std::optional<LocalMovementCollisionErrorCode> scene_error_;
+    std::optional<LocalMovementCollisionSessionIdentity> session_identity_;
 };
 
 // Existing synthetic test/tool callers use the same implementation.

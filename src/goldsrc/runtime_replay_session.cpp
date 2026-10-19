@@ -395,6 +395,7 @@ void hash_unsigned(std::uint64_t& hash, const Value value) noexcept
 
 [[nodiscard]] std::optional<RuntimeReplayError> frame_game_messages(
     std::vector<game_api::GameMessageView>& messages,
+    std::vector<std::vector<game_api::PlayerNetworkUpdate>>& network_updates,
     const RuntimeReplayRecord& record,
     const PacketEntityDecodedBatch& batch,
     std::span<const PostMoveVarsUserMessageDefinition> definitions,
@@ -404,6 +405,24 @@ void hash_unsigned(std::uint64_t& hash, const Value value) noexcept
     for (const auto& item : batch.events) {
         const auto* event = std::get_if<RuntimeControlEvent>(&item);
         if (!event) continue;
+        if (const auto* pings = std::get_if<RuntimeControlPings>(&event->body)) {
+            // Owning per-message storage keeps borrowed views valid through
+            // stage_record, including multiple ping lists in the same packet.
+            auto& updates = network_updates.emplace_back();
+            updates.reserve(pings->entries.size());
+            for (const auto& ping : pings->entries) {
+                const auto slot = player_slot_from_client_index(ping.player_index, maximum_clients);
+                if (!slot) return failure(RuntimeReplayErrorCode::semantic_value_mismatch,
+                    "player ping slot exceeds negotiated clients");
+                updates.push_back({*slot, ping.ping_ms, ping.packet_loss});
+            }
+            game_api::GameMessageView view;
+            view.kind = game_api::GameMessageKind::player_network;
+            view.source = source_for(record, event->provenance.start_cursor, event->provenance.end_cursor);
+            view.player_network = updates;
+            messages.push_back(std::move(view));
+            continue;
+        }
         if (const auto* identity = std::get_if<RuntimeControlUserInfoUpdate>(&event->body)) {
             const auto slot = player_slot_from_client_index(identity->client_index, maximum_clients);
             if (!slot) return failure(RuntimeReplayErrorCode::semantic_value_mismatch,
@@ -422,6 +441,19 @@ void hash_unsigned(std::uint64_t& hash, const Value value) noexcept
             continue;
         }
         const bool animation = event->opcode == RuntimeControlOpcode::svc_weaponanim;
+        if(event->opcode==RuntimeControlOpcode::svc_print || event->opcode==RuntimeControlOpcode::svc_centerprint) {
+            const auto* text=std::get_if<RuntimeControlText>(&event->body);
+            const auto end=event->provenance.end_cursor.byte_offset();
+            if(!text || text->text_length>=end || end>record.payload.bytes.size())
+                return failure(RuntimeReplayErrorCode::semantic_value_mismatch,
+                    "framed console text exceeds its owning record");
+            const auto length=text->text_length+1U;
+            messages.push_back({game_api::GameMessageKind::console_text,
+                event->opcode==RuntimeControlOpcode::svc_print?"svc_print":"svc_centerprint",
+                std::span<const std::byte>{record.payload.bytes}.subspan(end-length,length),
+                source_for(record,event->provenance.start_cursor,event->provenance.end_cursor),std::nullopt});
+            continue;
+        }
         const auto* message = std::get_if<RuntimeControlUserMessage>(&event->body);
         if (!animation && !message) continue;
         std::string_view name;
@@ -664,6 +696,16 @@ struct ProjectionResult final {
         std::pair{"renderfx", &target.render_effect}, std::pair{"renderamt", &target.render_amount},
         std::pair{"effects", &target.effects}, std::pair{"owner", &target.owner_entity_reference}}) {
         if (auto error = unsigned_field(name, DeltaFieldBaseType::integer_value, *output)) { return error; }
+    }
+    constexpr std::array color_names{"rendercolor.r","rendercolor.g","rendercolor.b"};
+    for(std::size_t channel=0U;channel<color_names.size();++channel) {
+        const auto* definition=find_definition(schema,color_names[channel]);
+        if(!definition)continue;
+        const auto type=matches_expected(*definition,{DeltaFieldBaseType::byte_value,false,{},{}}) ?
+            DeltaFieldBaseType::byte_value : DeltaFieldBaseType::integer_value;
+        if(auto error=unsigned_field(color_names[channel],type,target.render_color[channel]))return error;
+        if(target.render_color[channel] && *target.render_color[channel]>255U)
+            return failure(RuntimeReplayErrorCode::semantic_value_mismatch,"public visual color exceeds byte range");
     }
     if (auto error = unsigned_field("solid", DeltaFieldBaseType::short_value, target.solid)) return error;
     if (auto error = project_vector(schema, object, "mins[0]", "mins[1]", "mins[2]",
@@ -1110,6 +1152,7 @@ struct ProjectionResult final {
         std::optional<game_api::GameRecordState> staged_game;
         if (game_client) {
             std::vector<game_api::GameMessageView> messages;
+            std::vector<std::vector<game_api::PlayerNetworkUpdate>> network_updates;
             std::vector<game_api::PlayerDisplayUpdate> initial_players;
             if (initial_identities.size() > maximum_clients)
                 return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
@@ -1127,7 +1170,7 @@ struct ProjectionResult final {
             }
             if (record != nullptr && batch != nullptr) {
                 if (auto error = frame_game_messages(
-                        messages, *record, *batch, user_message_definitions, identities, maximum_clients))
+                        messages, network_updates, *record, *batch, user_message_definitions, identities, maximum_clients))
                     return {{}, std::move(error)};
             }
             auto result = game_client->stage_record(

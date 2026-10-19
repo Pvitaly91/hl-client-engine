@@ -90,6 +90,17 @@ std::optional<std::span<const std::byte>> ByteReader::read_bytes(const std::size
     return result;
 }
 
+std::optional<std::span<const std::byte>> ByteReader::read_uint8_sized_bytes() noexcept
+{
+    if (remaining() == 0U) return std::nullopt;
+    const auto count = static_cast<std::size_t>(
+        std::to_integer<std::uint8_t>(bytes_[position_]));
+    if (count > remaining() - 1U) return std::nullopt;
+    const auto body = bytes_.subspan(position_ + 1U, count);
+    position_ += 1U + count;
+    return body;
+}
+
 std::optional<std::string> ByteReader::read_c_string()
 {
     for (std::size_t index = position_; index < bytes_.size(); ++index) {

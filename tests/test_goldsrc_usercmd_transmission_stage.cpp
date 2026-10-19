@@ -4,8 +4,11 @@
 #include <hlclient/goldsrc/usercmd_schema_binding.hpp>
 #include <hlclient/goldsrc/usercmd_transmission_stage.hpp>
 #include <hlclient/input/input_state_tracker.hpp>
+#include <hlclient/app/multiplayer_presentation_diagnostics.hpp>
 
 #include "usercmd_transaction_test_access.hpp"
+#include "goldsrc_usercmd_test_fixture.hpp"
+#include "weapon_suite_test_fixture.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -51,6 +54,7 @@ public:
         const network::NetworkAddress& destination,
         const std::span<const std::byte> payload) override
     {
+        if (would_block_send) return {network::DatagramSendStatus::would_block,{}};
         if (fail_send) {
             return {network::DatagramSendStatus::error, "synthetic send failure"};
         }
@@ -80,6 +84,7 @@ public:
     std::optional<network::NetworkAddress> local{
         network::NetworkAddress::loopback(31'200U)};
     bool fail_send{false};
+    bool would_block_send{false};
     std::deque<network::DatagramTransportReceiveResult> incoming;
     std::vector<SentDatagram> sent;
 };
@@ -1052,6 +1057,178 @@ TEST_CASE("Usercmd stage progress deadline does not cap a healthy session lifeti
     CHECK(stage.sampled_command_count() == 12U);
     CHECK(stage.transmitted_packet_count() == 12U);
     CHECK(transport.sent.size() == 12U);
+}
+
+TEST_CASE("Reference move diagnostics retain exact command carriers without duplicate send authority",
+          "[goldsrc][usercmd][transmission-stage][multiplayer-diagnostics]") {
+    namespace diag=hlclient::core;
+    struct Sink final:diag::MultiplayerDiagnosticSink {
+        bool enabled() const noexcept override {return on;}
+        bool observe(const diag::MultiplayerDiagnosticEvent& event) noexcept override {
+            try {events.push_back(event);return accept;}catch(...){return false;}
+        }
+        bool on{true},accept{true};std::vector<diag::MultiplayerDiagnosticEvent> events;
+    } sink;
+    StageTransport transport;const auto remote=network::NetworkAddress::loopback(27015);
+    const auto epoch=goldsrc::NetchanDriverTimePoint{}+1s;
+    goldsrc::NetchanDriver driver{transport,remote,driver_config()};
+    activate(driver,transport,remote,epoch);
+    driver.set_multiplayer_diagnostics(&sink,7,3);
+    const auto registry=hlclient::test::usercmd_fixture::exact_registry();
+    const auto bound=goldsrc::bind_goldsrc_usercmd_schema(registry,
+        goldsrc::GoldSrcUserCmdSchemaBindingProfile::public_goldsrc48_usercmd_schema_v1);
+    REQUIRE(bound);
+    goldsrc::GoldSrcUserCmdTransmissionConfig config;
+    config.history.profile=goldsrc::GoldSrcUserCmdHistoryProfile::reference_wire_v1;
+    config.history.generation=5;config.planner.profile=goldsrc::GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1;
+    config.multiplayer_diagnostics=&sink;config.diagnostic_network_generation=7;config.diagnostic_map_generation=3;
+    goldsrc::GoldSrcUserCmdTransmissionStage stage{driver,*bound.binding,
+        {goldsrc::GoldSrcUserCmdSessionPrerequisiteProfile::reference_loopback_test_ready_v1,true},config};
+    REQUIRE(stage.valid_configuration());
+    goldsrc::GoldSrcWireUserCmd first;first.msec=20;first.lerp_msec=75;first.buttons=2048;
+    first.angle_turns={60075,16384,0};
+    CHECK_FALSE(stage.queue_reference_command(command_sequence(1),first,4));
+    CHECK(sink.events.empty());
+    REQUIRE(stage.queue_reference_command(command_sequence(1),first,5));
+    transport.would_block_send=true;
+    REQUIRE(stage.update_reference(epoch+2ms));
+    REQUIRE(stage.update_reference(epoch+3ms));
+    CHECK(transport.sent.empty());
+    const auto count_sent=[&] {
+      return std::count_if(sink.events.begin(),sink.events.end(),[](const auto& event) {
+        const auto* value=std::get_if<diag::MultiplayerNetworkPayload>(&event.payload);
+        return value && value->phase==diag::MultiplayerNetworkPhase::packet_sent &&
+            event.identity.producer==diag::MultiplayerDiagnosticProducer::command_transmission;
+      });
+    };
+    CHECK(count_sent()==0);
+    transport.would_block_send=false;sink.accept=false; // a full recorder never changes send/history semantics.
+    REQUIRE(stage.update_reference(epoch+4ms));
+    CHECK(count_sent()==1);CHECK(stage.history().entries().front().new_transmission_count==1);
+    REQUIRE(stage.update_reference(epoch+5ms));CHECK(count_sent()==1);
+    auto second=first;second.buttons=0;second.lerp_msec=100;
+    REQUIRE(stage.queue_reference_command(command_sequence(2),second,5));
+    REQUIRE(stage.update_reference(epoch+6ms));
+    CHECK(count_sent()==2);CHECK(stage.history().entries().front().new_transmission_count==1);
+    CHECK(stage.history().entries().front().backup_transmission_count==1);
+    unsigned encoded_release{};
+    const diag::MultiplayerNetworkPayload* final_receipt=nullptr;
+    for(const auto& event:sink.events) {
+      CHECK(event.identity.network_generation==7);CHECK(event.identity.map_generation==3);
+      if(const auto* value=std::get_if<diag::MultiplayerCommandPayload>(&event.payload);
+          value && event.identity.command_id==2 && value->phase==diag::MultiplayerCommandPhase::encoded) {
+        ++encoded_release;CHECK(value->buttons==0);CHECK(value->lerp_msec==100);CHECK(value->angle_turns==first.angle_turns);
+      }
+      if(const auto* value=std::get_if<diag::MultiplayerNetworkPayload>(&event.payload);
+          value && value->phase==diag::MultiplayerNetworkPhase::packet_sent &&
+          event.identity.producer==diag::MultiplayerDiagnosticProducer::command_transmission) final_receipt=value;
+    }
+    REQUIRE(final_receipt);CHECK(encoded_release==1);
+    CHECK(final_receipt->inclusion_count==2);CHECK(final_receipt->command_ids[0]==1);CHECK(final_receipt->command_ids[1]==2);
+    CHECK(final_receipt->backup_count==1);CHECK(final_receipt->command_count==1);
+    // A real covering transport ACK cannot manufacture execution/fire events.
+    const auto carrier=stage.history().entries().back().last_packet_sequence;REQUIRE(carrier);
+    transport.queue(remote,server_packet(2,*carrier));driver.update(epoch+7ms);
+    transport.queue(remote,server_packet(2,*carrier));driver.update(epoch+8ms); // duplicate packet
+    unsigned acknowledgements{},duplicates{};
+    for(const auto& event:sink.events)if(const auto* value=std::get_if<diag::MultiplayerNetworkPayload>(&event.payload)) {
+      if(value->phase==diag::MultiplayerNetworkPhase::transport_ack) {
+        ++acknowledgements;CHECK(event.knowledge==diag::MultiplayerKnowledge::transport_acknowledged);
+        CHECK_FALSE(event.identity.command_id);CHECK(value->acknowledgement==*carrier);
+      }
+      duplicates+=value->phase==diag::MultiplayerNetworkPhase::duplicate;
+      CHECK(event.knowledge!=diag::MultiplayerKnowledge::server_damage_observed);
+    }
+    CHECK(acknowledgements==1);CHECK(duplicates==1);CHECK(count_sent()==2);
+}
+
+TEST_CASE("Actual immutable move carriers join accepted weapon and frame diagnostics only in the same canonical map",
+          "[diagnostic-map-tx][multiplayer-diagnostics][goldsrc][transmission-stage][no-stock]") {
+    namespace d=hlclient::core;
+    namespace f=hlclient::tests::weapon_suite_fixture;
+    struct Sink final:d::MultiplayerDiagnosticSink {
+        std::vector<d::MultiplayerDiagnosticEvent> events;
+        bool enabled()const noexcept override{return true;}
+        bool observe(const d::MultiplayerDiagnosticEvent& event)noexcept override {
+            try{events.push_back(event);return true;}catch(...){return false;}
+        }
+    } sink;
+    hlclient::app::MultiplayerPresentationDiagnostics bridge{sink};
+    auto module=std::make_unique<f::Module>(4);
+    std::array<std::uint64_t,2> canonical{1,263};
+    module->host.set_diagnostic_sink(&bridge);
+    module->host.set_diagnostic_generations([&]{return canonical;});
+    module->observe(0);sink.events.clear();
+    StageTransport transport;const auto remote=network::NetworkAddress::loopback(27015);
+    const auto epoch=goldsrc::NetchanDriverTimePoint{}+1s;
+    goldsrc::NetchanDriver driver{transport,remote,driver_config()};
+    activate(driver,transport,remote,epoch);driver.set_multiplayer_diagnostics(&bridge,1,263);
+    const auto registry=hlclient::test::usercmd_fixture::exact_registry();
+    const auto bound=goldsrc::bind_goldsrc_usercmd_schema(registry,
+        goldsrc::GoldSrcUserCmdSchemaBindingProfile::public_goldsrc48_usercmd_schema_v1);REQUIRE(bound);
+    goldsrc::GoldSrcUserCmdTransmissionConfig config;
+    config.history.profile=goldsrc::GoldSrcUserCmdHistoryProfile::reference_wire_v1;
+    config.history.generation=1;config.planner.profile=goldsrc::GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1;
+    config.multiplayer_diagnostics=&bridge;config.diagnostic_network_generation=1;config.diagnostic_map_generation=263;
+    goldsrc::GoldSrcUserCmdTransmissionStage stage{driver,*bound.binding,
+        {goldsrc::GoldSrcUserCmdSessionPrerequisiteProfile::reference_loopback_test_ready_v1,true},config};
+    REQUIRE(stage.valid_configuration());
+    goldsrc::GoldSrcWireUserCmd command;command.msec=20;command.lerp_msec=100;command.buttons=1;
+    REQUIRE(stage.queue_reference_command(command_sequence(1),command,1));
+    const auto immutable=stage.history().entries().front().reference_command;REQUIRE(immutable);
+    hlclient::renderer::RenderScene shown;shown.camera.position={100,80,80};shown.camera.target={101,80,80};
+    bridge.completed_frame(shown,17,1,263,d::multiplayer_diagnostic_now_ns(),640,480);
+    module->submit(1,1.0);
+    const auto count=[&](auto predicate) {return std::ranges::count_if(sink.events,predicate);};
+    const auto action=[](const auto& event) {
+        const auto* p=std::get_if<d::MultiplayerActionPayload>(&event.payload);
+        return p && p->phase==d::MultiplayerActionPhase::accepted;
+    };
+    const auto sent=[](const auto& event) {
+        const auto* p=std::get_if<d::MultiplayerNetworkPayload>(&event.payload);
+        return p && p->phase==d::MultiplayerNetworkPhase::packet_sent &&
+            event.identity.producer==d::MultiplayerDiagnosticProducer::command_transmission;
+    };
+    const auto geometry=[](const auto& event){return std::holds_alternative<d::MultiplayerGeometryPayload>(event.payload);};
+    REQUIRE(count(action)==1);CHECK(count(geometry)==2);CHECK(count(sent)==0);
+    const auto accepted=std::ranges::find_if(sink.events,action);
+    const auto action_id=accepted->identity.action_id;REQUIRE(action_id);
+    CHECK(accepted->identity.command_id==1);CHECK(accepted->identity.map_generation==263);
+    transport.would_block_send=true;REQUIRE(stage.update_reference(epoch+2ms));CHECK(count(sent)==0);
+    transport.would_block_send=false;REQUIRE(stage.update_reference(epoch+3ms));CHECK(count(sent)==1);
+    auto release=command;release.buttons=0;REQUIRE(stage.queue_reference_command(command_sequence(2),release,1));
+    REQUIRE(stage.update_reference(epoch+4ms));CHECK(count(sent)==2);
+    CHECK(stage.history().entries().front().reference_command==immutable);
+    CHECK(immutable->buttons==1);CHECK(stage.history().entries().front().new_transmission_count==1);
+    CHECK(stage.history().entries().front().backup_transmission_count==1);
+    CHECK(count(action)==1);CHECK(count(geometry)==2); // retransmission cannot re-fire or create another query.
+    unsigned new_membership{},backup_membership{},encoded_original{};
+    for(const auto& event:sink.events) {
+        CHECK(event.identity.network_generation==1);CHECK(event.identity.map_generation==263);
+        if(sent(event)) {
+            const auto& packet=std::get<d::MultiplayerNetworkPayload>(event.payload);REQUIRE(event.identity.carrier_packet);
+            for(std::size_t i=0;i<packet.inclusion_count;++i)if(packet.command_ids[i]==1) {
+                if(i<packet.backup_count)++backup_membership;else ++new_membership;
+            }
+        }
+        if(const auto* p=std::get_if<d::MultiplayerCommandPayload>(&event.payload);
+            p && p->phase==d::MultiplayerCommandPhase::encoded && event.identity.command_id==1) {
+            ++encoded_original;CHECK(p->buttons==1);CHECK(p->lerp_msec==100);REQUIRE(event.identity.carrier_packet);
+        }
+        if(geometry(event)) {
+            CHECK(event.identity.command_id==1);CHECK(event.identity.action_id==action_id);
+            CHECK(event.identity.render_frame==17);CHECK(event.knowledge==d::MultiplayerKnowledge::local_proxy);
+        }
+    }
+    CHECK(new_membership==1);CHECK(backup_membership==1);CHECK(encoded_original>=1);
+    canonical={1,264};module->submit(3,1.4);REQUIRE(count(action)==2);CHECK(count(geometry)==2);
+    const auto last=std::find_if(sink.events.rbegin(),sink.events.rend(),action);REQUIRE(last!=sink.events.rend());
+    CHECK(last->identity.command_id==3);CHECK(last->identity.map_generation==0);
+    REQUIRE(stage.queue_reference_command(command_sequence(3),command,1));
+    REQUIRE(stage.update_reference(epoch+5ms));CHECK(count(sent)==3);CHECK(count(geometry)==2);
+    // A valid packet receipt in map263 still cannot prove an action/frame edge
+    // whose owner became unavailable; transport acknowledgement is not execution.
+    module->host.set_diagnostic_sink(nullptr);
 }
 
 } // namespace

@@ -340,6 +340,70 @@ TEST_CASE("E32 failed lift carry retains the actual ceiling query and clears sta
   CHECK(scratch.last_reference_collision_start->z == 123.0F);
   CHECK(scratch.last_reference_collision_end->z == 125.0F);
   CHECK(player::local_player_movement_state_signature(*seed) == signature);
+  const auto first_failed_fraction = scratch.last_reference_collision_trace->fraction;
+  CHECK(first_failed_fraction == Catch::Approx(.5).margin(1e-9));
+  CHECK(scratch.last_reference_collision_trace->end_position.z == 124.0F);
+
+  // Source-backed mechanism control, not a replay of missing LAN pusher
+  // observations: a fresh rising sample can still predict a genuine ceiling
+  // crossing. It must replace the previous query evidence and fail atomically.
+  const auto approaching = lift_frame(library.library, 1.11, 87.75, 3U, 2U);
+  goldsrc::ReferenceVerticalSupportMotion approaching_motion{current, approaching};
+  REQUIRE(approaching_motion.active());
+  const auto approaching_seed = timed_seed(approaching, scratch, config, 87.75);
+  REQUIRE(approaching_seed);
+  const auto approaching_signature = player::local_player_movement_state_signature(*approaching_seed);
+  const movement::BrushSceneMovementCollision approaching_collision{approaching.scene, approaching.boxes};
+  const auto blocked_again = goldsrc::simulate_reference_movement(*approaching_seed, *command.state,
+      hlclient::tests::local_movement::make_environment(), approaching_collision, scratch, config,
+      &approaching_motion);
+  REQUIRE_FALSE(blocked_again); REQUIRE(blocked_again.error);
+  CHECK_FALSE(blocked_again.state);
+  CHECK(blocked_again.error->code == movement::LocalMovementSimulationErrorCode::movement_trace_failed);
+  CHECK(player::local_player_movement_state_signature(*approaching_seed) == approaching_signature);
+  CHECK(player::local_player_movement_state_signature(*seed) == signature);
+  REQUIRE(scratch.last_reference_collision_trace);
+  const auto& second_failed_trace = *scratch.last_reference_collision_trace;
+  REQUIRE(second_failed_trace.hit);
+  CHECK(second_failed_trace.hit->kind == player::PlayerMovementHitKind::world);
+  CHECK_FALSE(second_failed_trace.start_solid); CHECK_FALSE(second_failed_trace.all_solid);
+  CHECK(second_failed_trace.fraction == Catch::Approx(1.0 / 6.0).margin(1e-9));
+  CHECK(second_failed_trace.fraction != first_failed_fraction);
+  CHECK(second_failed_trace.end_position.z == 124.0F);
+  REQUIRE(second_failed_trace.collision_plane);
+  CHECK(second_failed_trace.collision_plane->normal.z == -1.0F);
+  CHECK(scratch.last_reference_collision_hull == player::PlayerMovementHull::standing);
+  CHECK_FALSE(scratch.last_reference_collision_position);
+  REQUIRE(scratch.last_reference_collision_start); REQUIRE(scratch.last_reference_collision_end);
+  CHECK(scratch.last_reference_collision_start->z == 123.75F);
+  CHECK(scratch.last_reference_collision_end->z == 125.25F);
+
+  // The next observed reversal replaces the old positive estimate immediately.
+  // The independently authored -100 units/s and 20 ms command require z120.75;
+  // merely remaining active or retaining the old endpoint would not pass.
+  const auto reversed = lift_frame(library.library, 1.12, 86.75, 4U, 2U);
+  goldsrc::ReferenceVerticalSupportMotion reversed_motion{approaching, reversed};
+  REQUIRE(reversed_motion.active());
+  const auto reversed_seed = timed_seed(reversed, scratch, config, 86.75); REQUIRE(reversed_seed);
+  const auto reversed_signature = player::local_player_movement_state_signature(*reversed_seed);
+  const movement::BrushSceneMovementCollision reversed_collision{reversed.scene, reversed.boxes};
+  const auto after_reversal = goldsrc::simulate_reference_movement(*reversed_seed, *command.state,
+      hlclient::tests::local_movement::make_environment(), reversed_collision, scratch, config,
+      &reversed_motion);
+  REQUIRE(after_reversal);
+  CHECK(after_reversal.state->origin().z == Catch::Approx(120.75).margin(.001));
+  CHECK(after_reversal.state->origin().x == 0.0F);
+  CHECK(after_reversal.state->origin().y == 0.0F);
+  CHECK(after_reversal.state->velocity().x == 0.0F);
+  CHECK(after_reversal.state->velocity().y == 0.0F);
+  CHECK(after_reversal.state->velocity().z == 0.0F);
+  CHECK(player::local_player_movement_state_signature(*reversed_seed) == reversed_signature);
+  CHECK_FALSE(scratch.last_reference_collision_trace);
+  CHECK_FALSE(scratch.last_reference_collision_position);
+  CHECK_FALSE(scratch.last_reference_collision_hull);
+  CHECK_FALSE(scratch.last_reference_collision_start);
+  CHECK_FALSE(scratch.last_reference_collision_end);
+
   // One coherent stopped interval recovers without moving the canonical seed.
   const auto stopped = lift_frame(library.library, 1.2, 87.0, 3U, 2U);
   goldsrc::ReferenceVerticalSupportMotion idle{current, stopped}; REQUIRE(idle.active());
@@ -351,6 +415,275 @@ TEST_CASE("E32 failed lift carry retains the actual ceiling query and clears sta
   CHECK_FALSE(scratch.last_reference_collision_trace);
   CHECK_FALSE(scratch.last_reference_collision_position);
   CHECK_FALSE(scratch.last_reference_collision_hull);
+}
+
+TEST_CASE("Lift trajectory refresh preserves an already generated grounded endpoint",
+    "[e32-lift][movement][prediction][brush][lift-trajectory-refresh][no-stock]") {
+  const auto library = collision::build_brush_collision_model_library(
+      hlclient::tests::vertical_lift::package()); REQUIRE(library);
+  const auto old = lift_frame(library.library, 1.0, 50.0, 1U, 2U);
+  const auto current = lift_frame(library.library, 1.1, 70.0, 2U, 2U);
+  const goldsrc::ReferenceVerticalSupportMotion original_motion{old, current};
+  REQUIRE(original_motion.active());
+  const movement::GoldSrcLocalMovementConfig config;
+  movement::GoldSrcLocalMovementScratch scratch;
+  const auto environment = hlclient::tests::local_movement::make_environment();
+  const auto seed = timed_seed(current, scratch, config, 70.0); REQUIRE(seed);
+  const auto seed_signature = player::local_player_movement_state_signature(*seed);
+  const movement::BrushSceneMovementCollision original_collision{current.scene, current.boxes};
+  goldsrc::GoldSrcWireUserCmd wire; wire.msec = 20U;
+  const auto first_command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+      *goldsrc::GoldSrcUserCmdSequence::create(8U), wire); REQUIRE(first_command);
+  const auto first = goldsrc::simulate_reference_movement(*seed, *first_command.state,
+      environment, original_collision, scratch, config, &original_motion); REQUIRE(first);
+  REQUIRE(first.state->ground_state().grounded());
+  REQUIRE(first.state->ground_state().hit());
+  CHECK(first.state->origin().z == Catch::Approx(110.0).margin(.001));
+  const auto generated_signature = player::local_player_movement_state_signature(*first.state);
+
+  // A legal new pusher sample arrives between local commands, without a new
+  // acknowledged player seed. Its 212.5 u/s trajectory replaces 200 u/s. At
+  // the already generated endpoint time (1.12), its top is now 0.25 units
+  // above the previous top: this is not a new player/server penetration.
+  const auto updated = lift_frame(library.library, 1.11, 72.125, 3U, 2U);
+  const goldsrc::ReferenceVerticalSupportMotion refreshed_motion{current, updated};
+  REQUIRE(refreshed_motion.active());
+  // The render in between packet arrival and the next local command must
+  // keep the old, witnessed command pair free of its support too.
+  for (const double alpha : {0.0, .1, .25, .5, .75, .9, 1.0}) {
+    CAPTURE(alpha);
+    const auto sample = goldsrc::sample_reference_support_presentation(
+        *seed, *first.state, alpha, &refreshed_motion, scratch.collision);
+    REQUIRE(sample.scene);
+    CHECK(sample.origin.z == Catch::Approx(106.0 + 4.0 * alpha).margin(.001));
+    const movement::BrushSceneMovementCollision sampled{sample.scene, updated.boxes};
+    const auto path = sampled.trace_hull(sample.trace_start, sample.origin,
+        first.state->hull(), scratch.collision, config.collision_query); REQUIRE(path);
+    CHECK_FALSE(path.result->start_solid); CHECK_FALSE(path.result->all_solid);
+    CHECK(path.result->fraction == 1.0);
+  }
+  const movement::BrushSceneMovementCollision refreshed_collision{updated.scene, updated.boxes};
+  const auto second_command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+      *goldsrc::GoldSrcUserCmdSequence::create(9U), wire); REQUIRE(second_command);
+  const auto second = goldsrc::simulate_reference_movement(*first.state, *second_command.state,
+      environment, refreshed_collision, scratch, config, &refreshed_motion);
+  INFO((second.error ? second.error->context : "no simulation error"));
+  REQUIRE(second);
+  CHECK(second.state->origin().z == Catch::Approx(114.5).margin(.001));
+  CHECK(second.state->origin().x == 0.0F);
+  CHECK(second.state->origin().y == 0.0F);
+  CHECK(second.state->velocity().z == 0.0F);
+  CHECK(second.state->simulation_time_nanoseconds() == 1'140'000'000ULL);
+  CHECK(second.state->ground_state().grounded());
+  CHECK(second.state->ground_state().hit() == first.state->ground_state().hit());
+  const movement::BrushSceneMovementCollision final_collision{
+      refreshed_motion.sample(1.14), updated.boxes};
+  const auto clear = final_collision.test_position(second.state->origin(), second.state->hull(),
+      scratch.collision, config.collision_query); REQUIRE(clear);
+  CHECK(clear.result->status == movement::LocalMovementPositionStatus::free);
+  CHECK(player::local_player_movement_state_signature(*seed) == seed_signature);
+  CHECK(player::local_player_movement_state_signature(*first.state) == generated_signature);
+}
+
+TEST_CASE("Quantized lift poses and irregular source clocks retain a finite supported command path",
+    "[e32-lift][movement][prediction][brush][lift-trajectory-refresh][lift-quantized-refresh][no-stock]") {
+  // Independently authored 1/128-unit poses and binary32 svc_time clocks.
+  // The old estimate is about195.8u/s; fresh estimates are about191.4/200u/s.
+  // Both signs of the small projected phase difference must remain grounded.
+  for (const double next_height : {72.875, 73.0234375}) {
+    CAPTURE(next_height);
+    const auto library = collision::build_brush_collision_model_library(
+        hlclient::tests::vertical_lift::package()); REQUIRE(library);
+    const double old_time = static_cast<double>(1.0F);
+    const double current_time = static_cast<double>(1.1F);
+    const double next_time = static_cast<double>(1.1172256F);
+    constexpr double current_height = 69.578125;
+    const auto old = lift_frame(library.library, old_time, 50.0, 1U, 2U);
+    const auto current = lift_frame(library.library, current_time, current_height, 2U, 2U);
+    const goldsrc::ReferenceVerticalSupportMotion original{old, current}; REQUIRE(original.active());
+    const movement::GoldSrcLocalMovementConfig config;
+    movement::GoldSrcLocalMovementScratch scratch;
+    const auto environment = hlclient::tests::local_movement::make_environment();
+    const auto seed = timed_seed(current, scratch, config, current_height); REQUIRE(seed);
+    const movement::BrushSceneMovementCollision initial_collision{current.scene, current.boxes};
+    goldsrc::GoldSrcWireUserCmd wire; wire.msec = 20U;
+    const auto first_command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+        *goldsrc::GoldSrcUserCmdSequence::create(8U), wire); REQUIRE(first_command);
+    const auto first = goldsrc::simulate_reference_movement(*seed, *first_command.state,
+        environment, initial_collision, scratch, config, &original); REQUIRE(first);
+    const auto first_signature = player::local_player_movement_state_signature(*first.state);
+    const auto updated = lift_frame(library.library, next_time, next_height, 3U, 2U);
+    const goldsrc::ReferenceVerticalSupportMotion refreshed{current, updated}; REQUIRE(refreshed.active());
+    const movement::BrushSceneMovementCollision fresh{updated.scene, updated.boxes};
+    const auto second_command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+        *goldsrc::GoldSrcUserCmdSequence::create(9U), wire); REQUIRE(second_command);
+    const auto second = goldsrc::simulate_reference_movement(*first.state, *second_command.state,
+        environment, fresh, scratch, config, &refreshed);
+    INFO((second.error ? second.error->context : "no simulation error")); REQUIRE(second);
+    const double speed = (next_height - current_height) / (next_time - current_time);
+    REQUIRE(speed >= 191.0); REQUIRE(speed <= 209.0);
+    const double end_seconds = static_cast<double>(second.state->simulation_time_nanoseconds()) * 1e-9;
+    const float expected_brush_z = static_cast<float>(next_height + speed * (end_seconds - next_time));
+    const float expected_contact_z = expected_brush_z + 36.0F;
+    CHECK(std::isfinite(second.state->origin().z));
+    CHECK(second.state->origin().z == Catch::Approx(expected_contact_z).margin(.001));
+    CHECK(second.state->origin().z >= expected_contact_z);
+    CHECK(second.state->origin().z > first.state->origin().z);
+    CHECK(second.state->velocity().z == 0.0F);
+    CHECK(second.state->ground_state().grounded());
+    CHECK(second.state->ground_state().hit() == first.state->ground_state().hit());
+    const movement::BrushSceneMovementCollision final_collision{refreshed.sample(end_seconds), updated.boxes};
+    const auto clear = final_collision.test_position(second.state->origin(), second.state->hull(), scratch.collision);
+    REQUIRE(clear); CHECK(clear.result->status == movement::LocalMovementPositionStatus::free);
+    double last_z = first.state->origin().z;
+    for (const double alpha : {0.0, .1, .25, .5, .75, .9, 1.0}) {
+      CAPTURE(alpha);
+      const auto sample = goldsrc::sample_reference_support_presentation(
+          *first.state, *second.state, alpha, &refreshed, scratch.collision);
+      REQUIRE(sample.scene); CHECK(std::isfinite(sample.origin.z)); CHECK(sample.origin.z >= last_z);
+      const movement::BrushSceneMovementCollision sampled{sample.scene, updated.boxes};
+      const auto path = sampled.trace_hull(sample.trace_start, sample.origin, second.state->hull(), scratch.collision);
+      REQUIRE(path); CHECK_FALSE(path.result->start_solid); CHECK_FALSE(path.result->all_solid);
+      CHECK(path.result->fraction == 1.0); last_z = sample.origin.z;
+    }
+    CHECK(player::local_player_movement_state_signature(*first.state) == first_signature);
+  }
+}
+
+TEST_CASE("Lift trajectory refresh does not turn unrelated penetration into carry",
+    "[e32-lift][movement][prediction][brush][lift-trajectory-refresh][no-stock]") {
+  unsigned negative = 0U;
+  SECTION("fresh authoritative seed is never repositioned") { negative = 0U; }
+  SECTION("unrelated brush identity is not adopted") { negative = 1U; }
+  SECTION("another source plane is not adopted") { negative = 2U; }
+  SECTION("real world ceiling remains blocking") { negative = 3U; }
+  SECTION("another server entity remains blocking") { negative = 4U; }
+  SECTION("duck transition is not silently reattached") { negative = 5U; }
+  SECTION("jump is not silently reattached") { negative = 6U; }
+  CAPTURE(negative);
+  // Leave 1/8 unit of legal clearance below the real world ceiling. Only the
+  // refreshed 1/4-unit top correction, not the original carry, crosses it.
+  const double height = negative == 3U ? 83.875 : 70.0;
+  const auto library = collision::build_brush_collision_model_library(
+      hlclient::tests::vertical_lift::package(negative == 3U)); REQUIRE(library);
+  const auto old = lift_frame(library.library, 1.0, height - 20.0, 1U, 2U);
+  const auto current = lift_frame(library.library, 1.1, height, 2U, 2U);
+  const goldsrc::ReferenceVerticalSupportMotion original{old, current}; REQUIRE(original.active());
+  const movement::GoldSrcLocalMovementConfig config;
+  movement::GoldSrcLocalMovementScratch scratch;
+  const auto environment = hlclient::tests::local_movement::make_environment();
+  const auto seed = timed_seed(current, scratch, config, height); REQUIRE(seed);
+  const movement::BrushSceneMovementCollision original_collision{current.scene, current.boxes};
+  goldsrc::GoldSrcWireUserCmd wire; wire.msec = 20U;
+  const auto first_command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+      *goldsrc::GoldSrcUserCmdSequence::create(8U), wire); REQUIRE(first_command);
+  const auto first = goldsrc::simulate_reference_movement(*seed, *first_command.state,
+      environment, original_collision, scratch, config, &original);
+  INFO((first.error ? first.error->context : "clear original carry")); REQUIRE(first);
+  auto info = player::local_player_movement_state_create_info(*first.state);
+  REQUIRE(info.ground.hit); REQUIRE(info.ground.plane.source_plane_index);
+  if (negative == 0U) info.state_revision = 1U;
+  if (negative == 1U) {
+    info.ground.hit->source_entity_index = 77U; info.ground.hit->stable_instance_ordinal = 77U;
+  }
+  if (negative == 2U) ++*info.ground.plane.source_plane_index;
+  if (negative == 5U) { info.in_duck_transition = true; info.duck_time_milliseconds = 100U; }
+  if (negative == 6U) wire.buttons = goldsrc::kReferenceGoldSrcButtonJump;
+  const auto before = player::LocalPlayerMovementState::create(info); REQUIRE(before);
+  const auto signature = player::local_player_movement_state_signature(*before.state);
+  auto updated = lift_frame(library.library, 1.11, height + 2.125, 3U, 2U);
+  if (negative == 4U)
+    updated.boxes.push_back({99U, {{-16.0F, -16.0F, 146.125F}, {16.0F, 16.0F, 148.0F}}});
+  const goldsrc::ReferenceVerticalSupportMotion refreshed{current, updated}; REQUIRE(refreshed.active());
+  const movement::BrushSceneMovementCollision changed{updated.scene, updated.boxes};
+  const auto next_command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+      *goldsrc::GoldSrcUserCmdSequence::create(9U), wire); REQUIRE(next_command);
+  const auto result = goldsrc::simulate_reference_movement(*before.state, *next_command.state,
+      environment, changed, scratch, config, &refreshed);
+  CHECK_FALSE(result); CHECK_FALSE(result.state);
+  CHECK(player::local_player_movement_state_signature(*before.state) == signature);
+  REQUIRE(scratch.last_reference_collision_position);
+  REQUIRE(scratch.last_reference_collision_position->hit);
+  if (negative == 3U)
+    CHECK(scratch.last_reference_collision_position->hit->kind == player::PlayerMovementHitKind::world);
+  if (negative == 4U)
+    CHECK(scratch.last_reference_collision_position->hit->source_entity_index == 99U);
+}
+
+TEST_CASE("A refreshed rising lift acquires an already generated coplanar world contact",
+    "[lift-refreshed-top-handoff][movement][prediction][brush][no-stock]") {
+  unsigned scenario = 0U;
+  SECTION("generated world top is acquired without an interruption") { scenario = 0U; }
+  SECTION("fresh authoritative world seed remains untouched") { scenario = 1U; }
+  SECTION("actual observed penetration is not projected contact") { scenario = 2U; }
+  SECTION("real world ceiling blocks the later carry") { scenario = 3U; }
+  SECTION("other server entity blocks the projected contact") { scenario = 4U; }
+  SECTION("detached world contact is not carried") { scenario = 5U; }
+  SECTION("stopped lift cannot acquire a world contact") { scenario = 6U; }
+  SECTION("descending lift cannot acquire a world contact") { scenario = 7U; }
+  SECTION("jump is not reattached") { scenario = 8U; }
+  SECTION("duck transition is not reattached") { scenario = 9U; }
+  CAPTURE(scenario);
+  const auto library = collision::build_brush_collision_model_library(
+      hlclient::tests::lift_top_e32_1::package(false, false, scenario == 3U)); REQUIRE(library);
+  const auto old = lift_frame(library.library, 1.0, 46.0, 1U, 2U);
+  const auto current = lift_frame(library.library, 1.1, 66.0, 2U, 2U);
+  const goldsrc::ReferenceVerticalSupportMotion original{old, current}; REQUIRE(original.active());
+  const movement::GoldSrcLocalMovementConfig config;
+  movement::GoldSrcLocalMovementScratch scratch;
+  const auto environment = hlclient::tests::local_movement::make_environment();
+  const movement::BrushSceneMovementCollision observed{current.scene, current.boxes};
+  auto source = lift_seed(70.0); source.origin.x = scenario == 5U ? 84.0 : 52.0;
+  const auto derived = goldsrc::derive_reference_prediction_ground(source, {}, observed, scratch, config,
+      player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2); REQUIRE(derived.state);
+  auto info = player::local_player_movement_state_create_info(*derived.state);
+  info.simulation_time_nanoseconds = 1'100'000'000ULL;
+  const auto initial = player::LocalPlayerMovementState::create(info); REQUIRE(initial);
+  goldsrc::GoldSrcWireUserCmd wire; wire.msec = 20U;
+  const auto command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+      *goldsrc::GoldSrcUserCmdSequence::create(8U), wire); REQUIRE(command);
+  const auto first = goldsrc::simulate_reference_movement(*initial.state, *command.state,
+      environment, observed, scratch, config, &original); REQUIRE(first);
+  REQUIRE(first.state->ground_state().hit());
+  REQUIRE(first.state->ground_state().hit()->kind == player::PlayerMovementHitKind::world);
+  REQUIRE(first.state->origin().z == 106.0F);
+  auto before_info = player::local_player_movement_state_create_info(*first.state);
+  if (scenario == 1U) before_info.state_revision = 1U;
+  if (scenario == 9U) { before_info.in_duck_transition = true; before_info.duck_time_milliseconds = 100U; }
+  const auto before = player::LocalPlayerMovementState::create(before_info); REQUIRE(before);
+  const auto signature = player::local_player_movement_state_signature(*before.state);
+  const double updated_time = scenario == 2U ? 1.117 : 1.11;
+  const double updated_height = scenario == 2U ? 70.125 : scenario == 6U ? 66.0 : scenario == 7U ? 64.0 : 68.125;
+  auto updated = lift_frame(library.library, updated_time, updated_height, 3U, 2U);
+  if (scenario == 4U)
+    updated.boxes.push_back({99U, {{36.0F, -16.0F, 142.125F}, {68.0F, 16.0F, 144.0F}}});
+  const goldsrc::ReferenceVerticalSupportMotion refreshed{current, updated}; REQUIRE(refreshed.active());
+  const movement::BrushSceneMovementCollision fresh{updated.scene, updated.boxes};
+  const auto observed_clear = fresh.test_position(before.state->origin(), before.state->hull(), scratch.collision);
+  REQUIRE(observed_clear);
+  CHECK((observed_clear.result->status == movement::LocalMovementPositionStatus::free) == (scenario != 2U));
+  if (scenario == 8U) wire.buttons = goldsrc::kReferenceGoldSrcButtonJump;
+  const auto next = goldsrc::reference_jump_duck_weapon_use_movement_command(
+      *goldsrc::GoldSrcUserCmdSequence::create(9U), wire); REQUIRE(next);
+  const auto result = goldsrc::simulate_reference_movement(*before.state, *next.state,
+      environment, fresh, scratch, config, &refreshed);
+  INFO((result.error ? result.error->context : "no simulation error"));
+  if (scenario == 0U) {
+    REQUIRE(result);
+    CHECK(result.state->origin().z == Catch::Approx(110.5).margin(.001));
+    CHECK(result.state->origin().x == 52.0F); CHECK(result.state->origin().y == 0.0F);
+    CHECK(result.state->velocity().z == 0.0F);
+    REQUIRE(result.state->ground_state().hit());
+    CHECK(result.state->ground_state().hit()->source_entity_index == 42U);
+  } else if (scenario >= 5U && scenario <= 7U) {
+    REQUIRE(result);
+    CHECK(result.state->origin().z == 106.0F);
+    REQUIRE(result.state->ground_state().hit());
+    CHECK(result.state->ground_state().hit()->kind == player::PlayerMovementHitKind::world);
+  } else {
+    CHECK_FALSE(result); CHECK_FALSE(result.state);
+  }
+  CHECK(player::local_player_movement_state_signature(*before.state) == signature);
 }
 
 TEST_CASE("E32 lift start stop reversal and evidence limits keep source-time carry",

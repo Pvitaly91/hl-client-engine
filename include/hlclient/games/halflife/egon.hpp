@@ -12,6 +12,7 @@ inline constexpr game_api::BeamSceneLightProfile egon_observer_beam_light{
 // One session owner; server ammo/damage never change here. No engine/RX pointer.
 class EgonPresentation final {
 public:
+    void set_weapon_diagnostic_observer(game_api::WeaponDiagnosticObserver* observer) noexcept { diagnostic_observer_=observer; }
     void reset(game_api::GameSessionIdentity) noexcept;
     void configure(std::span<const game_api::ScriptedEventBinding>) noexcept;
     bool handles(std::uint16_t index) const noexcept {return index && (index==fire_event_ || index==stop_event_);}
@@ -31,6 +32,7 @@ public:
     game_api::RemoteWeaponSocketPlan socket_plan(const game_api::RemoteWeaponModelContext&) noexcept;
     static std::span<const game_api::LocalSoundReference> resources() noexcept;
 private:
+    game_api::WeaponDiagnosticObserver* diagnostic_observer_{};
     struct Emitter {std::uint64_t voice{};double started{};bool active{},running{},narrow{};std::optional<assets::AssetVector3> origin;};
     void start(std::uint32_t,double,bool,std::optional<assets::AssetVector3>) noexcept;
     void stop(std::uint32_t,double,bool) noexcept;

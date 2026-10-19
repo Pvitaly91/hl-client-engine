@@ -7,7 +7,7 @@ function(hlclient_enable_warnings target)
         # Visual Studio/MSBuild may compile several translation units in one
         # target concurrently. Serialize access to the compiler PDB so the
         # documented plain `cmake --build` command is reliable.
-        target_compile_options(${target} PRIVATE /W4 /permissive- /Zc:__cplusplus /FS)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /Zc:__cplusplus /FS /utf-8)
         if(HLCLIENT_WARNINGS_AS_ERRORS)
             target_compile_options(${target} PRIVATE /WX)
         endif()

@@ -312,13 +312,15 @@ ResourceClientResponseSignonState::ResourceClientResponseSignonState(
     std::optional<ResourceResponseCarrierGeometry> source_carrier_geometry,
     std::optional<ResourceResponseConcurrentTail> concurrent_tail,
     ResourceResponseReliableLifecycle reliable_lifecycle,
-    std::optional<PostResourceResponseBoundary> boundary) noexcept
+    std::optional<PostResourceResponseBoundary> boundary,
+    SignonUserInfoUpdates user_info_updates) noexcept
     : resource_list_{std::move(resource_list)},
       response_{std::move(response)},
       source_carrier_geometry_{std::move(source_carrier_geometry)},
       concurrent_tail_{std::move(concurrent_tail)},
       reliable_lifecycle_{std::move(reliable_lifecycle)},
-      boundary_{std::move(boundary)}
+      boundary_{std::move(boundary)},
+      user_info_updates_{std::move(user_info_updates)}
 {
 }
 
@@ -326,6 +328,11 @@ const ResourceListSignonState&
 ResourceClientResponseSignonState::resource_list() const noexcept
 {
     return resource_list_;
+}
+
+const SignonUserInfoUpdates& ResourceClientResponseSignonState::user_info_updates() const noexcept
+{
+    return user_info_updates_;
 }
 
 const Opcode5ResourceResponse&
@@ -1807,7 +1814,8 @@ void ResourceClientResponseStage::publish_acknowledgement_completion(
                 most_recent_transmit_sequence_->value(),
                 response_transmit_count_,
                 *acknowledgement_},
-            std::nullopt});
+            std::nullopt,
+            user_info_updates_});
     } catch (...) {
         fail(
             ResourceClientResponseStageErrorCode::
@@ -1859,10 +1867,10 @@ void ResourceClientResponseStage::handle_server_payload(
         !response_acknowledged_ &&
         config_.pre_transmit_payload_policy ==
             ResourceResponsePreTransmitPayloadPolicy::decode_nop_control) {
-        // Receive time does not prove that an in-flight keepalive observed
-        // our resource-response TX. Fully validate pure NOP traffic before
+        // Receive time does not prove that an in-flight control observed
+        // our resource-response TX. Fully validate inert control traffic before
         // applying the causal ACK guard to a semantic continuation. Keep the
-        // original owning bytes for that strict path if this is not a NOP.
+        // original owning bytes for that strict path if this is not an allowed control.
         try {
             if (payload.bytes.size() <=
                     config_.response.maximum_post_response_payload_size &&
@@ -2056,7 +2064,7 @@ bool ResourceClientResponseStage::decode_response_control_payload(
                         pre_transmit_control_byte_count_;
     };
     // Preserve the historical pre-TX admission and its exact failure codes.
-    // Post-TX budget rejection applies only after the whole body proves NOP.
+    // Post-TX budget rejection applies only after the whole body proves inert.
     if (required && exceeds_budget()) {
         payload_diagnostic_ = candidate;
         fail(
@@ -2109,6 +2117,7 @@ bool ResourceClientResponseStage::decode_response_control_payload(
         config_.maximum_pre_transmit_control_payloads}};
     std::size_t cursor = 0U;
     std::size_t message_ordinal = 0U;
+    auto candidate_user_info_updates = user_info_updates_;
     while (cursor < service.bytes.size()) {
         candidate.cursor_byte_offset = cursor;
         candidate.cursor_bit_offset = 0U;
@@ -2156,15 +2165,29 @@ bool ResourceClientResponseStage::decode_response_control_payload(
             return true;
         }
         const auto& event = *one.event;
-        if (event.kind != RuntimeControlMessageKind::nop ||
-            event.opcode != RuntimeControlOpcode::svc_nop) {
+        const bool inert_nop = event.kind == RuntimeControlMessageKind::nop &&
+            event.opcode == RuntimeControlOpcode::svc_nop;
+        const bool inert_text = event.kind == RuntimeControlMessageKind::text_control &&
+            (event.opcode == RuntimeControlOpcode::svc_print ||
+             event.opcode == RuntimeControlOpcode::svc_stufftext);
+        const bool inert_query = event.kind == RuntimeControlMessageKind::auxiliary_control &&
+            (event.opcode == RuntimeControlOpcode::svc_sendcvarvalue ||
+             event.opcode == RuntimeControlOpcode::svc_sendcvarvalue2);
+        const bool inert_director = event.kind == RuntimeControlMessageKind::auxiliary_control &&
+            event.opcode == RuntimeControlOpcode::svc_director;
+        const auto* identity_update = event.kind == RuntimeControlMessageKind::user_info_update &&
+            event.opcode == RuntimeControlOpcode::svc_updateuserinfo
+            ? std::get_if<RuntimeControlUserInfoUpdate>(&event.body) : nullptr;
+        // Exact framing only: do not execute text, read a cvar or reply to a
+        // query. Directory state is committed only after the whole body passes.
+        if (!inert_nop && !inert_text && !inert_query && !inert_director && !identity_update) {
             if (!required) return false;
             payload_diagnostic_ = candidate;
             fail(
                 ResourceClientResponseStageErrorCode::
                     unexpected_pre_transmit_control_message,
                 ResourceClientResponseStageState::protocol_error,
-                "Only decoder-validated svc_nop is admissible before the first resource-response transmission",
+                "Unsupported decoded control before the first resource-response transmission",
                 now);
             return true;
         }
@@ -2183,6 +2206,7 @@ bool ResourceClientResponseStage::decode_response_control_payload(
             return true;
         }
         cursor = end;
+        if (identity_update) candidate_user_info_updates[identity_update->client_index] = *identity_update;
         ++message_ordinal;
         candidate.consumed_control_message_count =
             pre_transmit_control_message_count_ + message_ordinal;
@@ -2206,9 +2230,10 @@ bool ResourceClientResponseStage::decode_response_control_payload(
             now);
         return true;
     }
-    // Commit only after every decoded message is NOP. No pending semantic
+    // Commit only after every decoded message is an allowed inert control. No pending semantic
     // slot, response ACK, reliable generation or fixed deadline is changed.
     ++pre_transmit_control_payload_count_;
+    user_info_updates_ = std::move(candidate_user_info_updates);
     pre_transmit_control_byte_count_ += wire_size;
     pre_transmit_control_message_count_ += message_ordinal;
     payload_diagnostic_->consumed_control_message_count = pre_transmit_control_message_count_;
@@ -2218,7 +2243,7 @@ bool ResourceClientResponseStage::decode_response_control_payload(
             : ResourceClientResponseStageEventType::pre_transmit_control_consumed,
         .payload_byte_count = wire_size,
         .remaining_byte_count = 0U,
-        .opcode = static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop),
+        .opcode = candidate.actual_opcode,
         .occurred_at = now,
     });
     emit_trace(
@@ -2227,7 +2252,7 @@ bool ResourceClientResponseStage::decode_response_control_payload(
             : ResourceClientResponseTraceClassification::pre_transmit_control_consumed,
         wire_size,
         0U,
-        static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop));
+        candidate.actual_opcode);
     return true;
 }
 
@@ -2368,7 +2393,8 @@ void ResourceClientResponseStage::decode_pending_server_payload(
                 most_recent_transmit_sequence_->value(),
                 response_transmit_count_,
                 *acknowledgement_},
-            std::move(*parsed->boundary)};
+            std::move(*parsed->boundary),
+            user_info_updates_};
         candidate.emplace(std::move(built_result));
     } catch (...) {
         fail(

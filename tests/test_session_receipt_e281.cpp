@@ -16,6 +16,7 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <hlclient/app/console_session_attempt.hpp>
 #include <hlclient/platform/windows/session_receipt_file.hpp>
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -79,6 +80,31 @@ TEST_CASE("E28.1 early-channel generation publishes immutable start before conne
     CHECK_FALSE(app::begin_published_session_receipt_generation(interrupted,{1U,0U,"not_observed"},
         [](const auto&){return false;}));
     CHECK_FALSE(app::session_receipt_keyboard_ready(*interrupted.snapshot()));
+}
+TEST_CASE("E33 console disconnect terminal cannot be reused as a new connection attempt",
+          "[e33][session-receipt][receipt][no-stock]") {
+    // sent_close carries QPC timestamps, so the fixture must declare their
+    // frequency just like the production journal. Keep receipt validation strict.
+    app::SessionReceiptJournal first{identity(),1'000'000U};REQUIRE(first.begin_generation({1U,0U,"not_observed"}));
+    auto close=sent_close();close.reason=app::SessionCloseReason::console_disconnect;
+    REQUIRE(first.finish(close));
+    const auto first_bytes=app::encode_session_receipt(*first.snapshot());REQUIRE(first_bytes);
+    CHECK_FALSE(first.begin_generation({2U,1U,"maps/crossfire.bsp"}));
+    auto next_identity=identity();next_identity.run_id="1123456789abcdef0123456789abcdef";
+    app::SessionReceiptJournal second{next_identity};REQUIRE(second.begin_generation({2U,0U,"not_observed"}));
+    CHECK(second.snapshot()->identity.process_id==first.snapshot()->identity.process_id);
+    CHECK(second.snapshot()->identity.process_creation==first.snapshot()->identity.process_creation);
+    CHECK(second.snapshot()->identity.run_id!=first.snapshot()->identity.run_id);
+    CHECK(second.snapshot()->fact_mask==0U);CHECK_FALSE(app::session_receipt_keyboard_ready(*second.snapshot()));
+    auto failed=app::SessionCloseReceipt{};failed.reason=app::SessionCloseReason::fatal_failure;
+    failed.outcome=app::SessionCloseOutcome::fatal_failure;failed.transport_closed_process_ms=2000U;
+    REQUIRE(second.finish(failed));
+    CHECK(app::encode_session_receipt(*first.snapshot())==first_bytes);
+    const auto second_bytes=app::encode_session_receipt(*second.snapshot());REQUIRE(second_bytes);
+    REQUIRE(*second_bytes!=*first_bytes);
+    const auto decoded=app::decode_session_receipt(*second_bytes);REQUIRE(decoded);
+    CHECK(decoded->close.reason==app::SessionCloseReason::fatal_failure);
+    CHECK(decoded->identity==next_identity);
 }
 
 [[nodiscard]] app::SessionReceiptJournal ready_journal(const bool terminal = false)
@@ -383,6 +409,120 @@ TEST_CASE("E28.1 peer removal receipts are numeric bounded and generation owned"
 }
 
 #ifdef _WIN32
+TEST_CASE("E33 existing application receipt directory needs no broad parent capability",
+    "[e33][session-receipt][console][windows][no-stock]")
+{
+    ReceiptTemporaryDirectory fixture;REQUIRE_FALSE(fixture.path().empty());
+    REQUIRE(std::filesystem::create_directory(fixture.path()/L"HLClientEngine"));
+    // A legitimate existing owner requesting DELETE makes a second no-delete
+    // parent capability incompatible, without blocking exact child access.
+    struct ParentOwner {HANDLE handle{INVALID_HANDLE_VALUE};~ParentOwner(){if(handle!=INVALID_HANDLE_VALUE)::CloseHandle(handle);}};
+    ParentOwner parent{::CreateFileW(fixture.path().c_str(),DELETE|FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
+    REQUIRE(parent.handle!=INVALID_HANDLE_VALUE);
+    CHECK_FALSE(windows::open_secure_output_directory(fixture.path()));
+    std::string diagnostic;
+    auto application=app::console_attempt_detail::open_application_directory(fixture.path(),diagnostic);
+    INFO(diagnostic);REQUIRE(application);
+    CHECK(application->canonical_path()==fixture.path()/L"HLClientEngine");
+}
+
+TEST_CASE("E33 absent application receipt directory requires a valid pinned parent",
+    "[e33][session-receipt][console][windows][no-stock]")
+{
+    ReceiptTemporaryDirectory fixture;REQUIRE_FALSE(fixture.path().empty());
+    struct ParentOwner {HANDLE handle{INVALID_HANDLE_VALUE};~ParentOwner(){if(handle!=INVALID_HANDLE_VALUE)::CloseHandle(handle);}};
+    std::string diagnostic;
+    {
+        ParentOwner parent{::CreateFileW(fixture.path().c_str(),DELETE|FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
+        REQUIRE(parent.handle!=INVALID_HANDLE_VALUE);
+        CHECK_FALSE(app::console_attempt_detail::open_application_directory(fixture.path(),diagnostic));
+        CHECK(diagnostic.starts_with("local_open_"));
+        CHECK_FALSE(std::filesystem::exists(fixture.path()/L"HLClientEngine"));
+    }
+    diagnostic.clear();
+    auto application=app::console_attempt_detail::open_application_directory(fixture.path(),diagnostic);
+    INFO(diagnostic);REQUIRE(application);
+    CHECK(application->canonical_path()==fixture.path()/L"HLClientEngine");
+}
+
+TEST_CASE("E33 reconnect attempts keep immutable distinct receipt scopes and earlier failures",
+    "[e33][session-receipt][console][windows][no-stock]")
+{
+    ReceiptTemporaryDirectory fixture;REQUIRE_FALSE(fixture.path().empty());
+    hlclient::core::CommandLineOptions original;
+    original.session_receipt_root=windows::external_utf8(fixture.path().native());
+    original.session_run_id=identity().run_id;original.session_role="A";
+    auto current=original;current.connect_endpoint="192.168.0.104:27016";current.open_client=true;
+    app::ConsoleSessionAttempts attempts{original};
+    const auto first=attempts.prepare(current);REQUIRE(first);
+    CHECK(first->session_receipt_root==original.session_receipt_root);
+    CHECK(first->session_run_id==original.session_run_id);CHECK(first->session_role=="A");
+    CHECK_FALSE(first->open_client);CHECK(first->connect_endpoint==current.connect_endpoint);
+    CHECK_FALSE(attempts.prepare(current)); // No overlapping generation owners.
+    REQUIRE(attempts.finish(1,"protocol_error"));
+    const auto failed=windows::read_external_text(fixture.path()/L"console-attempt-A-result.json",4096U);REQUIRE(failed);
+    CHECK(failed->find("protocol_error")!=failed->npos);CHECK(failed->find("\"result_code\":1")!=failed->npos);
+    const auto second=attempts.prepare(current);REQUIRE(second);
+    REQUIRE(second->session_run_id);CHECK(second->session_run_id->size()==32U);
+    CHECK(second->session_run_id!=first->session_run_id);CHECK(second->session_role=="A");
+    const auto second_root=std::filesystem::path{windows::external_widen(*second->session_receipt_root)};
+    CHECK(second_root.parent_path()==fixture.path()/L"attempts-A");
+    CHECK(second_root.filename()==windows::external_widen(*second->session_run_id));
+    REQUIRE(attempts.finish(0,"console_disconnect"));CHECK_FALSE(attempts.finish(0,"overwritten"));
+    REQUIRE(attempts.finalize());CHECK(attempts.size()==2U);
+    const auto index=windows::read_external_text(fixture.path()/L"console-application-A-attempts.json",64U*1024U);REQUIRE(index);
+    CHECK(index->find("protocol_error")<index->find("console_disconnect"));
+    CHECK(index->find("\"result_code\":1")!=index->npos);CHECK(index->find("\"result_code\":0")!=index->npos);
+    CHECK(index->find("\"gameplay_acceptance\":false")!=index->npos);
+    CHECK(windows::read_external_text(fixture.path()/L"console-attempt-A-result.json",4096U)==failed);
+    REQUIRE(attempts.finalize());
+    CHECK(windows::read_external_text(fixture.path()/L"console-application-A-attempts.json",64U*1024U)==index);
+    CHECK_FALSE(attempts.prepare(current));
+    app::ConsoleSessionAttempts duplicate{original};CHECK_FALSE(duplicate.prepare(current));
+    CHECK(windows::read_external_text(fixture.path()/L"console-attempt-A-result.json",4096U)==failed);
+}
+
+TEST_CASE("E33 malformed or unavailable original receipt scopes never create a replacement",
+    "[e33][session-receipt][console][windows][no-stock]")
+{
+    ReceiptTemporaryDirectory fixture;REQUIRE_FALSE(fixture.path().empty());
+    hlclient::core::CommandLineOptions original;
+    original.session_receipt_root=windows::external_utf8((fixture.path()/L"not-created").native());
+    original.session_run_id=identity().run_id;original.session_role="A";
+    app::ConsoleSessionAttempts missing{original};CHECK_FALSE(missing.prepare(original));
+    CHECK_FALSE(std::filesystem::exists(fixture.path()/L"not-created"));
+    original.session_receipt_root=windows::external_utf8(fixture.path().native());
+    original.session_run_id="../not-a-run-identity";
+    app::ConsoleSessionAttempts invalid{original};CHECK_FALSE(invalid.prepare(original));
+    CHECK_FALSE(std::filesystem::exists(fixture.path()/L"console-attempt-A-start.json"));
+}
+
+TEST_CASE("E33 managed A and B share original receipt scope without colliding attempt artifacts",
+    "[e33][session-receipt][console][windows][no-stock]")
+{
+    ReceiptTemporaryDirectory fixture;REQUIRE_FALSE(fixture.path().empty());
+    hlclient::core::CommandLineOptions a;
+    a.session_receipt_root=windows::external_utf8(fixture.path().native());
+    a.session_run_id=identity().run_id;a.session_role="A";
+    auto b=a;b.session_role="B";
+    app::ConsoleSessionAttempts attempts_a{a},attempts_b{b};
+    REQUIRE(attempts_a.prepare(a));REQUIRE(attempts_b.prepare(b));
+    REQUIRE(attempts_a.finish(1,"protocol_error"));REQUIRE(attempts_b.finish(0,"console_disconnect"));
+    const auto next_a=attempts_a.prepare(a),next_b=attempts_b.prepare(b);REQUIRE(next_a);REQUIRE(next_b);
+    CHECK(std::filesystem::path{windows::external_widen(*next_a->session_receipt_root)}.parent_path()==fixture.path()/L"attempts-A");
+    CHECK(std::filesystem::path{windows::external_widen(*next_b->session_receipt_root)}.parent_path()==fixture.path()/L"attempts-B");
+    REQUIRE(attempts_a.finish(0,"console_disconnect"));REQUIRE(attempts_b.finish(0,"console_disconnect"));
+    REQUIRE(attempts_a.finalize());REQUIRE(attempts_b.finalize());
+    REQUIRE(windows::read_external_text(fixture.path()/L"console-application-A-attempts.json",64U*1024U));
+    REQUIRE(windows::read_external_text(fixture.path()/L"console-application-B-attempts.json",64U*1024U));
+    CHECK(windows::read_external_text(fixture.path()/L"console-attempt-A-result.json",4096U)->find("protocol_error")!=std::string::npos);
+    CHECK(windows::read_external_text(fixture.path()/L"console-attempt-B-result.json",4096U)->find("console_disconnect")!=std::string::npos);
+}
+
 TEST_CASE("E28.1 secure atomic receipt publication rejects stale identity and partial final evidence",
     "[e281][session-receipt][receipt][windows][offline]")
 {

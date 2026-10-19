@@ -24,6 +24,8 @@ const RendererInfo& NullRenderer::information() const noexcept
 
 void NullRenderer::render(const RenderScene& scene, const RenderExtent extent)
 {
+    if(scene.screen_ui&&!valid_screen_ui(*scene.screen_ui))
+        throw std::invalid_argument{"Screen UI command budget or geometry is invalid"};
     if (!core::valid_image_adjustments(scene.image_adjustments))
         throw std::invalid_argument{"Image adjustments are outside the finite bounded contract"};
     if(scene.requested_msaa_samples!=0 && scene.requested_msaa_samples!=2 &&

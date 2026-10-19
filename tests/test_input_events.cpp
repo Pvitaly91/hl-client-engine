@@ -11,6 +11,17 @@ namespace {
 
 namespace input = hlclient::input;
 
+TEST_CASE("Input observation clocks do not relabel SDL time as steady time", "[input][event][comprehensive]")
+{
+    auto event=input::InputEvent::mouse_motion(1,-2);
+    REQUIRE(event.sdl_timestamp_ns()==0U);
+    REQUIRE(event.dequeue_steady_ns()==0U);
+    event.set_observation_clocks(17U,1000000017U);
+    CHECK(event.sdl_timestamp_ns()==17U);
+    CHECK(event.dequeue_steady_ns()==1000000017U);
+    CHECK(event.relative_mouse_delta()==input::RelativeMouseDelta{1,-2});
+}
+
 TEST_CASE("Platform-neutral input events own only bounded typed metadata", "[input][event]")
 {
     const auto key = input::InputEvent::key_pressed(input::PhysicalKey::w, true);

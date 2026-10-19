@@ -2,6 +2,17 @@
 #include <algorithm>
 
 namespace hlclient::games::halflife {
+namespace {
+bool ascii_name_equals(std::string_view name,std::string_view lower) noexcept {
+    if(name.size()!=lower.size())return false;
+    for(std::size_t i=0;i<name.size();++i) {
+        auto c=name[i];
+        if(c>='A'&&c<='Z')c=static_cast<char>(c-'A'+'a');
+        if(c!=lower[i])return false;
+    }
+    return true;
+}
+}
 game_api::PlayerAppearanceSelection select_player_appearance(
     const game_api::MultiplayerHudState& directory,std::uint32_t slot,std::string_view network_name) {
     using S=game_api::PlayerAppearanceStatus;
@@ -31,11 +42,11 @@ std::vector<game_api::PlayerPaletteRange> player_palette_ranges(
     std::vector<game_api::PlayerPaletteRange> result;
     if(model.textures.size()>128U) return result;
     for(std::size_t i=0;i<model.textures.size();++i) {
-        auto name=model.textures[i].source_name;
-        for(auto& c:name)if(c>='A'&&c<='Z')c=static_cast<char>(c-'A'+'a');
+        const std::string_view name=model.textures[i].source_name;
         // Narrow original DM_Base indexed palette contract. Other textures
-        // remain exact; this is never a whole-model RGB multiplier.
-        if(name!="dm_base.bmp" && name!="dm_base")continue;
+        // remain exact; this is never a whole-model RGB multiplier. Compare
+        // ASCII in place: immutable texture names need no per-player copies.
+        if(!ascii_name_equals(name,"dm_base.bmp") && !ascii_name_equals(name,"dm_base"))continue;
         if(fields.top_color)result.push_back({static_cast<std::uint32_t>(i),160U,191U,*fields.top_color});
         if(fields.bottom_color)result.push_back({static_cast<std::uint32_t>(i),192U,223U,*fields.bottom_color});
     }

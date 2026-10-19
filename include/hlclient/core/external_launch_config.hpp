@@ -19,6 +19,7 @@ struct ExternalLaunchConfiguration final {
     HudScaleSettings hud_scale;
     unsigned volume{35};
     bool movement_diagnostics{};
+    friend bool operator==(const ExternalLaunchConfiguration&,const ExternalLaunchConfiguration&)=default;
 };
 struct ExternalLaunchConfigurationResult final {
     std::optional<ExternalLaunchConfiguration> configuration;
@@ -27,11 +28,28 @@ struct ExternalLaunchConfigurationResult final {
 };
 // Literal unicast IPv4 only. Default port 27015; optional exact "connect "
 // prefix is parsed as input, never submitted as a console or shell command.
-[[nodiscard]] std::optional<std::string> normalize_external_endpoint(std::string_view);
+// LAN launcher callers retain the strict default. An in-app console may opt
+// into loopback for the existing local/manual server workflow.
+[[nodiscard]] std::optional<std::string> normalize_external_endpoint(std::string_view,bool allow_loopback=false);
+inline constexpr std::string_view kInstallationFileChecksSchema = "hlclient.installation-file-checks.v1";
+inline constexpr std::size_t kInstallationFileChecksMaximumBytes = 4096;
+// A separate, explicit local grant, not a launcher setting or a server claim.
+// Matches one endpoint/installation/game tuple without filesystem access.
+// Only unambiguous ASCII Windows drive paths are accepted; unsafe or unknown
+// identities fail closed, including unsupported Unicode case-folding aliases.
+[[nodiscard]] bool approved_installation_file_checks(std::string_view json,
+    std::string_view endpoint,std::string_view asset_root,
+    std::string_view game_directory) noexcept;
 [[nodiscard]] bool valid_external_player_name(std::string_view) noexcept;
 [[nodiscard]] std::string validate_external_launch_configuration(const ExternalLaunchConfiguration&);
 [[nodiscard]] ExternalLaunchConfigurationResult decode_external_launch_configuration(std::string_view);
 [[nodiscard]] std::optional<std::string> encode_external_launch_configuration(const ExternalLaunchConfiguration&);
+// Preserve newer persisted fields unless this editor explicitly changed them
+// relative to its own baseline. An explicit same-field edit wins a conflict.
+// Validation is transactional: no partial merged value is returned on error.
+[[nodiscard]] std::optional<ExternalLaunchConfiguration> merge_external_launch_configuration(
+    const ExternalLaunchConfiguration& baseline,const ExternalLaunchConfiguration& edited,
+    const ExternalLaunchConfiguration& current);
 // JSON string utility for project-owned reports; invalid controls are escaped.
 [[nodiscard]] std::string external_json_string(std::string_view);
 struct SceneAntialiasingObservation {

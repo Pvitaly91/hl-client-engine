@@ -4,6 +4,7 @@
 #include <hlclient/games/halflife/multiplayer.hpp>
 #include <hlclient/games/halflife/sprite_hud.hpp>
 #include <numeric>
+#include <utility>
 
 namespace hlclient::games::halflife {
 namespace {
@@ -191,6 +192,7 @@ stage_multiplayer(game_api::GameRecordState &record,
   if (!input.previous)
     for (const auto &update : input.initial_players) {
       if (update.slot == 0U || update.slot > state.maximum_clients ||
+          update.slot > game_api::kMaximumHudPlayers ||
           update.name != display(update.name))
         return game_api::GameMessageFailure{
             game_api::GameMessageErrorCode::invalid_identifier,
@@ -207,7 +209,9 @@ stage_multiplayer(game_api::GameRecordState &record,
     const auto name = message.name;
     const bool player =
         message.kind == game_api::GameMessageKind::player_display;
-    if (!player &&
+    const bool network =
+        message.kind == game_api::GameMessageKind::player_network;
+    if (!player && !network &&
         (message.kind != game_api::GameMessageKind::user_message ||
          (name != "ScoreInfo" && name != "DeathMsg" && name != "GameMode" &&
           name != "TeamInfo" && name != "TeamScore")))
@@ -226,7 +230,8 @@ stage_multiplayer(game_api::GameRecordState &record,
     };
     const auto body = message.body;
     const auto valid_slot = [&](std::uint32_t slot) {
-      return slot > 0U && slot <= state.maximum_clients;
+      return slot > 0U && slot <= state.maximum_clients &&
+             slot <= game_api::kMaximumHudPlayers;
     };
     // Validate even stale messages. Only a complete owning record publishes.
     if (player) {
@@ -235,6 +240,18 @@ stage_multiplayer(game_api::GameRecordState &record,
           message.player_display->name != display(message.player_display->name))
         return reject(game_api::GameMessageErrorCode::invalid_identifier,
                       "Player display update is invalid");
+    } else if (network) {
+      if (message.player_network.size() > game_api::kMaximumHudPlayers)
+        return reject(game_api::GameMessageErrorCode::capacity_exceeded,
+                      "Player network update exceeds the player bound");
+      for (const auto& update : message.player_network) {
+        if (!valid_slot(update.slot))
+          return reject(game_api::GameMessageErrorCode::invalid_identifier,
+                        "Player network slot is outside negotiated clients");
+        if (update.ping_ms > 4095U || update.packet_loss > 127U)
+          return reject(game_api::GameMessageErrorCode::invalid_value,
+                        "Player network values exceed their wire bounds");
+      }
     } else if (name == "ScoreInfo") {
       if (body.size() != 9U)
         return reject(game_api::GameMessageErrorCode::invalid_body,
@@ -287,6 +304,17 @@ stage_multiplayer(game_api::GameRecordState &record,
     state.high_water = message.source;
     if (player)
       identity(state, *message.player_display);
+    else if (network) {
+      for (const auto& update : message.player_network) {
+        auto& entry = state.players[update.slot - 1U];
+        // Ping reports do not introduce a player or resurrect a departed slot.
+        // identity() clears these values at a disconnect or slot replacement.
+        if (!entry.present)
+          continue;
+        entry.ping_ms = update.ping_ms;
+        entry.packet_loss = update.packet_loss;
+      }
+    }
     else if (name == "ScoreInfo") {
       auto &entry = state.players[std::to_integer<unsigned>(body[0]) - 1U];
       const auto frags = short_le(body, 1U), deaths = short_le(body, 3U),
@@ -352,6 +380,22 @@ stage_multiplayer(game_api::GameRecordState &record,
       notice.victim_name = event.victim_entity == 255U
                                ? display(event.weapon_text)
                                : player_name(state, event.victim_entity);
+      std::string sentence;
+      if(notice.kind==game_api::DeathNoticeKind::non_player)
+        sentence=notice.killer_name+" killed a "+notice.victim_name;
+      else {
+        if(notice.kind==game_api::DeathNoticeKind::world || notice.kind==game_api::DeathNoticeKind::suicide)
+          sentence=notice.victim_name+(notice.weapon=="world"?" died":" killed self");
+        else sentence=notice.killer_name+
+            (notice.kind==game_api::DeathNoticeKind::teammate?" killed his teammate ":" killed ")+notice.victim_name;
+        if(notice.weapon!="world" && notice.weapon!="teammate") {
+          const auto weapon=notice.weapon=="egon"?std::string{"gluon gun"}:
+              notice.weapon=="gauss"?std::string{"tau cannon"}:notice.weapon;
+          sentence+=" with "+weapon;
+        }
+      }
+      record.append_console_text(std::move(sentence),notice.source,
+          game_api::GameRecordState::ConsoleText::Origin::game_event);
       auto empty =
           std::find(state.notices.begin(), state.notices.end(), std::nullopt);
       if (empty == state.notices.end()) {
@@ -431,6 +475,7 @@ void compose_multiplayer_hud(game_api::MultiplayerHudState &state,
     std::int32_t frags{}, deaths{};
     std::uint32_t slot{};
     bool score{}, team{};
+    std::optional<std::uint16_t> ping_ms;
   };
   std::array<Row, 64U> rows{};
   std::size_t row_count = 0U;
@@ -491,7 +536,8 @@ void compose_multiplayer_hud(game_api::MultiplayerHudState &state,
                          p.deaths,
                          index + 1U,
                          p.has_score,
-                         false};
+                         false,
+                         p.ping_ms};
   };
   if (state.teamplay)
     for (std::size_t t = 0U; t < team_count; ++t) {
@@ -500,7 +546,8 @@ void compose_multiplayer_hud(game_api::MultiplayerHudState &state,
                            teams[t].deaths,
                            0U,
                            true,
-                           true};
+                           true,
+                           {}};
       for (const auto slot : order)
         if (slot < state.maximum_clients && state.players[slot].present &&
             (state.players[slot].team.empty()
@@ -519,6 +566,15 @@ void compose_multiplayer_hud(game_api::MultiplayerHudState &state,
       18.0F, (height - y - 32.0F) /
                  static_cast<float>(std::max<std::size_t>(1U, row_count)));
   const float pixel = std::min(1.5F, row_height / 9.0F), advance = pixel * 6.0F;
+  // Keep independent numeric columns, including at 320px and scaled HUDs.
+  // Team sums may need smaller glyphs but retain their complete values.
+  const float column_scale = std::min(1.0F, (table_width - 16.0F) / 240.0F);
+  const float column_width = 48.0F * column_scale, gap = 6.0F * column_scale;
+  const float ping_x = x + table_width - 8.0F - column_width;
+  const float deaths_x = ping_x - gap - column_width;
+  const float kills_x = deaths_x - gap - column_width;
+  const float name_width = kills_x - gap - (x + 8.0F);
+  const float header_pixel = std::min({1.2F, column_width / 42.0F, name_width / 36.0F});
   hud.draw.rectangles.push_back(
       {x,
        y,
@@ -526,9 +582,14 @@ void compose_multiplayer_hud(game_api::MultiplayerHudState &state,
        28.0F + row_height * static_cast<float>(row_count),
        {0.02F, 0.02F, 0.02F, 0.88F}});
   hud.draw.texts.push_back(
-      {"PLAYER", x + 8.0F, y + 6.0F, 1.2F, 7.2F, 14.0F, yellow});
-  hud.draw.texts.push_back({"KILLS  DEATHS", x + table_width - 110.0F, y + 6.0F,
-                            1.2F, 7.2F, 14.0F, yellow});
+      {"PLAYER", x + 8.0F, y + 6.0F, header_pixel, header_pixel * 6.0F, 14.0F, yellow});
+  for (const auto& [label, column_x] :
+       {std::pair{"KILLS", kills_x}, std::pair{"DEATHS", deaths_x}, std::pair{"PING MS", ping_x}})
+    hud.draw.texts.push_back({label, column_x, y + 6.0F,
+                              header_pixel, header_pixel * 6.0F, 14.0F, yellow});
+  std::string ping_rows;
+  std::size_t ping_begin = 0U;
+  const float ping_pixel = std::min(pixel, column_width / 24.0F);
   for (std::size_t i = 0U; i < row_count; ++i) {
     const auto &row = rows[i];
     const auto row_y = y + 24.0F + static_cast<float>(i) * row_height;
@@ -540,7 +601,7 @@ void compose_multiplayer_hud(game_api::MultiplayerHudState &state,
                                      {0.18F, 0.36F, 0.12F, 0.95F}});
     auto name = row.name;
     const auto max_name = static_cast<std::size_t>(
-        std::max(1.0F, (table_width - 138.0F) / advance));
+        std::max(1.0F, name_width / advance));
     if (name.size() > max_name)
       name.resize(max_name);
     hud.draw.texts.push_back(
@@ -551,14 +612,26 @@ void compose_multiplayer_hud(game_api::MultiplayerHudState &state,
     // Team sums can exceed i16. Preserve the value, compact only its glyphs
     // into the existing numeric column, never clamp authoritative counters.
     const float score_pixel =
-        std::min(pixel, 48.0F / (6.0F * static_cast<float>(std::max(
+        std::min(pixel, column_width / (6.0F * static_cast<float>(std::max(
                                             frags.size(), deaths.size()))));
-    hud.draw.texts.push_back({frags, x + table_width - 104.0F, row_y,
+    hud.draw.texts.push_back({frags, kills_x, row_y,
                               score_pixel, score_pixel * 6.0F, row_height,
                               yellow});
-    hud.draw.texts.push_back({deaths, x + table_width - 50.0F, row_y,
+    hud.draw.texts.push_back({deaths, deaths_x, row_y,
                               score_pixel, score_pixel * 6.0F, row_height,
                               yellow});
+    if (!ping_rows.empty())
+      ping_rows += '\n';
+    ping_rows += row.ping_ms ? std::to_string(*row.ping_ms) : "-";
+    // Batch at most 32 rows: 159 bytes even for 4095ms in every row. This
+    // preserves the draw-command budget for all 32 players plus 32 teams.
+    if (i - ping_begin == 31U || i + 1U == row_count) {
+      hud.draw.texts.push_back({std::move(ping_rows), ping_x,
+          y + 24.0F + static_cast<float>(ping_begin) * row_height,
+          ping_pixel, ping_pixel * 6.0F, row_height, yellow});
+      ping_rows.clear();
+      ping_begin = i + 1U;
+    }
   }
   for(std::size_t i=rectangle_begin;i<hud.draw.rectangles.size();++i) {
     auto& item=hud.draw.rectangles[i];item.x*=user_scale;item.y*=user_scale;

@@ -139,7 +139,7 @@ static_assert(std::is_nothrow_move_constructible_v<goldsrc::ConnectRequest>);
     body += protocol_info;
     body += "\" \"";
     body += user_info;
-    body.push_back('"');
+    body += "\"\n";
     return make_datagram(body, suffix);
 }
 
@@ -154,7 +154,7 @@ void check_parse_error(
     CHECK(result.error->code == expected);
 }
 
-TEST_CASE("Connect builder matches an independent sanitized captured-layout fixture",
+TEST_CASE("Connect builder matches an independent line-delimited synthetic wire fixture",
           "[goldsrc][connect-request]")
 {
     // This literal intentionally does not use the codec, its constants, or the parser.
@@ -168,7 +168,7 @@ TEST_CASE("Connect builder matches an independent sanitized captured-layout fixt
         "\\cl_updaterate\\102\\hud_classautokill\\1\\model\\fixture_model"
         "\\name\\FixturePlayer\\topcolor\\30\\esevcmmx\\0\\_gm\\3154"
         "\\_vgui_menus\\0\\rate\\25000"
-        "\""
+        "\"\n"
         "TEST_AUTH_MATERIAL";
     const auto expected = text_bytes(
         std::string_view{expected_characters, sizeof(expected_characters) - 1U});
@@ -318,11 +318,15 @@ TEST_CASE("Connect parser rejects every wrong connectionless header byte",
     }
 }
 
-TEST_CASE("Connect request has no text terminator and enforces its opaque suffix boundary",
+TEST_CASE("Connect request has one header LF and no terminator after its opaque suffix",
           "[goldsrc][connect-request]")
 {
     const auto valid = build_fixture(1U);
     REQUIRE(valid.size() > kBinaryAuthentication.size());
+    const auto suffix_offset = valid.size() - kBinaryAuthentication.size();
+    REQUIRE(suffix_offset >= 2U);
+    CHECK(valid[suffix_offset - 2U] == std::byte{'"'});
+    CHECK(valid[suffix_offset - 1U] == std::byte{'\n'});
     CHECK(valid.back() != std::byte{'\n'});
     CHECK(valid.back() != std::byte{'\0'});
 
@@ -343,6 +347,43 @@ TEST_CASE("Connect request has no text terminator and enforces its opaque suffix
     check_parse_error(
         swapped_text_terminator,
         goldsrc::ConnectRequestErrorCode::unexpected_trailing_data);
+}
+
+TEST_CASE("Connect parser requires the header LF and does not trim opaque ticket bytes",
+          "[goldsrc][connect-request][authentication][steam-wire-boundary]")
+{
+    const auto valid = build_fixture(1U);
+    const auto separator_offset = valid.size() - kBinaryAuthentication.size() - 1U;
+
+    auto missing_separator = valid;
+    missing_separator.erase(
+        missing_separator.begin() + static_cast<std::ptrdiff_t>(separator_offset));
+    check_parse_error(missing_separator, goldsrc::ConnectRequestErrorCode::invalid_terminator);
+
+    for (const auto replacement : {std::byte{0U}, std::byte{' '}, std::byte{'\r'}}) {
+        auto wrong_separator = valid;
+        wrong_separator[separator_offset] = replacement;
+        check_parse_error(wrong_separator, goldsrc::ConnectRequestErrorCode::invalid_terminator);
+    }
+
+    auto extra_separator = valid;
+    extra_separator.insert(
+        extra_separator.begin() + static_cast<std::ptrdiff_t>(separator_offset), std::byte{'\n'});
+    check_parse_error(extra_separator, goldsrc::ConnectRequestErrorCode::unexpected_trailing_data);
+
+    // Exact-length profiles also detect a missing delimiter when the first
+    // binary byte is LF. Do not consume that byte as generic whitespace.
+    auto ticket_starting_with_lf = valid;
+    ticket_starting_with_lf[separator_offset + 1U] = std::byte{'\n'};
+    auto parsed = goldsrc::parse_connect_request(ticket_starting_with_lf, fixture_profile());
+    REQUIRE(parsed);
+    REQUIRE(parsed.request);
+    auto expected_ticket = text_bytes(kBinaryAuthentication);
+    expected_ticket.front() = std::byte{'\n'};
+    CHECK(parsed.request->authentication_matches(text_bytes(kProtectedAuthentication), expected_ticket));
+    ticket_starting_with_lf.erase(
+        ticket_starting_with_lf.begin() + static_cast<std::ptrdiff_t>(separator_offset));
+    check_parse_error(ticket_starting_with_lf, goldsrc::ConnectRequestErrorCode::invalid_terminator);
 }
 
 TEST_CASE("Connect parser rejects trailing bytes after the exact request",
@@ -480,6 +521,10 @@ TEST_CASE("Connect packet accepts its exact total bound and rejects limit plus o
     REQUIRE(exact);
     REQUIRE(exact.datagram);
     CHECK(exact.datagram->size() == exact_profile.maximum_datagram_size);
+    const auto expected_text = std::string{"connect 48 -2147483648 \""} +
+        std::string{kFixtureProtocolInfo} + "\" \"" + std::string{kFixtureUserInfo} + "\"\n";
+    CHECK(exact.datagram->size() == 4U + expected_text.size() + kBinaryAuthentication.size());
+    CHECK(goldsrc::parse_connect_request(*exact.datagram, exact_profile));
 
     auto one_byte_smaller_profile = exact_profile;
     --one_byte_smaller_profile.maximum_datagram_size;
@@ -488,6 +533,8 @@ TEST_CASE("Connect packet accepts its exact total bound and rejects limit plus o
     REQUIRE_FALSE(limit_plus_one);
     REQUIRE(limit_plus_one.error);
     CHECK(limit_plus_one.error->code == goldsrc::ConnectRequestErrorCode::packet_too_large);
+    check_parse_error(*exact.datagram, goldsrc::ConnectRequestErrorCode::packet_too_large,
+                      one_byte_smaller_profile);
 }
 
 TEST_CASE("Connect parser enforces the hard packet bound before parsing",
@@ -678,7 +725,7 @@ TEST_CASE("Connect parser and builder round-trip the synthetic fixture",
     CHECK(exact_round_trip);
 }
 
-TEST_CASE("Captured-size synthetic profile pins observed Protocol 48 lengths",
+TEST_CASE("Synthetic Protocol 48 profile retains field lengths and includes the header LF",
           "[goldsrc][connect-request][boundary]")
 {
     constexpr std::string_view protected_marker =
@@ -709,7 +756,13 @@ TEST_CASE("Captured-size synthetic profile pins observed Protocol 48 lengths",
     const auto built = goldsrc::ConnectRequestBuilder::build(request, profile);
     REQUIRE(built);
     REQUIRE(built.datagram);
-    CHECK(built.datagram->size() == goldsrc::kObservedMaximumConnectDatagramSize);
+    // Preserve historical capture constants; the emitted packet now has the
+    // required LF between its text header and the binary authentication data.
+    constexpr auto expected_wire_size = 4U +
+        std::string_view{"connect 48 -2147483648 \""}.size() + 66U +
+        std::string_view{"\" \""}.size() + 179U + std::string_view{"\"\n"}.size() + 213U;
+    CHECK(built.datagram->size() == expected_wire_size);
+    CHECK(goldsrc::parse_connect_request(*built.datagram, profile));
 }
 
 TEST_CASE("Player name and model enforce the 31-byte project boundary",

@@ -65,7 +65,7 @@ namespace goldsrc = hlclient::goldsrc;
         "\\name\\FixturePlayer\\topcolor\\30\\esevcmmx\\0\\_gm\\3154"
         "\\_vgui_menus\\0\\rate\\25000";
     const std::string body =
-        "connect 48 9 \"" + protocol + "\" \"" + user + "\"";
+        "connect 48 9 \"" + protocol + "\" \"" + user + "\"\n";
     return connectionless(body, std::vector<std::byte>(213U, std::byte{0x6dU}));
 }
 

@@ -10,6 +10,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -368,22 +369,149 @@ TEST_CASE("Manifest rejects duplicate type-local slots atomically",
     REQUIRE(readiness);
     REQUIRE(readiness.state);
 
-    goldsrc::detail::PrecacheManifestDefensiveTestAccess::
-        replace_resource_index(*readiness.state, 2U, 17U);
-    const auto built =
-        goldsrc::detail::PrecacheManifestDefensiveTestAccess::build(
-            goldsrc::PrecacheManifestBuilder{},
-            *readiness.state,
-            list,
-            server);
-    REQUIRE_FALSE(built);
-    CHECK_FALSE(built.state);
-    REQUIRE(built.error);
-    CHECK(built.error->code ==
-          goldsrc::PrecacheManifestErrorCode::duplicate_type_local_slot);
-    CHECK(built.error->entry_ordinal == 2U);
-    CHECK_FALSE(built.error->readiness_code);
-    CHECK_FALSE(built.error->world_status);
+    for (const auto type : {goldsrc::ResourceType::generic, goldsrc::ResourceType::model,
+                           goldsrc::ResourceType::sound, goldsrc::ResourceType::decal,
+                           goldsrc::ResourceType::event_script}) {
+        INFO("type=" << static_cast<unsigned>(type));
+        goldsrc::detail::PrecacheManifestDefensiveTestAccess::
+            replace_resource_type(*readiness.state, 1U, type);
+        goldsrc::detail::PrecacheManifestDefensiveTestAccess::
+            replace_resource_type(*readiness.state, 2U, type);
+        goldsrc::detail::PrecacheManifestDefensiveTestAccess::
+            replace_resource_index(*readiness.state, 2U, 17U);
+        const auto built =
+            goldsrc::detail::PrecacheManifestDefensiveTestAccess::build(
+                goldsrc::PrecacheManifestBuilder{},
+                *readiness.state,
+                list,
+                server);
+        REQUIRE_FALSE(built);
+        CHECK_FALSE(built.state);
+        REQUIRE(built.error);
+        CHECK(built.error->code ==
+              goldsrc::PrecacheManifestErrorCode::duplicate_type_local_slot);
+        CHECK(built.error->entry_ordinal == 2U);
+        CHECK_FALSE(built.error->readiness_code);
+        CHECK_FALSE(built.error->world_status);
+    }
+}
+
+TEST_CASE("Manifest retains decal 4095 metadata rows without allocating or aliasing a slot",
+          "[goldsrc][precache][manifest][custom-server][decal-metadata]")
+{
+    ScopedLocalResourceTestRoot root;
+    root.write("valve", "maps/test_map.bsp", "map");
+    root.write("valve", "models/test.mdl", "model");
+    root.write("valve", "sound/test.wav", "sound");
+    auto environment = fixture::make_environment(root);
+    const auto list = fixture::parse_resource_list({
+        {3U, "{missing_a", 4095U, 0U, 0U},
+        {2U, "maps/test_map.bsp", 7U, 0U, 0U},
+        {3U, "{missing_b", 4095U, 0U, 0U},
+        {0U, "test.wav", 4095U, 0U, 0U},
+        {3U, "{ordinary", 3U, 0U, 0U},
+        {2U, "models/test.mdl", 4095U, 0U, 0U},
+        {3U, "{missing_c", 4095U, 0U, 0U},
+    });
+    const auto inventory = fixture::build_inventory(list, *environment);
+    const auto server = fixture::parse_server_info("maps/test_map.bsp");
+    const auto built = fixture::build_manifest(list, inventory, server, *environment);
+    INFO((built.error ? built.error->context : std::string{}));
+    REQUIRE(built);
+    REQUIRE(built.state);
+    const auto& manifest = *built.state;
+    REQUIRE(manifest.entry_count() == 7U);
+    CHECK(manifest.source_geometry().resource_count == 7U);
+    CHECK(manifest.complete_for_supported_local_profile());
+    CHECK(manifest.readiness_summary().metadata_only_count() == 4U);
+    CHECK(manifest.readiness_summary().resolved_mapped_file_count() == 3U);
+    for (std::size_t ordinal = 0U; ordinal < manifest.entry_count(); ++ordinal) {
+        CHECK(manifest.entries()[ordinal].wire_ordinal() == ordinal);
+        CHECK(manifest.entries()[ordinal].resource_type() == list.entries()[ordinal].type());
+        CHECK(manifest.entries()[ordinal].resource_index() == list.entries()[ordinal].index().value());
+    }
+    for (const std::size_t ordinal : {0U, 2U, 6U}) {
+        const auto& entry = manifest.entries()[ordinal];
+        CHECK(entry.readiness_status() == goldsrc::LocalResourceReadinessStatus::metadata_only);
+        CHECK_FALSE(entry.locator());
+        CHECK(entry.resource_index() == 4095U);
+    }
+    CHECK(manifest.decal_slots().slot_count() == 4U);
+    CHECK(manifest.decal_slots().occupied_slot_count() == 1U);
+    CHECK_FALSE(manifest.decal_slots().entry_offset(4095U));
+    CHECK_FALSE(manifest.find(goldsrc::ResourceType::decal, 4095U));
+    REQUIRE(manifest.find(goldsrc::ResourceType::decal, 3U));
+    CHECK(manifest.find(goldsrc::ResourceType::decal, 3U)->wire_ordinal() == 4U);
+    REQUIRE(manifest.find(goldsrc::ResourceType::model, 4095U));
+    CHECK(manifest.find(goldsrc::ResourceType::model, 4095U)->wire_ordinal() == 5U);
+    REQUIRE(manifest.find(goldsrc::ResourceType::sound, 4095U));
+    CHECK(manifest.find(goldsrc::ResourceType::sound, 4095U)->wire_ordinal() == 3U);
+    CHECK(manifest.model_slots().entry_offset(7U) == 1U);
+    CHECK(manifest.world_selection().wire_ordinal() == 1U);
+
+    // Even one non-bindable decal 4095 metadata row cannot claim a lookup slot.
+    const auto singleton = fixture::parse_resource_list({
+        {3U, "{missing_only", 4095U, 0U, 0U},
+        {2U, "maps/test_map.bsp", 7U, 0U, 0U}});
+    const auto singleton_inventory = fixture::build_inventory(singleton, *environment);
+    const auto singleton_manifest = fixture::build_manifest(singleton, singleton_inventory, server, *environment);
+    REQUIRE(singleton_manifest);
+    REQUIRE(singleton_manifest.state);
+    CHECK(singleton_manifest.state->entry_count() == 2U);
+    CHECK(singleton_manifest.state->decal_slots().slot_count() == 0U);
+    CHECK_FALSE(singleton_manifest.state->find(goldsrc::ResourceType::decal, 4095U));
+}
+
+TEST_CASE("Precache defaults publish every large-list entry without losing slots",
+          "[goldsrc][precache][manifest][limits][custom-server]")
+{
+    ScopedLocalResourceTestRoot root;
+    root.write("valve", "maps/test_map.bsp", "map");
+    auto environment = fixture::make_environment(root);
+    std::vector<resource_list_test_fixture::EntrySpec> specs{
+        {2U, "maps/test_map.bsp", 1U, 0U, 0U}};
+    for (std::size_t index = 1U; index < goldsrc::kMaximumResourceCount; ++index) {
+        specs.push_back({3U, "{d" + std::to_string(index),
+                         static_cast<std::uint16_t>(index), 0U, 0U});
+    }
+    const auto list = fixture::parse_resource_list(specs);
+    const auto inventory = fixture::build_inventory(list, *environment);
+    const auto server = fixture::parse_server_info("maps/test_map.bsp");
+    const auto built = fixture::build_manifest(list, inventory, server, *environment);
+    REQUIRE(built);
+    REQUIRE(built.state);
+    CHECK(built.state->entry_count() == specs.size());
+    CHECK(built.state->source_geometry().resource_count == specs.size());
+    CHECK(built.state->complete_for_supported_local_profile());
+    CHECK(built.state->model_slots().entry_offset(1U) == 0U);
+    CHECK(built.state->entries().back().resource_index() == 4094U);
+    CHECK(built.state->readiness_summary().metadata_only_count() == specs.size() - 1U);
+
+    SECTION("explicit smaller manifest cap remains enforced")
+    {
+        goldsrc::PrecacheManifestLimits limits;
+        limits.maximum_manifest_entries = 1024U;
+        const auto limited = goldsrc::PrecacheManifestBuilder{limits}.build(
+            list, inventory, server, goldsrc::GoldSrcResourceNameMapper{}, *environment);
+        REQUIRE_FALSE(limited);
+        CHECK_FALSE(limited.state);
+        REQUIRE(limited.error);
+        CHECK(limited.error->code ==
+              goldsrc::PrecacheManifestErrorCode::manifest_entry_limit_exceeded);
+    }
+    SECTION("explicit smaller readiness cap remains enforced")
+    {
+        goldsrc::PrecacheManifestLimits limits;
+        limits.maximum_readiness_entries = 1024U;
+        const auto limited = goldsrc::PrecacheManifestBuilder{limits}.build(
+            list, inventory, server, goldsrc::GoldSrcResourceNameMapper{}, *environment);
+        REQUIRE_FALSE(limited);
+        CHECK_FALSE(limited.state);
+        REQUIRE(limited.error);
+        CHECK(limited.error->code == goldsrc::PrecacheManifestErrorCode::readiness_build_failed);
+        CHECK(limited.error->readiness_code ==
+              goldsrc::LocalResourceReadinessErrorCode::entry_count_limit_exceeded);
+    }
 }
 
 static_assert(std::is_copy_constructible_v<goldsrc::PrecacheManifestState>);

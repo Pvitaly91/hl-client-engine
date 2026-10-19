@@ -64,7 +64,7 @@ namespace goldsrc = hlclient::goldsrc;
         "\\_vgui_menus\\0\\rate\\25000";
     const std::string body =
         "connect 48 " + std::string{challenge} + " \"" + protocol +
-        "\" \"" + user + "\"";
+        "\" \"" + user + "\"\n";
     const std::vector<std::byte> opaque_suffix(213U, std::byte{0xa5U});
     return connectionless(body, opaque_suffix);
 }

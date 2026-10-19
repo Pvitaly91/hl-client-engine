@@ -114,6 +114,10 @@ game_api::CameraIntent HalfLifePresentation::camera(
     const client::RuntimeClientObservationState& observation, double local_punch) const noexcept {
   game_api::CameraIntent result;
   result.horizontal_field_of_view_degrees=horizontal_fov_;
+  // Modern stock HL's default gl_widescreen_yfov policy: the selected FOV is
+  // horizontal at 4:3, not at an arbitrary wide viewport. Studio and sprites
+  // must share this same projection with the world, including scoped FOVs.
+  result.field_of_view_reference_aspect_ratio=4.0/3.0;
   result.projection_status=projection_status_;
   // Pinned Valve HUD policy: default FOV restores base sensitivity; other
   // confirmed FOV values use the default zoom_sensitivity_ratio of 1.2.
@@ -257,6 +261,9 @@ game_api::ViewmodelIntent HalfLifePresentation::viewmodel(
   }
   result.status = game_api::ViewmodelStatus::ready;
   result.sequence = sequence; result.body = body;
+  // Pinned SDK V_CalcNormalRefdef, full viewsize 120: the held model origin
+  // sits one source unit below the eye. Apply once, to every weapon/socket.
+  result.camera_local_origin={0.0F,0.0F,-1.0F};
   // Studio evaluator retains its original looping/clamping mechanism.
   result.frame_coordinate = std::max(0.0, (now - animation_started_at_) * metadata->sequences[sequence].fps);
   return result;

@@ -5,6 +5,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -855,13 +856,15 @@ TEST_CASE("E16 render-only ordinary history is continuous across irregular arriv
     options.limits.maximum_snapshot_gap_seconds=.25;options.teleport_distance=128.0;
     const std::array arrivals{0.0,.025,.045,.055,.085};
     std::size_t next{};std::shared_ptr<const hlclient::client::RuntimeClientObservationState> current;
-    double previous_x{};
+    double previous_x{},expected_reserve{};
     // Independent authoritative linear samples, not a locally integrated path.
     // A third early-arriving sample needs an older bracket, not a pair-clock reset.
     for(unsigned frame=0U;frame<=20U;++frame) {
         const double application=static_cast<double>(frame)*.005;
         while(next<arrivals.size() && arrivals[next]<=application+1e-9) {
             const double time=1.0+static_cast<double>(next)*.02;
+            if(next>0U)expected_reserve=std::max({expected_reserve,.02,
+                arrivals[next]-arrivals[next-1U]-.005});
             current=buffered_ordinary_sample(time,static_cast<double>(next)*16.0,next+1U);
             owner.observe(current);++next;
         }
@@ -869,22 +872,152 @@ TEST_CASE("E16 render-only ordinary history is continuous across irregular arriv
         const auto immutable=*current;
         const auto result=owner.sample(*current,100.0+application,options,.1);REQUIRE(result);
         const auto x=*result.state->packet_entities.front().origin.x;
+        const double available_span=static_cast<double>(next-1U)*.02;
+        const double expected_delay=std::min(expected_reserve,available_span);
         const double expected=std::min(*current->packet_entities.front().origin.x,
-            std::max(0.0,application-.02)*800.0);
+            std::max(0.0,application-expected_delay)*800.0);
         CHECK(x==Approx(expected).margin(.00001));
         CHECK(x>=previous_x);CHECK(x-previous_x<=4.00001);
-        if(frame==8U) CHECK(x==Approx(16.0)); // An80ms flight is moving after one cadence, not held100ms.
+        if(frame==8U) CHECK(x==Approx(16.0)); // An80ms flight is moving under its learned reserve, not held100ms.
         const auto repeated=owner.sample(*current,100.0+application,options,.1);REQUIRE(repeated);
         CHECK(*repeated.state->packet_entities.front().origin.x==x);
         CHECK(*current==immutable);previous_x=x;
     }
-    REQUIRE(owner.cadence_delay_seconds());CHECK(*owner.cadence_delay_seconds()==Approx(.02));
+    REQUIRE(owner.cadence_delay_seconds());CHECK(*owner.cadence_delay_seconds()==Approx(.025));
     auto removed=*buffered_ordinary_sample(1.12,96.0,6U);removed.packet_entities.clear();
     removed.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(removed);
     owner.observe(std::make_shared<const hlclient::client::RuntimeClientObservationState>(removed));
     const auto absent=owner.sample(removed,100.105,options,.1);REQUIRE(absent);
     CHECK(absent.state->packet_entities.empty());CHECK(owner.lifetime_count()==0U);
     owner.reset();CHECK(owner.history_size()==0U);CHECK_FALSE(owner.cadence_delay_seconds());
+}
+
+TEST_CASE("E16 ordinary reserve adapts from a fast first pair to 16 Hz jitter without endpoint steps",
+          "[e16][grenade-smoothing][adaptive-jitter][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;options.teleport_distance=128.0;
+    options.ordinary_teleport_distance=512.0;
+    auto current=buffered_ordinary_sample(1.0,0.0,1U);owner.observe(current);
+    REQUIRE(owner.sample(*current,10.0,options,.1));
+    current=buffered_ordinary_sample(1.02,16.0,2U);owner.observe(current);
+    auto sampled=owner.sample(*current,10.02,options,.1);REQUIRE(sampled);
+    CHECK(sampled.state->packet_entities.front().origin.x==0.0);
+
+    // The first pair was 50 Hz. A subsequent 16 Hz pair must immediately
+    // enlarge the bounded reserve instead of reaching newest and exposing the
+    // next authoritative position as a visible step.
+    current=buffered_ordinary_sample(1.0825,66.0,3U);owner.observe(current);
+    sampled=owner.sample(*current,10.0825,options,.1);REQUIRE(sampled);
+    CHECK(*sampled.state->packet_entities.front().origin.x==Approx(16.0));
+    REQUIRE(owner.cadence_delay_seconds());CHECK(*owner.cadence_delay_seconds()==Approx(.0625));
+    sampled=owner.sample(*current,10.12,options,.1);REQUIRE(sampled);
+    CHECK(*sampled.state->packet_entities.front().origin.x==Approx(46.0));
+    const auto repeated=owner.sample(*current,10.12,options,.1);REQUIRE(repeated);
+    CHECK(repeated.state->packet_entities.front().origin.x==sampled.state->packet_entities.front().origin.x);
+
+    current=buffered_ordinary_sample(1.145,116.0,4U);owner.observe(current);
+    sampled=owner.sample(*current,10.145,options,.1);REQUIRE(sampled);
+    CHECK(*sampled.state->packet_entities.front().origin.x==Approx(66.0));
+    double before_arrival{};
+    for(unsigned frame=1U;frame<=7U;++frame) {
+        sampled=owner.sample(*current,10.145+static_cast<double>(frame)*.01,options,.1);REQUIRE(sampled);
+        before_arrival=*sampled.state->packet_entities.front().origin.x;
+    }
+    CHECK(before_arrival==Approx(116.0));
+    // 80 ms then 45 ms first-presentation arrivals around the same 62.5 ms
+    // server cadence occur while 5--10 ms render samples continue. The inferred
+    // timing removes one render quantum and adjusts the bounded reserve without
+    // claiming a wire-receipt timestamp or inventing projectile motion.
+    current=buffered_ordinary_sample(1.2075,166.0,5U);owner.observe(current);
+    sampled=owner.sample(*current,10.225,options,.1);REQUIRE(sampled);
+    CHECK(*sampled.state->packet_entities.front().origin.x==Approx(124.0));
+    CHECK(*sampled.state->packet_entities.front().origin.x-before_arrival==Approx(8.0));
+    REQUIRE(owner.cadence_delay_seconds());CHECK(*owner.cadence_delay_seconds()==Approx(.07));
+    for(unsigned frame=1U;frame<=4U;++frame) {
+        sampled=owner.sample(*current,10.225+static_cast<double>(frame)*.01,options,.1);REQUIRE(sampled);
+        before_arrival=*sampled.state->packet_entities.front().origin.x;
+    }
+    CHECK(before_arrival==Approx(156.0));
+    current=buffered_ordinary_sample(1.27,216.0,6U);owner.observe(current);
+    sampled=owner.sample(*current,10.27,options,.1);REQUIRE(sampled);
+    const double jittered_x=*sampled.state->packet_entities.front().origin.x;
+    CHECK(jittered_x==Approx(160.0));CHECK(jittered_x-before_arrival==Approx(4.0));
+    CHECK(jittered_x<216.0);
+
+    double previous_x=jittered_x;
+    for(std::uint64_t record=7U;record<=30U;++record) {
+        const double offset=static_cast<double>(record-6U)*.0625;
+        current=buffered_ordinary_sample(1.27+offset,216.0+static_cast<double>(record-6U)*50.0,record);
+        owner.observe(current);
+        sampled=owner.sample(*current,10.27+offset,options,.1);REQUIRE(sampled);
+        const double x=*sampled.state->packet_entities.front().origin.x;
+        CHECK(x>=previous_x);CHECK(x<=*current->packet_entities.front().origin.x);
+        REQUIRE(owner.cadence_delay_seconds());CHECK(*owner.cadence_delay_seconds()<=.1);
+        CHECK(owner.history_size()<=goldsrc::RuntimeOrdinarySnapshotPresentation::maximum_history);
+        previous_x=x;
+    }
+    // The fixed recent window forgets the one late arrival and releases toward
+    // live cadence. It cannot accumulate latency across a long flight.
+    REQUIRE(owner.cadence_delay_seconds());
+    CHECK(*owner.cadence_delay_seconds()==Approx(.0625).margin(.000001));
+    CHECK(owner.lifetime_count()==1U);
+}
+
+TEST_CASE("E16 ordinary inferred arrival timing discounts a stalled renderer",
+          "[e16][grenade-smoothing][adaptive-jitter][render-stall][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;options.ordinary_teleport_distance=512.0;
+    auto current=buffered_ordinary_sample(1.0,0.0,1U);owner.observe(current);
+    REQUIRE(owner.sample(*current,10.0,options,.1));
+
+    // Four valid 20 ms authoritative observations arrive while presentation
+    // does not run. The eventual 100 ms sample interval is entirely a render
+    // hiatus and must not become a 100 ms network-jitter claim.
+    for(std::uint64_t record=2U;record<=5U;++record) {
+        current=buffered_ordinary_sample(1.0+static_cast<double>(record-1U)*.02,
+            static_cast<double>(record-1U)*16.0,record);
+        owner.observe(current);
+    }
+    auto sampled=owner.sample(*current,10.1,options,.1);REQUIRE(sampled);
+    REQUIRE(owner.cadence_delay_seconds());
+    CHECK(*owner.cadence_delay_seconds()==Approx(.02));
+    CHECK(*sampled.state->packet_entities.front().origin.x<=*current->packet_entities.front().origin.x);
+
+    sampled=owner.sample(*current,10.105,options,.1);REQUIRE(sampled);
+    current=buffered_ordinary_sample(1.1,80.0,6U);owner.observe(current);
+    sampled=owner.sample(*current,10.12,options,.1);REQUIRE(sampled);
+    REQUIRE(owner.cadence_delay_seconds());
+    CHECK(*owner.cadence_delay_seconds()==Approx(.02));
+    CHECK(*sampled.state->packet_entities.front().origin.x<=80.0);
+    CHECK(owner.history_size()<=goldsrc::RuntimeOrdinarySnapshotPresentation::maximum_history);
+}
+
+TEST_CASE("E16 ordinary bounce reversal follows only authoritative brackets",
+          "[e16][grenade-smoothing][adaptive-jitter][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;options.ordinary_teleport_distance=512.0;
+    auto current=buffered_ordinary_sample(2.0,0.0,1U);owner.observe(current);
+    REQUIRE(owner.sample(*current,20.0,options,.1));
+    current=buffered_ordinary_sample(2.0625,50.0,2U);owner.observe(current);
+    REQUIRE(owner.sample(*current,20.0625,options,.1));
+    auto outbound=owner.sample(*current,20.09375,options,.1);REQUIRE(outbound);
+    CHECK(*outbound.state->packet_entities.front().origin.x==Approx(25.0));
+
+    // A BOUNCE entity can reverse in the next server observation. Presentation
+    // traverses that authoritative segment; it does not integrate velocity,
+    // gravity, collision, or a speculative local rebound.
+    current=buffered_ordinary_sample(2.125,0.0,3U);const auto immutable=*current;owner.observe(current);
+    auto apex=owner.sample(*current,20.125,options,.1);REQUIRE(apex);
+    CHECK(*apex.state->packet_entities.front().origin.x==Approx(50.0));
+    auto inbound=owner.sample(*current,20.15625,options,.1);REQUIRE(inbound);
+    CHECK(*inbound.state->packet_entities.front().origin.x==Approx(25.0));
+    CHECK(*current==immutable);
 }
 
 TEST_CASE("E16 ordinary spawn history underflow cannot rewind or resurrect a reused server slot",

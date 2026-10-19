@@ -54,7 +54,9 @@ struct WorldEntityPresentationIntent final {
 };
 
 // Selected game policy, not hidden host defaults. This presentation delay and
-// discontinuity profile never changes simulation, wire state or prediction.
+// discontinuity profile never changes simulation or prediction. The application
+// separately reports its actual interpolation reserve in usercmd.lerp_msec;
+// that metadata is not a mutation of any presented entity transform.
 struct RemotePlayerPresentationPolicy final {
     bool enabled{};
     double interpolation_delay_seconds{};

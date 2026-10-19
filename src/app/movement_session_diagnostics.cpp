@@ -76,15 +76,35 @@ struct Counts final {
 #undef HLC_SUM
     }
 };
-struct Aggregate final {Counts counts;std::array<Histogram,metric_count> metrics;};
+struct ProducerMaximum final {
+    std::uint64_t events{};
+    double maximum{};
+    std::uint64_t event{},network{},map{},life{},deaths{},source{};
+    void observe(const core::MovementCorrectionWitness& witness) noexcept {
+        ++events;
+        if(events==1 || *witness.raw_position_error>maximum){
+            maximum=*witness.raw_position_error;event=witness.event_ordinal;
+            network=witness.network_generation;map=witness.map_generation;
+            life=witness.life_epoch;deaths=witness.life_deaths;source=witness.source_record_identity;
+        }
+    }
+    void merge(const ProducerMaximum& other) noexcept {
+        const auto total=add(events,other.events);
+        if(other.events && (!events || other.maximum>maximum))*this=other;
+        events=total;
+    }
+};
+struct Aggregate final {Counts counts;std::array<Histogram,metric_count> metrics;ProducerMaximum producer;};
 struct Bin final {
     Counts counts,controlled;
     std::array<Metric,metric_count> metrics;
     std::array<std::uint64_t,cohort_count> cohort_frames{};
     std::uint64_t first_us{},last_us{},generation_boundaries{},datagrams_delta{},rejected_sequences_delta{},choke_markers_delta{};
     std::uint64_t manual_markers{},first_manual_marker_us{},last_manual_marker_us{};
+    ProducerMaximum producer;
     void merge(const Bin& other) noexcept {
-        if(!other.counts.frames && !other.manual_markers)return;
+        if(!other.counts.frames && !other.manual_markers && !other.producer.events)return;
+        producer.merge(other.producer);
         if(other.counts.frames){if(!counts.frames)first_us=other.first_us;
             else first_us=std::min(first_us,other.first_us);}
         if(other.manual_markers){if(!manual_markers)first_manual_marker_us=other.first_manual_marker_us;
@@ -134,6 +154,7 @@ struct PacingEpisode final {
     std::uint64_t ordinal{},begin_us{},end_us{},first_frame{},last_frame{},worst_frame{},network{},map{},slow_frames{};
     double total_frame_ms{},maximum_frame_ms{};
     std::array<std::optional<double>,12> worst_timings{};
+    std::optional<core::PredictionWorkDiagnostics> prediction_work;
     std::optional<std::uint32_t> players,entities;
     std::optional<bool> prediction_active;
     PacingEnd end{PacingEnd::observing};
@@ -168,6 +189,7 @@ struct FramePacing final {
         if(*frame.frame_interval_ms>active.maximum_frame_ms){
             active.maximum_frame_ms=*frame.frame_interval_ms;active.worst_frame=frame.frame_number;
             for(std::size_t i=0;i<active.worst_timings.size();++i)active.worst_timings[i]=frame.*metric_members[i];
+            active.prediction_work=frame.prediction_work;
             active.players=frame.observed_players;active.entities=frame.entities;active.prediction_active=frame.prediction_active;
         }
     }
@@ -185,6 +207,14 @@ template<typename T>std::string scalar(const std::optional<T> value){return valu
 template<typename T>void field(std::string& output,const std::string_view name,const T value) {
     output+=',';output+=core::external_json_string(name);output+=':';output+=scalar(value);
 }
+std::string encode_prediction_work(const std::optional<core::PredictionWorkDiagnostics>& value) {
+    if(!value)return "null";
+    std::string output="{\"command_ms\":"+scalar(value->command_ms);
+    field(output,"replay_ms",value->replay_ms);field(output,"collision_query_ms",value->collision_query_ms);
+    field(output,"trace_queries",value->trace_queries);field(output,"position_queries",value->position_queries);
+    field(output,"contents_queries",value->contents_queries);field(output,"traversal_steps",value->traversal_steps);
+    return output+'}';
+}
 std::string encode_counts(const Counts& counts) {
     std::string output="{\"frames\":"+scalar(counts.frames);
 #define HLC_FIELD(name) field(output,#name,counts.name)
@@ -201,13 +231,33 @@ std::string encode_metric(const Metric& metric) {
     field(output,"mean",metric.observed?std::optional{metric.sum/static_cast<double>(metric.observed)}:std::optional<double>{});
     field(output,"maximum",metric.observed?std::optional{metric.maximum}:std::optional<double>{});return output;
 }
-std::string encode_aggregate(const Aggregate& aggregate) {
+std::string encode_producer_maximum(const ProducerMaximum& maximum,
+    const std::span<const core::MovementCorrectionWitness> retained) {
+    std::string output="{\"events\":"+scalar(maximum.events);
+    field(output,"raw_error",maximum.events?std::optional{maximum.maximum}:std::optional<double>{});
+    bool available{};
+    output+=",\"witness_identity\":";
+    if(maximum.events){
+        output+="{\"event_ordinal\":"+scalar(maximum.event);field(output,"network_generation",maximum.network);
+        field(output,"map_generation",maximum.map);field(output,"life_epoch",maximum.life);
+        field(output,"life_deaths",maximum.deaths);field(output,"source_record_identity",maximum.source);output+='}';
+        available=std::any_of(retained.begin(),retained.end(),[&](const auto& witness){
+            return witness.event_ordinal==maximum.event && witness.network_generation==maximum.network &&
+                witness.map_generation==maximum.map && witness.life_epoch==maximum.life &&
+                witness.life_deaths==maximum.deaths && witness.source_record_identity==maximum.source;
+        });
+    }else output+="null";
+    output+=",\"status\":"+core::external_json_string(!maximum.events?"not_measured":available?"available":"witness_missing");
+    output+=",\"scope\":\"exact_producer_events_not_legacy_frame_ordinal_samples\"}";return output;
+}
+std::string encode_aggregate(const Aggregate& aggregate,
+    const std::span<const core::MovementCorrectionWitness> retained) {
     std::string output="{\"counts\":"+encode_counts(aggregate.counts)+",\"metrics\":{";
     for(std::size_t i=0;i<metric_count;++i){if(i)output+=',';const auto& histogram=aggregate.metrics[i];
         output+=core::external_json_string(metric_names[i])+':'+encode_metric(histogram.metric);
         field(output,"not_available",histogram.not_available);field(output,"p50_upper_bound",histogram.quantile(50));
         field(output,"p95_upper_bound",histogram.quantile(95));field(output,"p99_upper_bound",histogram.quantile(99));output+='}';}
-    output+="}}";return output;
+    output+="},\"producer_correction_maximum\":"+encode_producer_maximum(aggregate.producer,retained)+'}';return output;
 }
 std::string encode_counter(const Counter& counter) {
     std::string output="{\"delta\":"+scalar(counter.delta);field(output,"observed_frames",counter.observed);
@@ -246,6 +296,7 @@ std::string encode_pacing(const FramePacing& source) {
         field(output,"recovery_observed",episode.end==PacingEnd::recovered);
         output+=",\"end_status\":"+core::external_json_string(endings[static_cast<std::size_t>(episode.end)]);
         field(output,"observed_players",episode.players);field(output,"entities",episode.entities);field(output,"prediction_active",episode.prediction_active);
+        output+=",\"prediction_work\":"+encode_prediction_work(episode.prediction_work);
         output+=",\"worst_frame_timings\":{";
         for(std::size_t timing=0;timing<episode.worst_timings.size();++timing){if(timing)output+=',';
             output+=core::external_json_string(metric_names[timing])+':'+scalar(episode.worst_timings[timing]);}
@@ -273,6 +324,8 @@ struct MovementSessionRecorder::Impl final {
     std::uint64_t duplicate_or_unordered_frames{};
     std::uint64_t manual_markers{},manual_markers_rejected{};
     std::uint64_t frame_interval_context_unattributed{};
+    std::uint64_t producer_unbucketed_events{},producer_duplicates{};
+    std::uint64_t last_producer_event{},last_producer_network{},last_producer_map{};
     std::size_t previous_cohort{},gpu_next{};
 
     std::size_t bin_index(const std::uint64_t time) noexcept {
@@ -377,6 +430,24 @@ void MovementSessionRecorder::observe(const Record& frame,const MovementFrameCon
     state.previous_cohort=sample_cohort;state.previous_prediction_active=frame.prediction_active;state.life_epoch=context.life_epoch;
     if(frame.gpu_ms)static_cast<void>(observe_gpu(frame.frame_number,*frame.gpu_ms));
 }
+void MovementSessionRecorder::observe_correction(const core::MovementCorrectionWitness& witness,
+    const MovementFrameContext& context) noexcept {
+    if(!impl_ || !witness.event_ordinal || !witness.raw_position_error ||
+        !std::isfinite(*witness.raw_position_error) || *witness.raw_position_error<0 ||
+        *witness.raw_position_error>histogram_bounds.back())return;
+    auto& state=*impl_;
+    if(state.last_producer_network==witness.network_generation && state.last_producer_map==witness.map_generation &&
+        witness.event_ordinal<=state.last_producer_event){++state.producer_duplicates;return;}
+    state.last_producer_network=witness.network_generation;state.last_producer_map=witness.map_generation;
+    state.last_producer_event=witness.event_ordinal;
+    state.totals.producer.observe(witness);state.cohorts[cohort(context)].producer.observe(witness);
+    // A seed before the first presented frame has no frame-timeline anchor.
+    // Keep its exact total/cohort identity and expose this attribution gap.
+    if(!witness.observed_us || !state.first_us || *witness.observed_us<*state.first_us){
+        ++state.producer_unbucketed_events;return;
+    }
+    state.bins[state.bin_index(*witness.observed_us)].producer.observe(witness);
+}
 bool MovementSessionRecorder::observe_gpu(const std::uint64_t frame_number,const double gpu_ms) noexcept {
     if(!impl_)return false;auto& state=*impl_;
     if(!std::isfinite(gpu_ms) || gpu_ms<0 || gpu_ms>histogram_bounds.back()){++state.gpu_invalid;return false;}
@@ -403,9 +474,10 @@ MovementSessionStatistics MovementSessionRecorder::statistics() const noexcept {
     result.fallback_entries=state.totals.counts.fallback_entries;
     result.gpu_observations=state.gpu_observations;result.gpu_duplicates=state.gpu_duplicates;result.gpu_unmatched=state.gpu_unmatched;result.gpu_invalid=state.gpu_invalid;
     result.timeline_bucket_width_us=state.bucket_width_us;result.timeline_compactions=state.compactions;result.allocated_capacity_bytes=sizeof(Impl);
-    for(const auto& bin:state.bins)if(bin.counts.frames || bin.manual_markers)++result.timeline_bins;return result;
+    for(const auto& bin:state.bins)if(bin.counts.frames || bin.manual_markers || bin.producer.events)++result.timeline_bins;return result;
 }
-std::optional<std::string> MovementSessionRecorder::encode() const {
+std::optional<std::string> MovementSessionRecorder::encode(
+    const std::span<const core::MovementCorrectionWitness> retained_witnesses) const {
     try {
         std::string output="{\"schema\":\"hlclient.movement-session.v1\",\"requested\":"+scalar(requested_);
         field(output,"enabled",enabled());field(output,"allocated_capacity_bytes",capacity_bytes());
@@ -422,13 +494,14 @@ std::optional<std::string> MovementSessionRecorder::encode() const {
         for(std::size_t i=0;i<histogram_bounds.size();++i){if(i)output+=',';output+=scalar(histogram_bounds[i]);}
         output+="],\"input_policy\":\"accepted_sanitized_0_to_1000000000\"}";
         output+=",\"metric_semantics\":{\"cpu_update\":\"inclusive_overlaps_other_stages_do_not_sum\",\"state_age\":\"coherent_commit_age_not_latency_or_loss\","
+            "\"prediction_work\":\"durations_overlap_prediction_ms_collision_query_ms_is_subset_counts_are_actual_calls_traversal_steps_are_successfully_reported\","
             "\"correction\":\"latest_raw_error_snapshot_on_observed_ordinal_advance_not_all_corrections\","
             "\"camera_jump\":\"sticky_snapshot_on_ordinal_observation_not_exact_per_correction_delta\","
             "\"fallback_duration\":\"sticky_current_fallback_duration_snapshot_not_additive\","
             "\"cohort_frame_intervals\":\"cross_context_life_generation_and_first_intervals_only_in_totals\","
             "\"threshold_counts\":\"absolute_frame_intervals_not_cause_or_refresh_target_verdict\"}";
-        output+=",\"totals\":"+encode_aggregate(state.totals)+",\"cohorts\":{";
-        for(std::size_t i=0;i<cohort_count;++i){if(i)output+=',';output+=core::external_json_string(cohort_names[i])+':'+encode_aggregate(state.cohorts[i]);}
+        output+=",\"totals\":"+encode_aggregate(state.totals,retained_witnesses)+",\"cohorts\":{";
+        for(std::size_t i=0;i<cohort_count;++i){if(i)output+=',';output+=core::external_json_string(cohort_names[i])+':'+encode_aggregate(state.cohorts[i],retained_witnesses);}
         output+="},\"counter_deltas\":{\"scope\":\"owned_peer\",\"first_observation\":\"baseline_not_delta\",\"rejected_sequence_is_packet_loss\":false,"
             "\"choke_marker_is_server_load_proof\":false,\"datagrams_received\":"+encode_counter(state.datagrams)+",\"rejected_sequences\":"+
             encode_counter(state.rejected_sequences)+",\"choke_markers\":"+encode_counter(state.choke_markers)+'}';
@@ -440,6 +513,8 @@ std::optional<std::string> MovementSessionRecorder::encode() const {
         field(output,"duplicate_or_unordered_frames",state.duplicate_or_unordered_frames);
         field(output,"manual_markers",state.manual_markers);field(output,"manual_markers_rejected",state.manual_markers_rejected);
         field(output,"frame_interval_context_unattributed",state.frame_interval_context_unattributed);
+        field(output,"producer_unbucketed_events",state.producer_unbucketed_events);
+        field(output,"producer_duplicates",state.producer_duplicates);
         output+="},\"gpu\":{\"policy\":\"delayed_frame_identity_original_cohort_and_bucket\"";
         field(output,"identity_capacity",maximum_gpu_identities);field(output,"observations",state.gpu_observations);field(output,"duplicates",state.gpu_duplicates);
         field(output,"unmatched",state.gpu_unmatched);field(output,"invalid",state.gpu_invalid);output+='}';
@@ -447,7 +522,7 @@ std::optional<std::string> MovementSessionRecorder::encode() const {
         output+=",\"fallback_reasons\":"+encode_reasons(state.fallback_reasons)+",\"presentation_reasons\":"+encode_reasons(state.presentation_reasons);
         output+=",\"timeline\":{\"bucket_width_us\":"+scalar(state.bucket_width_us);field(output,"compactions",state.compactions);
         field(output,"maximum_bins",maximum_timeline_bins);output+=",\"policy\":\"whole_session_power_of_two_time_buckets_empty_buckets_omitted\",\"bins\":[";bool first=true;
-        for(std::size_t index=0;index<state.bins.size();++index){const auto& bin=state.bins[index];if(!bin.counts.frames && !bin.manual_markers)continue;
+        for(std::size_t index=0;index<state.bins.size();++index){const auto& bin=state.bins[index];if(!bin.counts.frames && !bin.manual_markers && !bin.producer.events)continue;
             if(!first)output+=',';first=false;const auto begin=add(*state.first_us,static_cast<std::uint64_t>(index)*state.bucket_width_us);
             output+="{\"begin_us\":"+scalar(begin);field(output,"end_us",add(begin,state.bucket_width_us));
             field(output,"first_sample_us",bin.counts.frames?std::optional{bin.first_us}:std::optional<std::uint64_t>{});
@@ -459,7 +534,8 @@ std::optional<std::string> MovementSessionRecorder::encode() const {
             for(std::size_t i=0;i<cohort_count;++i){if(i)output+=',';output+=core::external_json_string(cohort_names[i])+':'+scalar(bin.cohort_frames[i]);}
             output+="},\"metrics\":{";
             for(std::size_t i=0;i<metric_count;++i){if(i)output+=',';output+=core::external_json_string(metric_names[i])+':'+encode_metric(bin.metrics[i])+'}';}
-            output+='}';field(output,"generation_boundaries",bin.generation_boundaries);field(output,"datagrams_delta",bin.datagrams_delta);
+            output+="},\"producer_correction_maximum\":"+encode_producer_maximum(bin.producer,retained_witnesses);
+            field(output,"generation_boundaries",bin.generation_boundaries);field(output,"datagrams_delta",bin.datagrams_delta);
             field(output,"rejected_sequences_delta",bin.rejected_sequences_delta);field(output,"choke_markers_delta",bin.choke_markers_delta);output+='}';
         }
         output+="]}}";if(output.size()>maximum_encoded_bytes)return {};return output;

@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <hlclient/app/runtime_replay_local_assets.hpp>
+#include <hlclient/app/remote_support_presentation.hpp>
 #include <hlclient/goldsrc/reference_brush_collision.hpp>
 #include <hlclient/collision/collision_world_query.hpp>
 #include <hlclient/client/client_scene_source.hpp>
@@ -8,6 +10,7 @@
 #include <hlclient/world_visibility/world_view_frustum.hpp>
 #include <hlclient/entity_render/entity_render_frame_composer.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/byte_reader.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_worldspawn_wad_references.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_brush_entity.hpp>
@@ -32,6 +35,7 @@
 #include <hlclient/world_spatial/world_spatial_query.hpp>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace hlclient::app {
@@ -282,6 +286,30 @@ namespace g = goldsrc;
 namespace v = entity_visual;
 namespace r = entity_render;
 
+// Existing StudioPoseCache deliberately coalesces normalized frame keys. This
+// local cache instead retains the complete raw input (including source-frame
+// metadata) and the exact sealed skeletal object as well as resource revision.
+// It is only an optimization: failures and capacity pressure keep the ordinary
+// evaluator path, and its storage dies with this one materialization call.
+struct OrdinaryFramePose {
+  const assets::SkeletalModelAssetData* model{};
+  g::studio::StudioPoseModelIdentity identity;
+  g::studio::StudioPoseInput input;
+  std::shared_ptr<const g::studio::StudioPoseEvaluationResult> result;
+};
+static_assert(std::is_nothrow_move_constructible_v<g::studio::StudioPoseEvaluationResult>);
+bool exact_ordinary_pose_input(const g::studio::StudioPoseInput& a,
+                               const g::studio::StudioPoseInput& b) noexcept {
+  return a.sequence_index==b.sequence_index &&
+      std::bit_cast<std::uint64_t>(a.frame_coordinate)==std::bit_cast<std::uint64_t>(b.frame_coordinate) &&
+      a.body_value==b.body_value && a.skin_family_index==b.skin_family_index &&
+      a.controller_values==b.controller_values && a.blending_values==b.blending_values &&
+      a.mouth_value==b.mouth_value && a.compatibility_profile==b.compatibility_profile &&
+      std::bit_cast<std::uint32_t>(a.entity_scale.x)==std::bit_cast<std::uint32_t>(b.entity_scale.x) &&
+      std::bit_cast<std::uint32_t>(a.entity_scale.y)==std::bit_cast<std::uint32_t>(b.entity_scale.y) &&
+      std::bit_cast<std::uint32_t>(a.entity_scale.z)==std::bit_cast<std::uint32_t>(b.entity_scale.z);
+}
+
 // Neutral, bounded downward probe over the already validated world triangles.
 // Interpolated atlas UVs use the same selected static style as world rendering.
 // No BSP reparse, asset open, visibility dependency or game material names.
@@ -350,11 +378,82 @@ RuntimeReplayVisualProjectionError visual_error(std::string text) {
           std::move(text)};
 }
 
+class AssetPreparationCancelled final : public std::exception {
+public:
+  const char* what() const noexcept override {return "asset_preparation_cancelled";}
+};
+void check_preparation(const std::shared_ptr<LoadingWork>& work) {
+  if(work && work->cancelled.load())throw AssetPreparationCancelled{};
+}
+void preparation_progress(const std::shared_ptr<LoadingWork>& work,const LoadingStage stage,
+    const std::size_t done=0U,const std::size_t total=0U) {
+  if(done>(std::numeric_limits<std::uint32_t>::max)() ||
+      total>(std::numeric_limits<std::uint32_t>::max)())
+    throw std::runtime_error{"asset preparation progress count exceeds its bounded mailbox"};
+  if(work && !work->progress(stage,static_cast<std::uint32_t>(done),static_cast<std::uint32_t>(total)))
+    throw AssetPreparationCancelled{};
+}
+
+// ReHLDS engine/crc.cpp::CRC_MapFile and sv_main.cpp::SV_SpawnServer;
+// Xash engine/common/mod_bmodel.c::CRC32_MapFile. The multiplayer checksum
+// starts at all ones and has NO final complement. Only ordered BSP lumps
+// 1..14 participate: entity patches, directory offsets and padding do not.
+// This validates the bounded directory for checksum access; the canonical
+// BSP importer still independently validates all geometry and references.
+std::optional<std::uint32_t> live_hl_map_crc(
+    const std::span<const std::byte> bytes,
+    const std::shared_ptr<LoadingWork>& loading_work) {
+  namespace bsp = g::bsp;
+  if (bytes.size() < bsp::kGoldSrcBspHeaderWireSize ||
+      bytes.size() > bsp::kGoldSrcBspDefaultMaximumSourceBytes) return {};
+  g::ByteReader reader{bytes};
+  if (reader.read_int32_le() != bsp::kGoldSrcBspVersion) return {};
+  std::array<std::pair<std::size_t, std::size_t>, bsp::kGoldSrcBspLumpCount> ranges{};
+  for (auto& [offset, length] : ranges) {
+    const auto wire_offset = reader.read_int32_le();
+    const auto wire_length = reader.read_int32_le();
+    if (!wire_offset || !wire_length || *wire_offset < 0 || *wire_length < 0) return {};
+    offset = static_cast<std::size_t>(*wire_offset);
+    length = static_cast<std::size_t>(*wire_length);
+    if (offset > bytes.size() || length > bytes.size() - offset ||
+        (length != 0U && offset < bsp::kGoldSrcBspHeaderWireSize)) return {};
+  }
+  for (std::size_t left = 0U; left < ranges.size(); ++left) {
+    if (ranges[left].second == 0U) continue;
+    for (std::size_t right = left + 1U; right < ranges.size(); ++right) {
+      if (ranges[right].second != 0U &&
+          ranges[left].first < ranges[right].first + ranges[right].second &&
+          ranges[right].first < ranges[left].first + ranges[left].second) return {};
+    }
+  }
+  static constexpr auto table = [] {
+    std::array<std::uint32_t, 256U> values{};
+    for (std::uint32_t index = 0U; index < values.size(); ++index) {
+      auto value = index;
+      for (unsigned bit = 0U; bit < 8U; ++bit)
+        value = (value >> 1U) ^ ((value & 1U) ? 0xedb88320U : 0U);
+      values[index] = value;
+    }
+    return values;
+  }();
+  std::uint32_t crc = 0xffffffffU;
+  for (std::size_t index = 1U; index < ranges.size(); ++index) {
+    const auto [offset, length] = ranges[index];
+    const auto lump = bytes.subspan(offset, length);
+    for (std::size_t position = 0U; position < lump.size(); ++position) {
+      if ((position & 0xffffU) == 0U) check_preparation(loading_work);
+      crc = (crc >> 8U) ^ table[(crc ^ std::to_integer<std::uint8_t>(lump[position])) & 255U];
+    }
+  }
+  return crc;
+}
+
 g::ApprovedAssetSource open_source(
     const g::PrecacheManifestState &manifest,
     const g::PrecacheManifestEntry &entry,
     const std::shared_ptr<const local_resources::LocalResourceEnvironment>
-        &environment) {
+        &environment,const std::shared_ptr<LoadingWork>& loading_work) {
+  check_preparation(loading_work);
   auto plan = g::AssetDispatchPlanBuilder{}.build(manifest, entry);
   if (!plan) {
     throw std::runtime_error{"asset dispatch plan rejected"};
@@ -367,8 +466,10 @@ g::ApprovedAssetSource open_source(
   for (std::size_t i = 0;
        i < 65536U && !opened.operation->result() && !opened.operation->error();
        ++i) {
+    check_preparation(loading_work);
     opened.operation->update(std::chrono::steady_clock::now());
   }
+  check_preparation(loading_work);
   auto result = opened.operation->take_result();
   if (!result) {
     throw std::runtime_error{opened.operation->error()
@@ -433,9 +534,10 @@ std::optional<client::RenderCameraState> spectator_camera(
 ReplayLocalAssetsCreateResult
 RuntimeReplayLocalAssets::create(const g::RuntimeReplayCaptureState &capture,
                                  const std::filesystem::path &basedir,
-                                 const std::string_view game) {
+                                 const std::string_view game,
+                                 std::shared_ptr<LoadingWork> loading_work) {
   return create(capture.resources(), capture.server_info(), basedir, game,
-                ReplayLocalCameraPolicy::offline_spectator);
+                ReplayLocalCameraPolicy::offline_spectator,{},{},{},std::move(loading_work));
 }
 
 ReplayLocalAssetsCreateResult
@@ -446,9 +548,15 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
                                  const ReplayLocalCameraPolicy camera_policy,
                                  const std::string_view effect_palette_dependency,
                                  const std::span<const std::string> effect_sprite_dependencies,
-                                 const std::string_view sky_name) {
+                                 const std::string_view sky_name,
+                                 std::shared_ptr<LoadingWork> loading_work,
+                                 const ReplayLocalResourcePolicy resource_policy) {
   std::unique_ptr<RuntimeReplayLocalAssets> result;
   try {
+    preparation_progress(loading_work,LoadingStage::resources);
+    if (resource_policy != ReplayLocalResourcePolicy::recorded_exact_size &&
+        resource_policy != ReplayLocalResourcePolicy::live_standard_hl)
+      throw std::runtime_error{"invalid local resource validation policy"};
     result.reset(new RuntimeReplayLocalAssets);
     result->camera_policy_ = camera_policy;
     auto roots =
@@ -471,11 +579,13 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     g::GoldSrcResourceNameMapper mapper;
     auto inventory = g::LocalResourceInventoryBuilder{}.build(
         resources, mapper, environment->resolver());
+    check_preparation(loading_work);
     if (!inventory) {
       throw std::runtime_error{"captured resource inventory rejected"};
     }
     auto manifest = g::PrecacheManifestBuilder{}.build(
         resources, *inventory.state, server_info, mapper, *environment);
+    check_preparation(loading_work);
     if (!manifest || !manifest.state->world_geometry_ready() ||
         !manifest.state->world_entry()) {
       const auto safe_map=local_resources::LocalVirtualResourceName::create(server_info.map_file_path());
@@ -485,9 +595,12 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
               manifest.error ? g::to_string(manifest.error->code) : std::string_view{"unavailable"}}};
     }
     auto &summary = result->summary_;
+    std::size_t checked_resources{};
     for(const auto& entry:inventory.state->entries()) {
+      preparation_progress(loading_work,LoadingStage::resources,checked_resources++,inventory.state->entries().size());
       if(entry.status()==g::LocalResourceInventoryStatus::resolved) continue;
       const auto& wire=resources.entries()[entry.wire_ordinal()];
+      if (!g::resource_has_bindable_index(wire.type(), entry.resource_index())) continue;
       const auto mapped=mapper.classify(wire.type(),wire.name().bytes());
       if(mapped.kind()==g::GoldSrcResourceNameClassificationKind::metadata_only ||
           wire.name().bytes().starts_with('*')) continue;
@@ -497,11 +610,14 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
           std::string{g::to_string(entry.status())},entry.resource_index(),
           static_cast<std::uint8_t>(entry.resource_type())});
     }
+    preparation_progress(loading_work,LoadingStage::resources,checked_resources,checked_resources);
     result->maximum_clients_=server_info.maximum_clients().value();
     result->sound_resources_={std::make_shared<const g::PrecacheManifestState>(*manifest.state),environment};
     result->player_model_assets_=std::make_shared<g::ApprovedPlayerModelAssets>(result->sound_resources_);
     result->movement_materials_=read_movement_materials(environment,*manifest.state->world_entry());
+    check_preparation(loading_work);
     result->effect_palette_=read_effect_palette(effect_palette_dependency,environment,*manifest.state->world_entry());
+    check_preparation(loading_work);
     summary.map = server_info.map_file_path();
     summary.precache_completeness =
         g::to_string(manifest.state->completeness());
@@ -515,13 +631,22 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
         ++summary.size_unavailable;
         return;
       }
-      if (!entry.local_file_size() || *entry.local_file_size() != code) {
+      if (!entry.local_file_size()) {
+        throw std::runtime_error{"approved local resource size unavailable at model slot " +
+            std::to_string(entry.resource_index())};
+      }
+      if (*entry.local_file_size() != code) {
+        if (resource_policy == ReplayLocalResourcePolicy::live_standard_hl) {
+          ++summary.size_mismatches;
+          return;
+        }
         throw std::runtime_error{
             "captured/local resource size mismatch at model slot " +
             std::to_string(entry.resource_index())};
       }
       ++summary.size_matches;
     };
+    preparation_progress(loading_work,LoadingStage::map);
     check_size(*manifest.state->world_entry());
     assets::AssetImporterRegistries registries;
     if (!g::register_builtin_asset_importers(
@@ -529,11 +654,44 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       throw std::runtime_error{"builtin importer registration failed"};
     }
     auto world_source = open_source(
-        *manifest.state, *manifest.state->world_entry(), environment);
+        *manifest.state, *manifest.state->world_entry(), environment,loading_work);
+    if (resource_policy == ReplayLocalResourcePolicy::live_standard_hl) {
+      const auto actual_crc = live_hl_map_crc(world_source.source().bytes(), loading_work);
+      if (!actual_crc)
+        throw std::runtime_error{"map_crc_invalid_bsp: approved map has an invalid bounded BSP30 directory"};
+      const bool multiplayer = server_info.maximum_clients().value() > 1U;
+      // Stock GoldSrc uses zero for singleplayer, not a map-content checksum.
+      // Zero is not treated as an unavailable/wildcard checksum in multiplayer.
+      const auto expected_crc = multiplayer ? *actual_crc : 0U;
+      if (expected_crc != server_info.world_map_crc()) {
+        const auto safe_map = local_resources::LocalVirtualResourceName::create(
+            server_info.map_file_path());
+        const auto name = safe_map ? safe_map.name->value()
+                                   : std::string_view{"rejected_virtual_name"};
+        // Bounded, escaped server virtual name only; never a native path.
+        std::string diagnostic_name;
+        std::size_t retained = 0U;
+        for (const char value : name) {
+          const auto needed = value == '"' ? 2U : 1U;
+          if (diagnostic_name.size() + needed > 128U) break;
+          if (value == '"') diagnostic_name.push_back('\\');
+          diagnostic_name.push_back(value);
+          ++retained;
+        }
+        throw std::runtime_error{"map_crc_mismatch: expected=" +
+            std::to_string(server_info.world_map_crc()) + " actual=" +
+            std::to_string(expected_crc) + " multiplayer=" +
+            std::to_string(multiplayer ? 1U : 0U) + " virtual=\"" +
+            diagnostic_name + "\" truncated=" +
+            std::to_string(retained != name.size() ? 1U : 0U)};
+      }
+      summary.world_crc_verified = multiplayer;
+    }
     auto world_plan = g::AssetDispatchPlanBuilder{}.build(
         *manifest.state, *manifest.state->world_entry());
     auto imported = g::ApprovedAssetImporterDispatcher{registries}.dispatch(
         world_source, *world_plan.plan);
+    check_preparation(loading_work);
     if (!imported.imported() ||
         !std::holds_alternative<assets::WorldAsset>(*imported.asset)) {
       throw std::runtime_error{imported.error ? imported.error->context
@@ -547,6 +705,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     }
     const auto collision = g::collision::GoldSrcCollisionWorldBuilder::build(
         attachment->collision_source());
+    check_preparation(loading_work);
     if (!collision) {
       throw std::runtime_error{collision.error->context};
     }
@@ -582,6 +741,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       return {};
     };
     g::GoldSrcWorldTextureImportLimits texture_limits;
+    preparation_progress(loading_work,LoadingStage::textures);
     texture_limits.missing_texture_policy = g::MissingWorldTexturePolicy::placeholder_for_absent_name;
     auto textures = g::WorldTextureImportOperation::begin(
         world, world_source.source().bytes(), environment, texture_limits);
@@ -590,8 +750,10 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     }
     for (std::size_t i = 0; i < 100000U && !textures.operation->terminal();
          ++i) {
+      check_preparation(loading_work);
       textures.operation->update(std::chrono::steady_clock::now());
     }
+    check_preparation(loading_work);
     auto texture_set = textures.operation->take_result();
     if (!texture_set) {
       if (const auto* failure = textures.operation->error(); failure && failure->archive_ordinal) {
@@ -613,12 +775,14 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     summary.missing_texture_placeholder_bindings = texture_set->statistics().placeholder_material_count;
     auto lightmaps = g::lightmaps::GoldSrcWorldLightmapImporter::import(
         world, world_source.source().bytes());
+    check_preparation(loading_work);
     if (!lightmaps) {
       throw std::runtime_error{lightmaps.error->context};
     }
     auto world_package = world_render::WorldRenderPackageBuilder{}.build(
         {std::move(world), std::move(*texture_set)},
         std::move(*lightmaps.lightmap_set));
+    check_preparation(loading_work);
     if (!world_package) {
       throw std::runtime_error{world_package.error->context};
     }
@@ -626,12 +790,14 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
         std::move(*world_package.package));
     result->sky_assets_=g::prepare_sky_assets(result->sound_resources_,sky_name,
         attachment->document().entity_lump_bytes);
+    check_preparation(loading_work);
 
     const auto& document = attachment->document();
     g::brush_models::GoldSrcBrushRenderLibraryLimits brush_limits;
     brush_limits.textures = texture_limits;
     auto brushes = g::brush_models::GoldSrcBrushRenderLibraryBuilder::build(
         document, world_source.source().bytes(), environment, brush_limits);
+    check_preparation(loading_work);
     if (!brushes) {
       if (brushes.error && brushes.error->texture_incomplete_reason) {
         const auto& incomplete = *brushes.error->texture_incomplete_reason;
@@ -651,17 +817,21 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
         spatial.marksurface_face_ordinals, spatial.visibility_bytes,
         spatial.world_model, spatial.source_face_count,
         document.world_asset.surfaces, spatial.submodel_face_ordinals});
+    check_preparation(loading_work);
     if (!spatial_package) throw std::runtime_error{"brush spatial preparation failed"};
     auto scene = world_scene_render::WorldSceneRenderPackageBuilder{}.build(
         result->world_, std::move(*spatial_package.package),
         std::move(*brushes.library)); // No BSP metadata instances in the live scene.
+    check_preparation(loading_work);
     if (!scene) throw std::runtime_error{scene.error->context};
     result->world_scene_ = std::make_shared<const world_scene_render::WorldSceneRenderPackage>(
         std::move(*scene.package));
     summary.prepared_brush_models = result->world_scene_->brush_library().models().size();
 
+    preparation_progress(loading_work,LoadingStage::models);
     std::vector<v::EntityVisualModelReference> references;
     for (const auto &entry : manifest.state->entries()) {
+      check_preparation(loading_work);
       if (entry.resource_type() != g::ResourceType::model ||
           &entry == manifest.state->world_entry()) {
         continue;
@@ -708,8 +878,10 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     v::EntityVisualAssetLibraryLimits limits;
     // Offline preparation uses the existing per-operation bounded batches.
     constexpr std::size_t batch_size = 8U;
+    preparation_progress(loading_work,LoadingStage::models,0U,references.size());
     for (std::size_t first = 0; first < references.size();
          first += batch_size) {
+      check_preparation(loading_work);
       const auto batch =
           std::span<const v::EntityVisualModelReference>{references}.subspan(
               first, std::min(batch_size, references.size() - first));
@@ -721,10 +893,11 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       }
       std::vector<v::EntityVisualAssetImportCompletion> completions;
       for (const auto &request : plan.plan->requests()) {
+        check_preparation(loading_work);
         auto source = open_source(
             *manifest.state,
             manifest.state->entries()[request.manifest_entry_offset()],
-            environment);
+            environment,loading_work);
         auto operation =
             g::visual_assets::GoldSrcVisualAssetImportOperation::begin(
                 source, environment, registries);
@@ -733,8 +906,10 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
         }
         for (std::size_t i = 0; i < 65536U && !operation.operation->terminal();
              ++i) {
+          check_preparation(loading_work);
           operation.operation->update(std::chrono::steady_clock::now());
         }
+        check_preparation(loading_work);
         auto asset = operation.operation->take_result();
         if (!asset) {
           const auto &failure = operation.operation->error();
@@ -807,6 +982,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       }
       result->library_ = published.library;
       for (const auto &entry : published.bindings) {
+        check_preparation(loading_work);
         auto status = ReplayLocalVisualStatus::unsupported_asset;
         if (entry.selected_category() ==
             v::EntityVisualBindingCategory::missing) {
@@ -831,6 +1007,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
         result->bindings_.try_emplace(entry.model_reference().value(),
                                       Binding{status, {}, {}});
       }
+      preparation_progress(loading_work,LoadingStage::models,first+batch.size(),references.size());
     }
     if (!result->library_) {
       auto plan = v::EntityVisualAssetLibraryBuilder{}.plan_references(
@@ -845,6 +1022,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       }
       result->library_ = published.library;
     }
+    preparation_progress(loading_work,LoadingStage::scene);
     r::EntitySceneRenderPackageCreateInfo package;
     package.asset_library = result->library_;
     package.asset_library_identity = {result->library_->resource_id(),
@@ -852,6 +1030,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     package.resource_id = package_id;
     std::vector<Binding> record_bindings;
     for (std::size_t i = 0; i < result->library_->records().size(); ++i) {
+      check_preparation(loading_work);
       const auto &record = result->library_->records()[i];
       const r::EntityRenderResourceIdentity id{record.resource_id(),
                                                record.resource_revision()};
@@ -880,6 +1059,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       }
     }
     for (const auto &reference : result->library_->references()) {
+      check_preparation(loading_work);
       result->bindings_[reference.reference.value()] =
           record_bindings.at(reference.asset_library_index);
     }
@@ -889,6 +1069,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     if(effect_sprite_dependencies.size()>8U) {
       ++result->muzzle_sprite_stats_.rejected;
     } else for(const auto& token:effect_sprite_dependencies) {
+      check_preparation(loading_work);
       const auto reject=[&]{++result->muzzle_sprite_stats_.rejected;};
       if(token.size()>63 || !token.starts_with("sprites/") || !token.ends_with(".spr") ||
           token.substr(8).find('/')!=std::string::npos || token.find("..")!=std::string::npos ||
@@ -909,8 +1090,11 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       open_limits.maximum_source_bytes=maximum_source;open_limits.timeout=std::chrono::seconds{2};
       auto opened=local_assets::LocalAssetSourceOpener{}.begin(*locator.locator,environment,open_limits);
       if(!opened){reject();continue;}
-      for(std::size_t i=0;i<65536 && !opened.operation->result() && !opened.operation->error();++i)
+      for(std::size_t i=0;i<65536 && !opened.operation->result() && !opened.operation->error();++i) {
+        check_preparation(loading_work);
         opened.operation->update(std::chrono::steady_clock::now());
+      }
+      check_preparation(loading_work);
       auto source=opened.operation->take_result();if(!source){reject();continue;}
       g::sprite::GoldSrcSpriteImportLimits sprite_limits;
       sprite_limits.maximum_source_bytes=maximum_source;
@@ -938,12 +1122,14 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     summary.imported_studio = package.studio_assets.size();
     summary.imported_sprites = package.sprite_assets.size();
     auto built = r::EntitySceneRenderPackageBuilder{}.build(std::move(package));
+    check_preparation(loading_work);
     if (!built) {
       throw std::runtime_error{built.error->context};
     }
     result->package_ = std::make_shared<const r::EntitySceneRenderPackage>(
         std::move(*built.package));
     for (const auto& [index,name] : summary.model_names) {
+      check_preparation(loading_work);
       if (name != "models/shell.mdl") continue;
       const auto bound = result->bindings_.find(index);
       if (bound != result->bindings_.end()) {
@@ -953,7 +1139,11 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       }
       break;
     }
+    check_preparation(loading_work);
     return {std::move(result), {}};
+  } catch (const AssetPreparationCancelled&) {
+    return {{},RuntimeReplayVisualProjectionError{
+        RuntimeReplayVisualProjectionErrorCode::asset_preparation_cancelled,{},{},"asset_preparation_cancelled"}};
   } catch (const std::exception &error) {
     return {{}, visual_error(error.what()),
         result ? std::move(result->summary_.resource_issues) :
@@ -991,6 +1181,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::reset_generation(
     target = std::move(candidate);
     previous_entities_.reset();clock_record_=0U; light_cache_.clear(); bone_merge_cache_.reset();
     ordinary_presentation_.reset();ordinary_presentation_.observe(current_entities_);
+    ordinary_animation_.reset();remote_support_contexts_.clear();sampled_brush_scene_.reset();
     player_presentation_.reset();player_presentation_.observe(current_entities_);
     sampled_player_anchors_.clear();sampled_player_previous_.reset();sampled_player_current_.reset();
     sampled_motion_exceptions_.clear();
@@ -1039,7 +1230,8 @@ void RuntimeReplayLocalAssets::invalidate_player_continuity() noexcept {
 RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
     game_api::GameClientHost& game, double application_seconds,
     std::optional<std::uint32_t> receiving_entity, client::ClientWorldState& target,
-    renderer::RenderExtent extent, bool capture_remote_diagnostics) {
+    renderer::RenderExtent extent, bool capture_remote_diagnostics,
+    std::shared_ptr<const goldsrc::collision::BrushCollisionScene> rendered_brush_scene) {
   remote_movement_.clear();remote_movement_valid_=false;
   sampled_motion_exceptions_.clear();
   // Resolve game policy only through approved ready sprite slots. Retain the
@@ -1158,10 +1350,31 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
   if(sampled.selection_status==g::EntitySnapshotPairSelectionStatus::held_only) {
     sampled_previous_seconds_=sampled_current_seconds_; sampled_alpha_=0.0;
   }
+  sampled_brush_scene_=rendered_brush_scene ? std::move(rendered_brush_scene) : impact_brush_scene();
+  if(sampled_brush_scene_ && (remote_support_contexts_.empty() ||
+      remote_support_contexts_.back().revision!=current_entities_->publication_revision ||
+      !remote_support_contexts_.back().scene ||
+      remote_support_contexts_.back().scene->model_library()!=sampled_brush_scene_->model_library())) {
+    std::vector<g::ReferenceBrushCollisionContext> contexts;
+    contexts.reserve(g::RuntimePlayerSnapshotPresentation::maximum_history+1U);
+    const auto append=[&](const std::shared_ptr<const client::RuntimeClientObservationState>& source) {
+      if(!source || (!contexts.empty() && contexts.back().revision==source->publication_revision))return;
+      const auto cached=std::ranges::find(remote_support_contexts_,source->publication_revision,
+          &g::ReferenceBrushCollisionContext::revision);
+      if(cached!=remote_support_contexts_.end() && cached->generation==generation_ && cached->scene &&
+          cached->scene->model_library()==sampled_brush_scene_->model_library())contexts.push_back(std::move(*cached));
+      else contexts.push_back(g::build_reference_brush_collision(sampled_brush_scene_->model_library(),
+          summary_.model_names,*source,generation_));
+    };
+    for(const auto& source:player_presentation_.observations())append(source);
+    append(current_entities_);
+    remote_support_contexts_=std::move(contexts);
+  }
   auto result=project_entities(*ordinary_sample.state,target);
   if(result && capture_remote_diagnostics)capture_remote_movement(*ordinary_sample.state,target);
   sampled_game_=nullptr; sampled_extent_.reset(); sampled_receiving_entity_.reset();
   sampled_player_anchors_.clear();sampled_player_previous_.reset();sampled_player_current_.reset();
+  sampled_brush_scene_.reset();
   return result;
 }
 
@@ -1219,10 +1432,18 @@ void RuntimeReplayLocalAssets::capture_remote_movement(
         row.model_index=latest->model_index.value_or(0U);
         row.raw_main=latest->sequence;row.raw_gait=latest->gait_sequence;
         row.raw_weapon=latest->weapon_model_index;row.raw_effects=latest->effects;
+        row.raw_render_mode=latest->render_mode;row.raw_render_amount=latest->render_amount;
+        row.raw_render_effect=latest->render_effect;
       }
       if(selected) {
         row.selected_main=selected->sequence;row.selected_gait=selected->gait_sequence;
         row.selected_weapon=selected->weapon_model_index;
+      }
+      for(std::size_t i=0U;i<summary_.remote_player_count;++i) {
+        const auto& diagnostic=summary_.remote_players[i];
+        if(diagnostic.entity!=anchor.entity)continue;
+        row.support_entity=diagnostic.support_entity;row.support_model=diagnostic.support_model;
+        row.support_offset_z=diagnostic.support_offset_z;break;
       }
       row.pose_submitted=false;row.visible=false;
       if(const auto& frame=target.entity_frame();frame) {
@@ -1230,6 +1451,7 @@ void RuntimeReplayLocalAssets::capture_remote_movement(
           if(instance.entity_number!=anchor.entity || instance.subinstance_ordinal!=0U)continue;
           row.pose_submitted=true;
           row.visible=instance.visibility_status==r::RuntimeEntityVisibilityStatus::visible;
+          row.rendered_opacity=instance.opacity;
           const auto& position=instance.transform.origin;
           row.rendered_origin=std::array<double,3>{position.x,position.y,position.z};
           break;
@@ -1251,19 +1473,25 @@ std::optional<std::size_t> RuntimeReplayLocalAssets::resolve_player_appearance(
   if(!sampled_game_ || !package_ || !fallback.skeletal_data)return {};
   if(selection.model_name.empty() && !selection.fields.top_color && !selection.fields.bottom_color)return {};
   std::shared_ptr<const assets::ModelAsset> selected;
+  const assets::ModelAsset* source=&fallback;
   if(!selection.model_name.empty()) {
     const auto prepared=player_model_assets_ ? player_model_assets_->request(selection.model_name) : g::PreparedPlayerModel{};
     selection.status=prepared.status;
     if(!prepared.model)return {};
     selected=prepared.model;fingerprint=prepared.revision;
+    source=selected.get();
     const auto& data=*selected->skeletal_data;
     if(!sampled_game_->player_model_compatible(data) || entity.sequence.value_or(0U)>=data.sequences.size() ||
         entity.gait_sequence.value_or(0U)>=data.sequences.size() || entity.skin.value_or(0)<0 ||
         static_cast<std::size_t>(entity.skin.value_or(0))>=data.skin_families.size()) {
       selection.status=Status::pose_incompatible;return {};
     }
-  } else selected=std::make_shared<const assets::ModelAsset>(fallback);
-  const auto ranges=sampled_game_->player_palette(selection.fields,*selected->skeletal_data);
+  }
+  // Borrow the already owned immutable base through the cache lookup. Avoid
+  // allocating/copying its wrapper and source-name string on every color-only
+  // hit (or empty palette); Studio bundles already share their skeletal data.
+  // A palette miss acquires its own owner below; no borrowed pointer escapes.
+  const auto ranges=sampled_game_->player_palette(selection.fields,*source->skeletal_data);
   if(selection.model_name.empty() && ranges.empty())return {};
   std::string key=selection.model_name+":"+std::to_string(base_identity.resource_id)+":"+
       std::to_string(fingerprint.primary)+":"+std::to_string(fingerprint.secondary);
@@ -1273,9 +1501,9 @@ std::optional<std::size_t> RuntimeReplayLocalAssets::resolve_player_appearance(
   if(appearance_variants_.size()>=64U) {selection.status=Status::resource_limit;return {};}
   // Every remap owns its cloned animation graph as well as its pixels. Count
   // all nested track/run vectors before copying; GPU source bytes are added below.
-  const auto model_bytes=g::retained_player_model_bytes(*selected);
+  const auto model_bytes=g::retained_player_model_bytes(*source);
   if(model_bytes>128U*1024U*1024U-appearance_variant_bytes_) {selection.status=Status::resource_limit;return {};}
-  if(!ranges.empty())selected=g::remap_player_model_palette(*selected,ranges);
+  if(!ranges.empty())selected=g::remap_player_model_palette(*source,ranges);
   if(!selected){selection.status=Status::asset_import_failed;return {};}
   const std::uint64_t id=0xAD31000000000000ULL+appearance_variants_.size()+1U;
   const r::EntityRenderResourceIdentity identity{id,fingerprint.primary ? fingerprint.primary : fingerprint.secondary};
@@ -1310,6 +1538,198 @@ std::optional<std::array<float,3>> RuntimeReplayLocalAssets::studio_light(
     cached=light_cache_.insert_or_assign(key,std::pair{origin,static_world_light(*world_,origin)}).first;
   }
   return cached->second.second;
+}
+
+void RuntimeReplayLocalAssets::set_diagnostic_sink(
+    core::MultiplayerDiagnosticSink* sink, std::uint64_t map_generation) noexcept {
+  if(diagnostic_sink_!=sink || diagnostic_map_generation_!=map_generation) {
+    ordinary_diagnostic_samples_={};ordinary_diagnostic_next_=0U;ordinary_diagnostic_evictions_=0U;
+  }
+  diagnostic_sink_=sink;diagnostic_map_generation_=map_generation;
+}
+
+void RuntimeReplayLocalAssets::observe_ordinary_studio(std::uint32_t entity,
+    std::uint64_t model_resource, const client::RuntimePacketEntityObservation* raw,
+    const client::RuntimeClientObservationState* source,
+    const goldsrc::studio::StudioPoseInput& pose, assets::AssetVector3 origin,
+    assets::AssetVector3 angles, bool cache_hit, std::optional<double> sample_seconds,
+    std::optional<double> previous_source_seconds) noexcept {
+  if(!diagnostic_sink_ || !diagnostic_sink_->enabled())return;
+  const auto now=core::multiplayer_diagnostic_now_ns();
+  const auto source_ordinal=source && source->entity_metadata.source ?
+      source->entity_metadata.source->record_ordinal : 0U;
+  const auto lifetime=entity_follow_.lifetime(entity,source_ordinal);
+  auto found=std::ranges::find_if(ordinary_diagnostic_samples_,[&](const auto& value) {
+    return value.used && value.entity==entity && value.generation==generation_ &&
+        value.lifetime==lifetime && value.model_resource==model_resource;
+  });
+  const auto raw_sequence=raw ? raw->sequence : std::optional<std::uint32_t>{};
+  if(found!=ordinary_diagnostic_samples_.end() && found->raw_sequence==raw_sequence &&
+      found->selected_sequence==pose.sequence_index && found->cache_hit==cache_hit &&
+      now>=found->observed_ns && now-found->observed_ns<125'000'000U) {
+    if(found->suppressed!=std::numeric_limits<std::uint32_t>::max())++found->suppressed;
+    return;
+  }
+  if(found==ordinary_diagnostic_samples_.end()) {
+    found=std::ranges::find(ordinary_diagnostic_samples_,false,&OrdinaryDiagnosticSample::used);
+    if(found==ordinary_diagnostic_samples_.end()) {
+      found=ordinary_diagnostic_samples_.begin()+(ordinary_diagnostic_next_++%ordinary_diagnostic_samples_.size());
+      if(ordinary_diagnostic_evictions_!=std::numeric_limits<std::uint32_t>::max())++ordinary_diagnostic_evictions_;
+    }
+    *found={};
+  }
+  core::MultiplayerDiagnosticEvent event;
+  event.identity.producer=core::MultiplayerDiagnosticProducer::ordinary_studio;
+  event.identity.producer_event_id=++ordinary_diagnostic_serial_;
+  event.identity.network_generation=source ? source->generation : generation_;
+  event.identity.map_generation=diagnostic_map_generation_;
+  event.identity.actor_entity=entity;
+  if(lifetime)event.identity.actor_visual_lifetime=lifetime;
+  if(source && source->entity_metadata.source) {
+    const auto& owner=*source->entity_metadata.source;
+    event.identity.source_record=owner.record_identity;
+    event.identity.source_record_ordinal=owner.record_ordinal;
+    event.identity.source_sequence=owner.source_transport_sequence;
+  }
+  event.local_steady_ns=now;
+  if(source)event.server_seconds=source->server_time_seconds;
+  if(event.server_seconds)event.server_time_domain=core::MultiplayerTimeDomain::server_simulation_seconds;
+  event.provenance=core::MultiplayerProvenance::derived_estimate;
+  event.knowledge=core::MultiplayerKnowledge::cosmetic_feedback;
+  event.edge=core::MultiplayerEdgeConfidence::exact;
+  core::MultiplayerPresentationPayload payload;
+  payload.phase=core::MultiplayerPresentationPhase::pose;
+  payload.current_source_seconds=event.server_seconds;
+  payload.previous_source_seconds=previous_source_seconds;
+  payload.sample_seconds=payload.pose_seconds=sample_seconds;
+  payload.sequence=pose.sequence_index;
+  payload.animation_frame=static_cast<float>(pose.frame_coordinate);
+  payload.cache_hit=cache_hit;
+  payload.origin=std::array{origin.x,origin.y,origin.z};
+  payload.angles=std::array{angles.x,angles.y,angles.z};
+  payload.suppressed_repetitions=found->suppressed;
+  payload.diagnostic_cache_evictions=ordinary_diagnostic_evictions_;
+  if(raw) {
+    payload.raw_animation_sequence=raw->sequence;
+    payload.raw_animation_frame=raw->frame;
+    payload.raw_animtime_seconds=raw->animation_time_seconds;
+    payload.raw_framerate=raw->frame_rate;
+    const auto observed_bytes=[]<std::size_t N>(const std::array<std::optional<std::uint32_t>,N>& values)
+        ->std::optional<std::array<std::uint8_t,N>> {
+      std::array<std::uint8_t,N> result{};
+      for(std::size_t i=0;i<N;++i) {
+        if(!values[i] || *values[i]>255U)return {};
+        result[i]=static_cast<std::uint8_t>(*values[i]);
+      }
+      return result;
+    };
+    payload.raw_controllers=observed_bytes(raw->controllers);
+    payload.raw_blending=observed_bytes(raw->blending);
+  }
+  event.payload=payload;
+  // This is a pose-evaluation receipt, not a successful scene/swap receipt.
+  // No renderer visibility, model revision or server outcome is inferred.
+  (void)diagnostic_sink_->observe(event);
+  *found={true,cache_hit,entity,pose.sequence_index,raw_sequence,generation_,lifetime,
+      model_resource,now,0U};
+}
+
+RuntimeReplayLocalAssets::AuthoritativeObservationStage
+RuntimeReplayLocalAssets::stage_authoritative_observation(
+    const client::RuntimeClientObservationState& observation) {
+  AuthoritativeObservationStage stage;
+  stage.retain=observation.entity_metadata.source &&
+      (!current_entities_ ||
+       current_entities_->entity_metadata.source!=observation.entity_metadata.source);
+  stage.lifetime_identity=next_player_lifetime_;
+  if(stage.retain) {
+    stage.retained=std::make_shared<const client::RuntimeClientObservationState>(
+        observation);
+    stage.ordinary=ordinary_presentation_;
+    stage.ordinary->observe(stage.retained);
+    stage.players=player_presentation_;
+    stage.players->observe(stage.retained);
+    for(const auto& value:observation.packet_entities) {
+      if(!value.player_movement_schema || value.entity_number>maximum_clients_)
+        continue;
+      const auto old=player_lifetimes_.find(value.entity_number);
+      stage.lifetimes.emplace(value.entity_number,
+          old!=player_lifetimes_.end() && old->second.model==value.model_index
+              ? old->second
+              : PlayerLifetime{++stage.lifetime_identity,value.model_index});
+    }
+  }
+  // Keep the complete trail owner off the Win32 stack.  All allocation and
+  // observation work finishes before either this state or a render target is
+  // committed.
+  stage.follow=std::make_unique<EntityFollowPresentation>(entity_follow_);
+  stage.follow->observe(observation);
+  stage.effect_entities=observation.packet_entities;
+  stage.decal_lifetimes.reserve(observation.packet_entities.size());
+  for(const auto& entity:observation.packet_entities) {
+    const auto id=stage.follow->lifetime(entity.entity_number);
+    if(!id) continue;
+    const auto bound=entity.model_index ? bindings_.find(*entity.model_index)
+                                        : bindings_.end();
+    stage.decal_lifetimes.push_back({entity.entity_number,id,
+        entity.model_index.value_or(0U),
+        bound!=bindings_.end() ? bound->second.brush_model.value_or(0U) : 0U});
+  }
+  return stage;
+}
+
+void RuntimeReplayLocalAssets::commit_authoritative_observation(
+    AuthoritativeObservationStage&& stage) noexcept {
+  if(stage.retain) {
+    previous_entities_=std::move(current_entities_);
+    current_entities_=std::move(stage.retained);
+    ordinary_animation_.retain_entities(current_entities_->packet_entities);
+    // A committed removal is a lifetime boundary even if no render frame
+    // samples that gap before this slot is reused by the next RX record.
+    std::erase_if(beam_endpoint_bindings_,[&](const auto& entry) {
+      return std::ranges::none_of(current_entities_->packet_entities,
+          [&](const auto& entity) {
+            return entity.entity_number==entry.first && entity.custom_beam;
+          });
+    });
+    ordinary_presentation_=std::move(*stage.ordinary);
+    player_presentation_=std::move(*stage.players);
+    next_player_lifetime_=stage.lifetime_identity;
+    player_lifetimes_=std::move(stage.lifetimes);
+    // A removal is an authoritative corpse lifetime boundary even when the
+    // application skips the discrete render frame. Do not let a later reuse
+    // of the same entity number inherit the removed body's frozen appearance.
+    std::erase_if(corpse_appearances_,[&](const auto& item) {
+      return std::ranges::none_of(current_entities_->packet_entities,
+          [&](const auto& entity) {return entity.entity_number==item.first;});
+    });
+    std::erase_if(light_cache_,[&](const auto& value) {
+      if(value.first==0U || value.first>=0xe0000000U) return false;
+      const auto& entities=current_entities_->packet_entities;
+      const auto found=std::ranges::lower_bound(entities,value.first,{},
+          &client::RuntimePacketEntityObservation::entity_number);
+      return found==entities.end() || found->entity_number!=value.first;
+    });
+  }
+  server_decal_lifetimes_=std::move(stage.decal_lifetimes);
+  entity_follow_=std::move(*stage.follow);
+  presented_effect_entities_=std::move(stage.effect_entities);
+  unavailable_effect_sources_.clear();
+}
+
+RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::observe_entities(
+    const client::RuntimeClientObservationState& observation) {
+  if(!client::valid_runtime_observation(observation) ||
+      observation.generation!=generation_)
+    return {false,false,
+        visual_error("invalid local asset observation generation")};
+  try {
+    auto staged=stage_authoritative_observation(observation);
+    commit_authoritative_observation(std::move(staged));
+    return {true,false,{}};
+  } catch(const std::exception& error) {
+    return {false,false,visual_error(error.what())};
+  }
 }
 
 RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
@@ -1361,9 +1781,9 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
       }
     }
     auto next = summary_;
-    std::erase_if(corpse_appearances_,[&](const auto& item){
-      return std::ranges::none_of(observation.packet_entities,[&](const auto& entity){return entity.entity_number==item.first;});
-    });
+    next.ordinary_pose_evaluations=next.ordinary_pose_reuses=0U;
+    std::vector<OrdinaryFramePose> ordinary_poses;
+    std::size_t ordinary_pose_bytes{};
     std::array<game_api::RemoteWeaponPoseSample,32> next_weapon_poses{};
     std::size_t next_weapon_pose_count=0;
     std::map<std::uint32_t,std::array<std::optional<assets::AssetVector3>,4>> next_attachments;
@@ -1530,6 +1950,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         continue;
       }
       if (entity.render_mode.value_or(0U) != 0U &&
+          !(binding.status==ReplayLocalVisualStatus::ready_studio && entity.render_mode.value_or(0U)<=5U) &&
           !(binding.status==ReplayLocalVisualStatus::ready_sprite && entity.render_mode==3U &&
             (entity.render_effect.value_or(0U)==0U || entity.render_effect==14U))) {
         unavailable(entity.entity_number,
@@ -1550,6 +1971,16 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
                                          static_cast<float>(entity.visual_scale && *entity.visual_scale>0 ? *entity.visual_scale : 1.0)};
       if (!r::finite_entity_render_transform(transform)) {
         return {false, false, visual_error("nonfinite local entity transform")};
+      }
+      std::optional<RemoteSupportPresentation> rider_support;
+      if(sampled_game_ && entity.player_movement_schema && sampled_brush_scene_) {
+        const auto anchor=std::ranges::find(sampled_player_anchors_,entity.entity_number,
+            &g::RuntimePlayerInterpolationAnchor::entity);
+        if(anchor!=sampled_player_anchors_.end()) {
+          rider_support=sample_remote_vertical_support(*anchor,entity,*current_entities_,
+              remote_support_contexts_,sampled_brush_scene_,remote_support_scratch_);
+          if(rider_support)transform.origin=rider_support->origin;
+        }
       }
       const auto &record = library_->records()[*binding.library_index];
       if (binding.status == ReplayLocalVisualStatus::ready_studio) {
@@ -1620,7 +2051,15 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         const g::studio::StudioPoseModelIdentity pose_identity{
             std::to_string(visual_identity.resource_id),visual_fingerprint};
         std::optional<g::studio::StudioPoseEvaluationResult> pose_result;
+        std::shared_ptr<const g::studio::StudioPoseEvaluationResult> owned_ordinary_pose;
+        const g::studio::StudioPoseEvaluationResult* shared_ordinary_pose=nullptr;
         bool player_pose=false;
+        bool ordinary_cache_hit=false;
+        // Raw ownership is recorded only from the existing selected anchor;
+        // a blended presentation entity is never relabelled as wire state.
+        const client::RuntimePacketEntityObservation* ordinary_raw=sampled_game_ ? nullptr : &entity;
+        const client::RuntimeClientObservationState* ordinary_source=sampled_game_ ? nullptr : &observation;
+        std::optional<double> ordinary_pose_seconds,ordinary_previous_seconds;
         std::optional<std::uint32_t> attachment_slot;
         ReplayLocalVisualSummary::RemotePlayer* player_diagnostic=nullptr;
         game_api::RemoteWeaponPoseSample* weapon_sample=nullptr;
@@ -1698,6 +2137,11 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
             diagnostic.network_generation=diagnostic.map_generation=generation_;
             diagnostic.entity_lifetime=context.entity_lifetime;
             diagnostic.render_effect=entity.render_effect;diagnostic.render_amount=entity.render_amount;
+            if(rider_support) {
+              diagnostic.support_entity=rider_support->support.source_entity_index;
+              diagnostic.support_model=rider_support->support.source_model_index;
+              diagnostic.support_offset_z=rider_support->offset_z;
+            }
             diagnostic.weapon_model_index=current->weapon_model_index;diagnostic.gait_sequence=current->gait_sequence;
             diagnostic.effects=current->effects.value_or(0U);diagnostic.no_interpolation=context.discontinuity;
             diagnostic.origin={*entity.origin.x,*entity.origin.y,*entity.origin.z};
@@ -1751,13 +2195,89 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
               -static_cast<float>(intent.transform_angles[0]),static_cast<float>(intent.transform_angles[1])};
           pose_result.emplace(g::studio::StudioPoseEvaluator{}.compose(pose_identity,model,composition));
           player_pose=true;
-        } else pose_result.emplace(g::studio::StudioPoseEvaluator{}.evaluate(pose_identity,model,pose_input));
-        const auto& pose=*pose_result;
+        } else {
+          std::optional<g::studio::StudioPoseCompositionInput> ordinary_composition;
+          if(sampled_game_ && sampled_player_current_) {
+            const auto find_raw=[&](const auto& source)->const client::RuntimePacketEntityObservation* {
+              if(!source)return nullptr;
+              const auto found=std::ranges::find(source->packet_entities,entity.entity_number,
+                  &client::RuntimePacketEntityObservation::entity_number);
+              return found==source->packet_entities.end() ? nullptr : &*found;
+            };
+            auto raw_current=find_raw(sampled_player_current_);
+            auto raw_previous=find_raw(sampled_player_previous_);
+            const bool bracketed=raw_current && raw_current->model_index==entity.model_index;
+            if(!bracketed)raw_current=find_raw(current_entities_);
+            const auto& current_source=bracketed ? sampled_player_current_ : current_entities_;
+            if(raw_current && raw_current->model_index==entity.model_index && current_source->server_time_seconds) {
+              ordinary_raw=raw_current;ordinary_source=current_source.get();
+              g::studio::StudioEntityAnimationContext context{model,*raw_current};
+              context.previous=bracketed ? raw_previous : nullptr;context.base=pose_input;
+              context.generation=generation_;context.model_resource_id=visual_identity.resource_id;
+              context.model_revision=visual_fingerprint;
+              context.record_ordinal=current_source->entity_metadata.source ?
+                  current_source->entity_metadata.source->record_ordinal : 0U;
+              context.current_server_seconds=*current_source->server_time_seconds;
+              context.previous_server_seconds=sampled_player_previous_ ?
+                  sampled_player_previous_->server_time_seconds.value_or(context.current_server_seconds) : context.current_server_seconds;
+              context.sample_server_seconds=sampled_server_seconds_;
+              context.maximum_gap_seconds=sampled_game_->remote_player_policy().maximum_observation_gap_seconds;
+              context.discontinuity=!bracketed || selection.discontinuity;
+              ordinary_composition=ordinary_animation_.sample(context);
+              if(ordinary_composition) {
+                pose_input=ordinary_composition->main;
+                ordinary_pose_seconds=context.sample_server_seconds;
+                if(context.previous && sampled_player_previous_)
+                  ordinary_previous_seconds=sampled_player_previous_->server_time_seconds;
+              }
+            }
+          }
+          if(ordinary_composition && ordinary_composition->previous) {
+            ++next.ordinary_pose_evaluations;
+            pose_result.emplace(g::studio::StudioPoseEvaluator{}.compose(pose_identity,model,*ordinary_composition));
+          } else {
+          const auto cached=std::ranges::find_if(ordinary_poses,[&](const auto& candidate) {
+            return candidate.model==&model && candidate.identity==pose_identity &&
+                exact_ordinary_pose_input(candidate.input,pose_input);
+          });
+          if(cached!=ordinary_poses.end()) {
+            shared_ordinary_pose=cached->result.get();++next.ordinary_pose_reuses;ordinary_cache_hit=true;
+          } else {
+            ++next.ordinary_pose_evaluations;
+            pose_result.emplace(g::studio::StudioPoseEvaluator{}.evaluate(pose_identity,model,pose_input));
+            constexpr std::size_t maximum_entries=64U,maximum_bytes=1U*1024U*1024U;
+            if(*pose_result && ordinary_poses.size()<maximum_entries) {
+              const auto bytes=pose_result->pose->statistics().accounted_pose_bytes;
+              if(bytes<=maximum_bytes-ordinary_pose_bytes) {
+                try {
+                  // Allocation failure precedes the noexcept move. If entry
+                  // insertion fails afterwards, this instance still owns and
+                  // consumes the complete evaluated state through the pointer.
+                  owned_ordinary_pose=std::make_shared<const g::studio::StudioPoseEvaluationResult>(std::move(*pose_result));
+                  shared_ordinary_pose=owned_ordinary_pose.get();
+                  ordinary_poses.push_back({&model,pose_identity,pose_input,
+                      owned_ordinary_pose});
+                  ordinary_pose_bytes+=bytes;
+                } catch(const std::bad_alloc&) {
+                  // A cache cannot turn an otherwise valid frame into failure.
+                } catch(const std::length_error&) {
+                }
+              }
+            }
+          }
+          }
+        }
+        const auto& pose=shared_ordinary_pose ? *shared_ordinary_pose : *pose_result;
         if (!pose) {
           unavailable(entity.entity_number,
                       ReplayLocalVisualStatus::unsupported_pose);
           continue;
         }
+        if(!player_pose && diagnostic_sink_ && diagnostic_sink_->enabled())
+          observe_ordinary_studio(entity.entity_number,visual_identity.resource_id,
+              ordinary_raw,ordinary_source,pose_input,transform.origin,
+              transform.rotation_degrees,ordinary_cache_hit,ordinary_pose_seconds,
+              ordinary_previous_seconds);
         if(!model.attachments.empty()) {
           auto& attachments=next_attachments[entity.entity_number];
           for(std::uint32_t i=0;i<std::min<std::size_t>(4,model.attachments.size());++i) {
@@ -1790,6 +2310,13 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         instance.body_value = static_cast<std::uint32_t>(pose_input.body_value);
         instance.skin_family_index = pose_input.skin_family_index;
         instance.material_support_status = *material;
+        if(entity.render_mode.value_or(0U)!=0U) {
+          instance.blend_mode=entity.render_mode==5U ? r::StudioBlendMode::additive : r::StudioBlendMode::alpha_blended;
+          instance.opacity=static_cast<float>(entity.render_amount.value_or(255U))/255.0F;
+          if(entity.render_mode==1U)
+            for(std::size_t channel=0U;channel<instance.tint.size();++channel)
+              instance.tint[channel]=static_cast<float>(entity.render_color[channel].value_or(255U))/255.0F;
+        }
         instance.interpolated_bounds =
             bounds({asset.bounds().minimum, asset.bounds().maximum}, transform);
         // World lighting is a Studio property, not a remote-player policy.
@@ -1969,33 +2496,18 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
       return {false, false,
               visual_error("atomic local visual frame publication rejected")};
     }
-    // All retained-source/lifetime allocations precede the atomic publication.
-    const bool retain=!sampled_game_ && observation.entity_metadata.source &&
-        (!current_entities_ || current_entities_->entity_metadata.source!=observation.entity_metadata.source);
-    std::shared_ptr<const client::RuntimeClientObservationState> retained;
-    std::optional<g::RuntimeOrdinarySnapshotPresentation> next_ordinary;
-    std::optional<g::RuntimePlayerSnapshotPresentation> next_players;
-    std::map<std::uint32_t,PlayerLifetime> lifetimes;
-    auto lifetime_identity=next_player_lifetime_;
-    if(retain) {
-      retained=std::make_shared<const client::RuntimeClientObservationState>(observation);
-      next_ordinary=ordinary_presentation_;next_ordinary->observe(retained);
-      next_players=player_presentation_;next_players->observe(retained);
-      for(const auto& value:observation.packet_entities) {
-        if(!value.player_movement_schema || value.entity_number>maximum_clients_) continue;
-        const auto old=player_lifetimes_.find(value.entity_number);
-        lifetimes.emplace(value.entity_number,old!=player_lifetimes_.end() && old->second.model==value.model_index
-            ? old->second : PlayerLifetime{++lifetime_identity,value.model_index});
-      }
-    }
-    // Preserve the transactional copy, but its bounded smoke history must not
-    // consume the limited stack left below the Win32 application loop.
-    auto next_follow=std::make_unique<EntityFollowPresentation>(entity_follow_);
-    if(!sampled_game_) next_follow->observe(observation);
-    auto next_effect_entities=observation.packet_entities;
+    // Stage every allocation in the authoritative ownership transaction
+    // before the render target is published. Sampled presentation owns only
+    // its filtered effect view and attachments.
+    std::optional<AuthoritativeObservationStage> authoritative;
+    if(!sampled_game_)
+      authoritative.emplace(stage_authoritative_observation(observation));
+    std::vector<client::RuntimePacketEntityObservation> next_effect_entities;
     std::vector<std::uint32_t> next_unavailable_sources;
-    next_unavailable_sources.reserve(next_effect_entities.size());
-    if(sampled_game_) std::erase_if(next_effect_entities,[&](const auto& entity) {
+    if(sampled_game_) {
+      next_effect_entities=observation.packet_entities;
+      next_unavailable_sources.reserve(next_effect_entities.size());
+      std::erase_if(next_effect_entities,[&](const auto& entity) {
       const client::RuntimePacketEntityObservation* previous=nullptr;
       if(previous_entities_) {
         const auto found=std::ranges::find(previous_entities_->packet_entities,entity.entity_number,
@@ -2011,19 +2523,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
           game_api::WorldEntityPresentationRole::unavailable;
       if(unavailable) next_unavailable_sources.push_back(entity.entity_number);
       return unavailable;
-    });
-    std::vector<WorldImpactPresentation::ServerDecalTargetLifetime> next_decal_lifetimes;
-    if(!sampled_game_) {
-      next_decal_lifetimes.reserve(observation.packet_entities.size());
-      for(const auto& entity:observation.packet_entities) {
-        const auto id=next_follow->lifetime(entity.entity_number);
-        if(id) {
-          const auto bound=entity.model_index ? bindings_.find(*entity.model_index) : bindings_.end();
-          next_decal_lifetimes.push_back({entity.entity_number,id,
-              entity.model_index.value_or(0U),
-              bound!=bindings_.end() ? bound->second.brush_model.value_or(0U) : 0U});
-        }
-      }
+      });
     }
     target = std::move(candidate);
     if (camera_policy_ == ReplayLocalCameraPolicy::offline_spectator &&
@@ -2038,30 +2538,12 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
       remote_weapon_poses_=next_weapon_poses;remote_weapon_pose_count_=next_weapon_pose_count;
       sampled_game_->remote_weapon_poses(remote_weapon_poses());
     }
-    if (retain) {
-      previous_entities_=std::move(current_entities_); current_entities_=std::move(retained);
-      // A committed removal is a lifetime boundary even if no render frame
-      // samples that gap before this slot is reused by the next RX record.
-      std::erase_if(beam_endpoint_bindings_,[&](const auto& entry) {
-        return std::ranges::none_of(current_entities_->packet_entities,
-            [&](const auto& e){return e.entity_number==entry.first && e.custom_beam;});
-      });
-      ordinary_presentation_=std::move(*next_ordinary);
-      player_presentation_=std::move(*next_players);
-      next_player_lifetime_=lifetime_identity;
-      player_lifetimes_=std::move(lifetimes);
-      std::erase_if(light_cache_,[&](const auto& value){
-        if(value.first==0U || value.first>=0xe0000000U) return false;
-        const auto& entities=current_entities_->packet_entities;
-        const auto found=std::ranges::lower_bound(entities,value.first,{},
-            &client::RuntimePacketEntityObservation::entity_number);
-        return found==entities.end() || found->entity_number!=value.first;
-      });
+    if(authoritative)
+      commit_authoritative_observation(std::move(*authoritative));
+    else {
+      presented_effect_entities_=std::move(next_effect_entities);
+      unavailable_effect_sources_=std::move(next_unavailable_sources);
     }
-    if(!sampled_game_)server_decal_lifetimes_=std::move(next_decal_lifetimes);
-    entity_follow_=std::move(*next_follow);
-    presented_effect_entities_=std::move(next_effect_entities);
-    unavailable_effect_sources_=std::move(next_unavailable_sources);
     presented_attachments_=std::move(next_attachments);
     return {true, true, {}};
   } catch (const std::exception &error) {
@@ -2133,6 +2615,9 @@ RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent&
   if (intent.status != game_api::ViewmodelStatus::ready || !package_ || !library_ ||
       intent.generation != generation_ || !std::isfinite(intent.local_time_seconds) ||
       !std::isfinite(intent.frame_coordinate) || intent.frame_coordinate < 0.0) return {};
+  if(!std::ranges::all_of(intent.camera_local_origin,[](float v){return std::isfinite(v) && std::abs(v)<=64.0F;})) {
+    first_person_status_=ReplayLocalVisualStatus::incomplete_transform;return {};
+  }
   const auto found = bindings_.find(intent.model_index);
   if (found == bindings_.end()) {
     first_person_status_ = ReplayLocalVisualStatus::unknown_model_slot; return {};
@@ -2167,9 +2652,9 @@ RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent&
       const auto& m=pose.pose->world_bones()[attachment.bone_index].transform.values;
       const auto p=attachment.local_origin;
       const assets::AssetVector3 location{
-          m[0]*p.x+m[1]*p.y+m[2]*p.z+m[3],
-          m[4]*p.x+m[5]*p.y+m[6]*p.z+m[7],
-          m[8]*p.x+m[9]*p.y+m[10]*p.z+m[11]};
+          m[0]*p.x+m[1]*p.y+m[2]*p.z+m[3]+intent.camera_local_origin[0],
+          m[4]*p.x+m[5]*p.y+m[6]*p.z+m[7]+intent.camera_local_origin[1],
+          m[8]*p.x+m[9]*p.y+m[10]*p.z+m[11]+intent.camera_local_origin[2]};
       if (std::isfinite(location.x)&&std::isfinite(location.y)&&std::isfinite(location.z))
         viewmodel_attachment_zero_=location;
     }
@@ -2182,9 +2667,11 @@ RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent&
   }
   // Studio geometry and bone pose are already in the model's own +X-forward,
   // Z-up space. The first-person renderer supplies a fixed camera-local view.
-  // Do not inject the predicted world eye or view Euler angles here.
+  // Apply only the module's neutral held-origin translation, never the
+  // predicted world eye or view Euler angles. Bone/mesh source scale is one.
   const r::EntityRenderTransform transform{
-      {0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F}, 1.0F};
+      {intent.camera_local_origin[0],intent.camera_local_origin[1],intent.camera_local_origin[2]},
+      {0.0F, 0.0F, 0.0F}, 1.0F};
   if (!r::finite_entity_render_transform(transform)) {
     first_person_status_ = ReplayLocalVisualStatus::incomplete_transform;
     return std::nullopt;
@@ -2235,7 +2722,8 @@ RuntimeReplayLocalAssets::viewmodel_attachment_at_frame(
     double frame_coordinate) const {
   if (intent.status != game_api::ViewmodelStatus::ready ||
       intent.generation != generation_ || !std::isfinite(frame_coordinate) ||
-      frame_coordinate < 0.0 || !library_ || !package_) return {};
+      frame_coordinate < 0.0 || !library_ || !package_ ||
+      !std::ranges::all_of(intent.camera_local_origin,[](float v){return std::isfinite(v) && std::abs(v)<=64.0F;})) return {};
   const auto bound = bindings_.find(intent.model_index);
   if (bound == bindings_.end() ||
       bound->second.status != ReplayLocalVisualStatus::ready_studio ||
@@ -2259,9 +2747,9 @@ RuntimeReplayLocalAssets::viewmodel_attachment_at_frame(
   const auto& m = pose.pose->world_bones()[attachment.bone_index].transform.values;
   const auto p = attachment.local_origin;
   const assets::AssetVector3 location{
-      m[0]*p.x+m[1]*p.y+m[2]*p.z+m[3],
-      m[4]*p.x+m[5]*p.y+m[6]*p.z+m[7],
-      m[8]*p.x+m[9]*p.y+m[10]*p.z+m[11]};
+      m[0]*p.x+m[1]*p.y+m[2]*p.z+m[3]+intent.camera_local_origin[0],
+      m[4]*p.x+m[5]*p.y+m[6]*p.z+m[7]+intent.camera_local_origin[1],
+      m[8]*p.x+m[9]*p.y+m[10]*p.z+m[11]+intent.camera_local_origin[2]};
   if (!std::isfinite(location.x) || !std::isfinite(location.y) ||
       !std::isfinite(location.z)) return {};
   return location;

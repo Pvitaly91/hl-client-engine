@@ -53,6 +53,13 @@ void sanitize(Observation& value,std::uint64_t& invalid) noexcept {
         if(*vector && !finite_position(**vector)){vector->reset();++invalid;}
     for(auto* number:{&value.previous_server_s,&value.current_server_s,&value.latest_server_s,&value.sample_server_s})
         if(*number && (!std::isfinite(**number) || **number<0 || **number>1'000'000'000.0)){number->reset();++invalid;}
+    if(value.rendered_opacity && (!std::isfinite(*value.rendered_opacity) ||
+        *value.rendered_opacity<0 || *value.rendered_opacity>1)) {
+        value.rendered_opacity.reset();++invalid;
+    }
+    if(value.support_offset_z && (!std::isfinite(*value.support_offset_z) || std::abs(*value.support_offset_z)>128.0)) {
+        value.support_offset_z.reset();++invalid;
+    }
     auto& p=value.presentation;
     if(!std::isfinite(p.alpha) || p.alpha<0 || p.alpha>1){p.alpha=0;++invalid;}
     if((p.floor_reasons&~8191U)!=0){p.floor_reasons&=8191U;++invalid;}
@@ -101,6 +108,8 @@ std::string encode_sample(const Sample& sample) {
     REMOTE_FIELD(previous_source_ordinal);REMOTE_FIELD(current_source_ordinal);REMOTE_FIELD(latest_source_ordinal);
     REMOTE_FIELD(previous_server_s);REMOTE_FIELD(current_server_s);REMOTE_FIELD(latest_server_s);REMOTE_FIELD(sample_server_s);
     REMOTE_FIELD(selected_main);REMOTE_FIELD(selected_gait);REMOTE_FIELD(selected_weapon);REMOTE_FIELD(raw_main);REMOTE_FIELD(raw_gait);REMOTE_FIELD(raw_weapon);REMOTE_FIELD(raw_effects);
+    REMOTE_FIELD(raw_render_mode);REMOTE_FIELD(raw_render_amount);REMOTE_FIELD(raw_render_effect);REMOTE_FIELD(rendered_opacity);
+    REMOTE_FIELD(support_entity);REMOTE_FIELD(support_model);REMOTE_FIELD(support_offset_z);
     REMOTE_FIELD(pose_submitted);REMOTE_FIELD(visible);
 #undef REMOTE_FIELD
     const auto& p=v.presentation;
@@ -195,6 +204,13 @@ bool RemoteMovementRecorder::observe(const MovementFrameRecord& frame,const std:
             if(sample.present && sample.observation.lifetime!=actor.last->observation.lifetime){mask|=16U;++actor.lifetime_boundaries;++r.statistics.lifetime_boundaries;actor.last_displacement_event.reset();}
             delta=difference(*actor.last,sample);
             if(delta.elapsed_us){
+                if(sample.observation.raw_render_mode!=actor.last->observation.raw_render_mode ||
+                    sample.observation.raw_render_amount!=actor.last->observation.raw_render_amount ||
+                    sample.observation.raw_render_effect!=actor.last->observation.raw_render_effect)
+                    mask|=256U;
+                if(sample.observation.support_entity!=actor.last->observation.support_entity ||
+                    sample.observation.support_model!=actor.last->observation.support_model)
+                    mask|=512U;
                 ++actor.comparisons;
                 if(delta.raw_units)++actor.raw_comparisons;
                 if(delta.sampled_units)++actor.sampled_comparisons;

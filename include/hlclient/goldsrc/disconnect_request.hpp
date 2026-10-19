@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <span>
+#include <string_view>
 
 namespace hlclient::goldsrc {
 
@@ -27,11 +28,14 @@ private:
 enum class DisconnectNoticeStatus { not_notice, observed, malformed };
 
 // Only an exactly framed terminal control at a known service boundary counts.
-// Arbitrary server text is never scanned, retained, executed or logged. A
+// Arbitrary server text is never scanned or executed. A validated optional
+// reason view is borrowed from the complete accepted terminal record. A
 // repeated notice is legal (a reliable prefix and final unreliable suffix).
 [[nodiscard]] inline DisconnectNoticeStatus inspect_disconnect_notice(
-    const std::span<const std::byte> bytes) noexcept
+    const std::span<const std::byte> bytes,std::string_view* reason=nullptr) noexcept
 {
+    if(reason)*reason={};
+    std::string_view accepted_reason;
     std::size_t offset{};
     while (offset < bytes.size() && bytes[offset] == std::byte{1}) ++offset;
     if (offset == bytes.size() || bytes[offset] != std::byte{2})
@@ -46,9 +50,11 @@ enum class DisconnectNoticeStatus { not_notice, observed, malformed };
                offset - start < 1024U) ++offset;
         if (offset == bytes.size() || offset - start == 1024U)
             return DisconnectNoticeStatus::malformed;
+        if(!observed)accepted_reason={reinterpret_cast<const char*>(bytes.data()+start),offset-start};
         ++offset;
         observed = true;
     }
+    if(observed && reason)*reason=accepted_reason;
     return observed ? DisconnectNoticeStatus::observed
                     : DisconnectNoticeStatus::malformed;
 }

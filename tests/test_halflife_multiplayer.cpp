@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <catch2/catch_test_macros.hpp>
 #include <hlclient/game_api/game_client_host.hpp>
 #include <hlclient/games/halflife/client_module.hpp>
@@ -9,6 +10,7 @@
 #include <hlclient/goldsrc/usercmd_input_adapter.hpp>
 #include <hlclient/input/input_state_tracker.hpp>
 #include <limits>
+#include <utility>
 
 namespace {
 namespace api = hlclient::game_api;
@@ -43,6 +45,7 @@ struct Message {
   std::string name;
   Bytes body;
   std::optional<api::PlayerDisplayUpdate> identity;
+  std::optional<std::vector<api::PlayerNetworkUpdate>> network;
 };
 Message player(std::uint32_t slot, std::string name, bool new_occupant = true,
                bool present = true) {
@@ -50,6 +53,9 @@ Message player(std::uint32_t slot, std::string name, bool new_occupant = true,
       {},
       {},
       api::PlayerDisplayUpdate{slot, present, new_occupant, std::move(name)}};
+}
+Message network(std::initializer_list<api::PlayerNetworkUpdate> values) {
+  return {{}, {}, {}, std::vector<api::PlayerNetworkUpdate>{values}};
 }
 struct Fixture {
   api::GameClientHost host{
@@ -68,6 +74,7 @@ struct Fixture {
     std::size_t index = 0U;
     for (const auto &message : messages) {
       views.push_back({message.identity ? api::GameMessageKind::player_display
+                      : message.network ? api::GameMessageKind::player_network
                                         : api::GameMessageKind::user_message,
                        message.name,
                        message.body,
@@ -77,7 +84,9 @@ struct Fixture {
                        message.identity
                            ? std::nullopt
                            : std::optional<std::uint8_t>{std::uint8_t{90}},
-                       message.identity});
+                       message.identity,
+                       message.network ? std::span<const api::PlayerNetworkUpdate>{*message.network}
+                                       : std::span<const api::PlayerNetworkUpdate>{}});
       ++index;
     }
     ++ordinal;
@@ -111,6 +120,17 @@ bool contains(const api::HudState &hud, std::string_view text) {
   return std::any_of(
       hud.draw.texts.begin(), hud.draw.texts.end(),
       [&](const auto &t) { return t.text.find(text) != std::string::npos; });
+}
+std::vector<std::string_view> text_lines(std::string_view text) {
+  std::vector<std::string_view> result;
+  while (!text.empty()) {
+    const auto end = text.find('\n');
+    result.push_back(text.substr(0U, end));
+    if (end == std::string_view::npos)
+      break;
+    text.remove_prefix(end + 1U);
+  }
+  return result;
 }
 api::HudResourceSet killfeed_resources() {
   api::HudResourceSet resources;resources.revision=1;
@@ -526,9 +546,11 @@ TEST_CASE("E14 team state strict bodies and authoritative aggregate",
     for (const auto &t : sums.draw.texts)
       if (!t.text.empty() &&
           (t.text[0] == '-' || (t.text[0] >= '0' && t.text[0] <= '9'))) {
-        CHECK(static_cast<float>(t.text.size()) * t.advance <= 48.001F);
-        CHECK(t.x + static_cast<float>(t.text.size()) * t.advance <=
-              static_cast<float>(width) - 8.0F);
+        for (const auto line : text_lines(t.text)) {
+          CHECK(static_cast<float>(line.size()) * t.advance <= 48.001F);
+          CHECK(t.x + static_cast<float>(line.size()) * t.advance <=
+                static_cast<float>(width) - 8.0F);
+        }
       }
   }
 }
@@ -745,6 +767,59 @@ TEST_CASE(
   }
 }
 
+TEST_CASE("Server ping updates render both multiline rows without touching score columns",
+          "[e14][ping][opengl][actual-context]") {
+  auto context = hlclient::tests::entity_opengl_fixture::try_context(640, 480);
+  if (!context)
+    SKIP("OpenGL 3.3 Core context unavailable");
+  context->initialize_renderer();
+  Fixture f;
+  f.apply({player(1U, "Remote"), player(2U, "Local"),
+           {"ScoreInfo", score(1U, 5, 2), {}}, {"ScoreInfo", score(2U, 0, 0), {}}});
+  const auto render = [&] {
+    hlclient::renderer::RenderScene scene;
+    scene.basic_hud = f.hud(true, 0.0, 640U, 480U).draw;
+    context->renderer().render(scene, {640, 480});
+    auto pixels = context->renderer().observe_framebuffer({640, 480}, scene.clear_color, true);
+    REQUIRE(pixels);
+    return pixels.rgba8;
+  };
+  const auto before = render();
+  f.apply({network({{1U, 41U, 0U}, {2U, 82U, 1U}})});
+  const auto hud = f.hud(true, 0.0, 640U, 480U);
+  const auto ping = std::find_if(hud.draw.texts.begin(), hud.draw.texts.end(),
+      [](const auto& text) { return text.text == "41\n82"; });
+  REQUIRE(ping != hud.draw.texts.end());
+  const auto after = render();
+  std::array<std::size_t, 2U> row_changes{};
+  std::size_t changes_elsewhere = 0U;
+  for (int y = 0; y < 480; ++y)
+    for (int x = 0; x < 640; ++x) {
+      const auto offset = (static_cast<std::size_t>(479 - y) * 640U +
+                           static_cast<std::size_t>(x)) * 4U;
+      if (std::equal(before.begin() + static_cast<std::ptrdiff_t>(offset),
+                     before.begin() + static_cast<std::ptrdiff_t>(offset + 3U),
+                     after.begin() + static_cast<std::ptrdiff_t>(offset)))
+        continue;
+      bool ping_pixel = false;
+      for (std::size_t row = 0U; row < row_changes.size(); ++row) {
+        const auto row_y = ping->y + static_cast<float>(row) * ping->line_height;
+        if (static_cast<float>(x) >= std::floor(ping->x) &&
+            static_cast<float>(x) < std::ceil(ping->x + 2.0F * ping->advance) &&
+            static_cast<float>(y) >= std::floor(row_y) &&
+            static_cast<float>(y) < std::ceil(row_y + 7.0F * ping->pixel_size)) {
+          ++row_changes[row];
+          ping_pixel = true;
+        }
+      }
+      if (!ping_pixel)
+        ++changes_elsewhere;
+    }
+  CHECK(row_changes[0] > 0U);
+  CHECK(row_changes[1] > 0U); // The second line must advance to the local row.
+  CHECK(changes_elsewhere == 0U); // Names, scores, highlight and header are unchanged.
+}
+
 TEST_CASE("E14 score values are idempotent stale ordering and receipt expiry "
           "are deterministic",
           "[e14][game-module]") {
@@ -781,4 +856,156 @@ TEST_CASE("E14 score values are idempotent stale ordering and receipt expiry "
   CHECK_FALSE(contains(
       f.hud(false, 7.01),
       "teammate")); // Delayed first render cannot resurrect an expired receipt.
+}
+
+TEST_CASE("Server ping updates display both local and remote players without inventing scores",
+          "[e14][ping][game-module][hud]") {
+  Fixture f;
+  f.apply({player(1U, "Remote"), player(2U, "Local")});
+  auto hud = f.hud();
+  CHECK(contains(hud, "PING MS"));
+  CHECK(contains(hud, "-\n-"));
+  auto state = f.apply({network({{1U, 4095U, 127U}, {2U, 0U, 0U}, {3U, 123U, 3U}})});
+  CHECK(state.multiplayer.players[0].ping_ms == 4095U);
+  CHECK(state.multiplayer.players[0].packet_loss == 127U);
+  CHECK(state.multiplayer.players[1].ping_ms == 0U);
+  CHECK(state.multiplayer.players[1].packet_loss == 0U);
+  CHECK_FALSE(state.multiplayer.players[0].has_score);
+  CHECK_FALSE(state.multiplayer.players[1].has_score);
+  CHECK_FALSE(state.multiplayer.players[2].present);
+  CHECK_FALSE(state.multiplayer.players[2].ping_ms);
+  CHECK_FALSE(state.multiplayer.players[2].packet_loss);
+  hud = f.hud();
+  CHECK(contains(hud, "4095\n0"));
+  CHECK_FALSE(contains(f.hud(false), "PING MS"));
+  CHECK(hud.draw.rectangles.size() == 2U); // Table and the local-player highlight.
+  state = f.apply({network({{2U, 39U, 2U}})});
+  CHECK(state.multiplayer.players[0].ping_ms == 4095U); // An omitted slot is not zero.
+  CHECK(state.multiplayer.players[1].ping_ms == 39U);
+  CHECK(state.multiplayer.players[1].packet_loss == 2U);
+  state = f.apply({network({})});
+  CHECK(state.multiplayer.players[1].ping_ms == 39U);
+}
+
+TEST_CASE("Server ping staging validates atomically and ignores replayed observations",
+          "[e14][ping][game-module][atomic]") {
+  Fixture f;
+  auto state = f.apply({player(1U, "Remote"), player(2U, "Local"),
+                        network({{1U, 40U, 2U}, {2U, 50U, 0U}})});
+  const auto high_water = state.multiplayer.high_water;
+  for (const auto bad : {api::PlayerNetworkUpdate{0U, 1U, 0U},
+                         api::PlayerNetworkUpdate{5U, 1U, 0U},
+                         api::PlayerNetworkUpdate{1U, 4096U, 0U},
+                         api::PlayerNetworkUpdate{1U, 1U, 128U}}) {
+    const auto rejected = f.stage({network({{1U, 9U, 0U}, bad})});
+    CHECK_FALSE(rejected);
+    REQUIRE(rejected.message_failure);
+    state = f.apply({});
+    CHECK(state.multiplayer.players[0].ping_ms == 40U);
+    CHECK(state.multiplayer.players[1].ping_ms == 50U);
+    CHECK(state.multiplayer.high_water == high_water);
+  }
+  Message excessive = network({});
+  excessive.network->resize(33U, {1U, 1U, 0U});
+  CHECK_FALSE(f.stage({excessive}));
+  // A later malformed user message discards the complete candidate record,
+  // including an otherwise valid ping update earlier in that record.
+  CHECK_FALSE(f.stage({network({{1U, 7U, 0U}}), {"ScoreInfo", {}, {}}}));
+  state = f.apply({});
+  CHECK(state.multiplayer.players[0].ping_ms == 40U);
+  const auto fresh_ordinal = f.ordinal;
+  f.ordinal = 1U;
+  state = f.apply({network({{1U, 8U, 0U}, {2U, 8U, 0U}})});
+  CHECK(state.multiplayer.players[0].ping_ms == 40U);
+  CHECK(state.multiplayer.players[1].ping_ms == 50U);
+  // Stale observations are still validated rather than silently accepting
+  // malformed typed data because a previous record was newer.
+  f.ordinal = 1U;
+  CHECK_FALSE(f.stage({network({{1U, 4096U, 0U}})}));
+  f.ordinal = fresh_ordinal;
+  state = f.apply({network({{1U, 41U, 3U}})});
+  CHECK(state.multiplayer.players[0].ping_ms == 41U);
+}
+
+TEST_CASE("Server ping state is tied to a player occupant and resets at lifecycle boundaries",
+          "[e14][ping][game-module][identity]") {
+  Fixture f;
+  f.apply({player(1U, "Alice"), player(2U, "Bob"), network({{1U, 34U, 2U}, {2U, 59U, 0U}})});
+  auto state = f.apply({player(1U, "Renamed", false)});
+  CHECK(state.multiplayer.players[0].ping_ms == 34U);
+  CHECK(state.multiplayer.players[0].packet_loss == 2U);
+  state = f.apply({player(1U, "Replacement")});
+  CHECK_FALSE(state.multiplayer.players[0].ping_ms);
+  CHECK_FALSE(state.multiplayer.players[0].packet_loss);
+  CHECK(state.multiplayer.players[1].ping_ms == 59U);
+  state = f.apply({player(2U, "", false, false), network({{2U, 23U, 1U}})});
+  CHECK_FALSE(state.multiplayer.players[1].present);
+  CHECK_FALSE(state.multiplayer.players[1].ping_ms);
+  CHECK_FALSE(state.multiplayer.players[1].packet_loss);
+  state = f.apply({network({{2U, 25U, 0U}}), player(2U, "NewBob")});
+  CHECK_FALSE(state.multiplayer.players[1].ping_ms);
+  state = f.apply({network({{2U, 24U, 1U}})});
+  CHECK(state.multiplayer.players[1].ping_ms == 24U);
+  f.host.reset({2U, 2U, 2U});
+  f.committed = false;
+  state = f.apply({player(2U, "NewSession")});
+  CHECK_FALSE(state.multiplayer.players[1].ping_ms);
+  CHECK_FALSE(state.multiplayer.players[1].packet_loss);
+  f.host.teardown();
+  CHECK(f.hud().draw.texts.empty());
+}
+
+TEST_CASE("Ping scoreboard columns remain bounded across viewport and HUD scales",
+          "[e14][ping][game-module][hud-bounds]") {
+  Fixture f;
+  f.max_clients = 32U;
+  for (std::uint32_t slot = 1U; slot <= 32U; ++slot) {
+    auto team = text_bytes("Team" + std::to_string(slot));
+    team.insert(team.begin(), static_cast<std::byte>(slot));
+    f.apply({player(slot, std::string(31U, 'A')),
+             {"ScoreInfo", score(static_cast<std::uint8_t>(slot), -32768, 32767), {}},
+             {"TeamInfo", team, {}}, network({{slot, 4095U, 127U}})});
+  }
+  f.apply({{"GameMode", {std::byte{1}}, {}}, {"DeathMsg", death(1U, 2U), {}}});
+  for (const auto viewport : {std::pair{320U, 240U}, std::pair{640U, 480U}, std::pair{1920U, 1080U}})
+    for (const float scale : {.5F, 1.0F, 2.0F}) {
+      api::HudPresentationContext context{viewport.first, viewport.second, true};
+      context.hud_scale_automatic = false;
+      context.hud_scale = scale;
+      f.host.set_hud_context(context);
+      const auto hud = f.host.hud(f.observation, 0.0);
+      REQUIRE_FALSE(hud.draw_rejected);
+      CHECK(api::valid_hud_draw_commands(hud.draw));
+      const auto header = [&](std::string_view label) -> const api::HudText& {
+        const auto found = std::find_if(hud.draw.texts.begin(), hud.draw.texts.end(),
+            [&](const auto& text) { return text.text == label; });
+        REQUIRE(found != hud.draw.texts.end());
+        return *found;
+      };
+      const auto& name = header("PLAYER");
+      const auto& kills = header("KILLS");
+      const auto& deaths = header("DEATHS");
+      const auto& ping = header("PING MS");
+      CHECK(name.x + static_cast<float>(name.text.size()) * name.advance < kills.x);
+      CHECK(kills.x + static_cast<float>(kills.text.size()) * kills.advance < deaths.x);
+      CHECK(deaths.x + static_cast<float>(deaths.text.size()) * deaths.advance < ping.x);
+      std::size_t ping_values = 0U, ping_unknown = 0U;
+      for (const auto& text : hud.draw.texts) {
+        if (text.y <= name.y)
+          continue; // Kill notices and the fixed table header have other bounds.
+        const auto lines = text_lines(text.text);
+        for (const auto line : lines) {
+          CHECK(text.x + static_cast<float>(line.size()) * text.advance <=
+                static_cast<float>(viewport.first));
+          if (text.x == ping.x) {
+            ping_values += static_cast<std::size_t>(line == "4095");
+            ping_unknown += static_cast<std::size_t>(line == "-");
+          }
+        }
+        CHECK(text.y + static_cast<float>(lines.size() - 1U) * text.line_height +
+                  7.0F * text.pixel_size <= static_cast<float>(viewport.second));
+      }
+      CHECK(ping_values == 32U);
+      CHECK(ping_unknown == 32U); // A team header has no player connection ping.
+    }
 }

@@ -22,6 +22,36 @@ using hlclient::goldsrc::ByteWriter;
     return std::ranges::equal(left, right);
 }
 
+TEST_CASE("Uint8-sized byte envelopes are exact and atomic at every wire length",
+          "[goldsrc][bytes][director-signon]")
+{
+    std::array<std::byte,258> storage{};
+    storage[0]=std::byte{0xaa};
+    for(std::size_t length=0U;length<=255U;++length) {
+        storage[1]=std::byte{static_cast<std::uint8_t>(length)};
+        for(std::size_t index=0U;index<length;++index)
+            storage[index+2U]=std::byte{static_cast<std::uint8_t>(index)};
+        storage[length+2U]=std::byte{43U};
+        const auto bytes=std::span<const std::byte>{storage}.first(length+3U);
+        ByteReader complete{bytes};
+        REQUIRE(complete.read_uint8()==0xaaU);
+        const auto body=complete.read_uint8_sized_bytes();
+        REQUIRE(body);
+        CHECK(body->size()==length);
+        CHECK(body->data()==storage.data()+2U);
+        CHECK(complete.position()==length+2U);
+        CHECK(complete.read_uint8()==43U);
+        CHECK(complete.remaining()==0U);
+        for(std::size_t available=0U;available<=length;++available) {
+            ByteReader truncated{bytes.first(available+1U)};
+            REQUIRE(truncated.read_uint8()==0xaaU);
+            CHECK_FALSE(truncated.read_uint8_sized_bytes());
+            CHECK(truncated.position()==1U);
+            CHECK(truncated.remaining()==available);
+        }
+    }
+}
+
 TEST_CASE("GoldSrc byte values round-trip through writer and reader", "[goldsrc][bytes]")
 {
     std::array<std::byte, 64> storage{};

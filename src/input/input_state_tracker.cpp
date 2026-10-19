@@ -163,6 +163,7 @@ void InputStateTracker::validate_event(const InputEvent& event) const
     case InputEventType::focus_lost:
     case InputEventType::mouse_motion:
     case InputEventType::capture_released:
+    case InputEventType::text_input:
         break;
     }
 }
@@ -326,6 +327,9 @@ void InputStateTracker::apply_event(const InputEvent& event)
     case InputEventType::capture_released:
         persistent_.capture_state = InputCaptureState::released;
         relative_mouse_delta_ = {};
+        break;
+    case InputEventType::text_input:
+        // Unicode belongs to a focused text editor, never gameplay buttons.
         break;
     }
     ++statistics_.processed_event_count;

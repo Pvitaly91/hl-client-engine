@@ -60,6 +60,136 @@ bool support_clearance(assets::AssetVector3& origin, hlclient::movement::PlayerM
   return true;
 }
 
+struct SampledSupportPlane {
+  const collision::BrushCollisionSceneInstance* instance{};
+  double distance{};
+};
+
+// Ground planes are retained collision witnesses, not a fresh trajectory.
+// Resolve their exact source plane in the current sampled brush instead of
+// adding a new velocity estimate to an older generated endpoint plane.
+std::optional<SampledSupportPlane> sampled_support_plane(
+    const collision::BrushCollisionScene& scene,
+    const hlclient::movement::PlayerMovementHitIdentity& hit,
+    const hlclient::movement::PlayerMovementPlane& ground) {
+  if (hit.kind != hlclient::movement::PlayerMovementHitKind::brush_entity ||
+      !hit.stable_instance_ordinal || !hit.source_entity_index ||
+      !ground.source_plane_index || !scene.model_library()) return {};
+  const auto found = std::find_if(scene.instances().begin(), scene.instances().end(),
+      [&](const auto& instance) { return instance.role == collision::BrushCollisionRole::solid &&
+          instance.identity.source_model_index == hit.source_model_index &&
+          instance.identity.source_entity_index == hit.source_entity_index &&
+          instance.identity.stable_instance_ordinal == *hit.stable_instance_ordinal; });
+  if (found == scene.instances().end()) return {};
+  const auto* model = scene.model_library()->model(hit.source_model_index);
+  if (!model || !model->collision_world) return {};
+  const auto planes = model->collision_world->planes();
+  const auto ordinal = *ground.source_plane_index;
+  if (ordinal >= planes.size() || planes[ordinal].source_plane_index != ordinal) return {};
+  const auto& plane = planes[ordinal];
+  const auto normal = brush_models::brush_rigid_local_to_world_normal(found->transform, plane.normal);
+  const auto matches = [&](const double sign) { return
+      normal.x * sign == ground.normal.x && normal.y * sign == ground.normal.y &&
+      normal.z * sign == ground.normal.z; };
+  const double sign = matches(1.0) ? 1.0 : matches(-1.0) ? -1.0 : 0.0;
+  if (sign == 0.0) return {};
+  const auto& translation = found->transform.translation;
+  const double distance = sign * plane.distance +
+      static_cast<double>(ground.normal.x) * translation.x +
+      static_cast<double>(ground.normal.y) * translation.y +
+      static_cast<double>(ground.normal.z) * translation.z;
+  if (!std::isfinite(distance)) return {};
+  return SampledSupportPlane{&*found, distance};
+}
+
+// A newly committed pusher trajectory can put an already generated contact
+// slightly below its newly projected top. Re-express only that exact retained
+// top contact, never a raw authority seed or an arbitrary penetrating hull.
+// Both brush contacts and the entire vertical path through all OTHER solids
+// must be proven. The support remains solid in the final occupancy check.
+bool refresh_generated_support_contact(
+    hlclient::movement::LocalPlayerMovementStateCreateInfo& info,
+    const movement::BrushSceneMovementCollision& sampled,
+    const ReferenceVerticalSupportMotion& support,
+    movement::GoldSrcLocalMovementScratch& scratch,
+    const movement::GoldSrcLocalMovementConfig& config) {
+  namespace player = hlclient::movement;
+  if (info.state_revision <= 1U || info.mode != player::PlayerMovementMode::walking ||
+      !info.ground.grounded || !info.ground.walkable || !info.ground.hit ||
+      info.velocity.z != 0.0F || info.in_duck_transition ||
+      info.ground.plane.normal.x != 0.0F || info.ground.plane.normal.y != 0.0F ||
+      info.ground.plane.normal.z != 1.0F || !sampled.scene()) return false;
+  const auto speed = support.velocity_z_for(*info.ground.hit);
+  if (!speed || *speed <= 0.0) return false;
+  const auto plane = sampled_support_plane(*sampled.scene(), *info.ground.hit, info.ground.plane);
+  if (!plane) return false;
+  const double rise = plane->distance - info.ground.plane.distance;
+  if (!std::isfinite(rise) || rise <= 0.0 || rise > 256.0 * .050) return false;
+  const auto* model = sampled.scene()->model_library()->model(info.ground.hit->source_model_index);
+  const auto hull = movement::local_movement_collision_hull(info.hull);
+  if (!model || !hull) return false;
+  collision::ExplicitBrushCollisionTraceRequest request;
+  request.start = info.origin; request.end = info.origin; request.end.z -= 2.0F;
+  request.hull = *hull;
+  request.query_limits = config.collision_query.query_limits;
+  request.tolerance = config.collision_query.trace_tolerance;
+  auto previous_pose = plane->instance->transform;
+  previous_pose.translation.z = static_cast<float>(previous_pose.translation.z - rise);
+  const auto old_contact = collision::trace_explicit_brush_model(
+      *model, previous_pose, request, scratch.collision);
+  const auto matches_contact = [&](const auto& traced, const double distance) {
+    return traced && traced.result && !traced.result->trace.start_solid &&
+        !traced.result->trace.all_solid && !traced.result->trace.in_liquid &&
+        traced.result->trace.fraction < 1.0 && traced.result->trace.collision_plane &&
+        traced.result->trace.collision_plane->source_plane_index == info.ground.plane.source_plane_index &&
+        traced.result->trace.collision_plane->normal.x == 0.0F &&
+        traced.result->trace.collision_plane->normal.y == 0.0F &&
+        traced.result->trace.collision_plane->normal.z == 1.0F &&
+        // Origins and instance translations are binary32; carried plane
+        // distances retain double addition. Require the same representable
+        // plane, not a widened gameplay/penetration epsilon.
+        static_cast<float>(traced.result->trace.collision_plane->distance) == static_cast<float>(distance);
+  };
+  if (!matches_contact(old_contact, info.ground.plane.distance)) return false;
+  // Do not repair an unrelated overlap whose first reported hit happens to
+  // be this support. Full-scene clearance and a swept hull retain those hits.
+  auto candidate = info.origin;
+  candidate.z = static_cast<float>(candidate.z + rise);
+  if (!support_clearance(candidate, info.hull, sampled, scratch.collision,
+          config.collision_query, &scratch) || candidate.x != info.origin.x ||
+      candidate.y != info.origin.y) return false;
+  request.start = candidate; request.end = candidate; request.end.z -= 2.0F;
+  if (!matches_contact(collision::trace_explicit_brush_model(
+          *model, plane->instance->transform, request, scratch.collision), plane->distance)) return false;
+  auto instances = std::vector<collision::BrushCollisionSceneInstance>{
+      sampled.scene()->instances().begin(), sampled.scene()->instances().end()};
+  for (auto& instance : instances)
+    if (instance.identity == plane->instance->identity) instance.role = collision::BrushCollisionRole::non_solid;
+  const auto others_scene = std::make_shared<const collision::BrushCollisionScene>(
+      sampled.scene()->model_library(), std::move(instances), sampled.scene()->role_provider_profile());
+  const movement::BrushSceneMovementCollision others{others_scene, sampled.entity_boxes()};
+  const auto swept = others.trace_hull(info.origin, candidate, info.hull,
+      scratch.collision, config.collision_query);
+  if (!swept || !swept.result || swept.result->start_solid || swept.result->all_solid ||
+      swept.result->in_liquid || swept.result->fraction < 1.0) {
+    scratch.last_reference_collision_position.reset();
+    scratch.last_reference_collision_trace = swept.result;
+    scratch.last_reference_collision_hull = info.hull;
+    scratch.last_reference_collision_start = info.origin;
+    scratch.last_reference_collision_end = candidate;
+    return false;
+  }
+  info.origin = candidate;
+  info.ground.contact_position = candidate;
+  info.ground.plane.distance = plane->distance;
+  scratch.last_reference_collision_position.reset();
+  scratch.last_reference_collision_trace.reset();
+  scratch.last_reference_collision_hull.reset();
+  scratch.last_reference_collision_start.reset();
+  scratch.last_reference_collision_end.reset();
+  return true;
+}
+
 // A tied world floor can win ground categorization while the hull still
 // overlaps a rising platform. Ground identity alone then misses the platform's
 // contact during this command and the final occupancy check suspends replay.
@@ -528,7 +658,10 @@ movement::LocalMovementSimulationResult simulate_ladder_or_walk(
       (command.buttons() & ~(kReferenceGoldSrcButtonDirections |
           kReferenceGoldSrcButtonJump | kReferenceGoldSrcButtonDuck |
           kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload |
-          kReferenceGoldSrcButtonUse | kReferenceGoldSrcButtonAttack2))!=0U ||
+          kReferenceGoldSrcButtonUse | kReferenceGoldSrcButtonAttack2 |
+          (command.compatibility_profile()==GoldSrcUserCmdCompatibilityProfile::
+               public_goldsrc48_jump_duck_weapon_use_prediction_v4
+           ? kReferenceGoldSrcButtonScore : 0U)))!=0U ||
       previous.command_profile()!=hlclient::movement::GoldSrcMovementCommandProfile::
           reference_wire_jump_duck_v2 ||
       (command.compatibility_profile()!=GoldSrcUserCmdCompatibilityProfile::
@@ -667,15 +800,55 @@ movement::LocalMovementSimulationResult simulate_reference_movement(
   if (start_info.ground.grounded && start_info.ground.hit &&
       start_info.ground.hit->kind==hlclient::movement::PlayerMovementHitKind::brush_entity) {
     const auto old_origin=start_info.origin;
-    if (!support_clearance(start_info.origin,start_info.hull,start_collision,scratch.collision,config.collision_query,&scratch)) return failed();
-    start_info.ground.contact_position.x+=start_info.origin.x-old_origin.x;
-    start_info.ground.contact_position.y+=start_info.origin.y-old_origin.y;
-    start_info.ground.contact_position.z+=start_info.origin.z-old_origin.z;
+    if (!support_clearance(start_info.origin,start_info.hull,start_collision,scratch.collision,config.collision_query,&scratch)) {
+      if ((command.buttons() & kReferenceGoldSrcButtonJump) != 0U ||
+          !refresh_generated_support_contact(start_info,start_collision,*support,scratch,config)) return failed();
+    } else {
+      start_info.ground.contact_position.x+=start_info.origin.x-old_origin.x;
+      start_info.ground.contact_position.y+=start_info.origin.y-old_origin.y;
+      start_info.ground.contact_position.z+=start_info.origin.z-old_origin.z;
+    }
   }
   const auto start_state=hlclient::movement::LocalPlayerMovementState::create(start_info,config.state_limits);
   if (!start_state) return failed();
-  auto result = simulate_ladder_or_walk(*start_state.state,command,environment,
-      start_collision,scratch,config,ladder_context,ladder_policy);
+  auto result = [&]() {
+    auto attempted = simulate_ladder_or_walk(*start_state.state,command,environment,
+        start_collision,scratch,config,ladder_context,ladder_policy);
+    // A world contact can win a coplanar top tie at the preceding command.
+    // A newer pusher trajectory then crosses it before this command starts.
+    // Inspect only a failed initial zero-length occupancy query: the failed
+    // attempt has not simulated movement, so no accepted command is replayed.
+    const auto same_origin = [&](const auto& origin) { return origin &&
+        origin->x == start_info.origin.x && origin->y == start_info.origin.y &&
+        origin->z == start_info.origin.z; };
+    const auto source_time = support->source_time_seconds();
+    if (attempted || !attempted.error ||
+        (attempted.error->code != movement::LocalMovementSimulationErrorCode::player_startsolid &&
+         attempted.error->code != movement::LocalMovementSimulationErrorCode::player_allsolid) ||
+        start_info.state_revision <= 1U || !start_info.ground.grounded ||
+        !start_info.ground.hit || start_info.ground.hit->kind != hlclient::movement::PlayerMovementHitKind::world ||
+        start_info.in_duck_transition || (command.buttons() & kReferenceGoldSrcButtonJump) != 0U ||
+        !source_time || !std::isfinite(*source_time) || from <= *source_time || from - *source_time > .250 ||
+        !scratch.last_reference_collision_position ||
+        !same_origin(scratch.last_reference_collision_start) || !same_origin(scratch.last_reference_collision_end))
+      return attempted;
+    const auto observed_scene = support->sample(*source_time);
+    if (!observed_scene) return attempted;
+    const movement::BrushSceneMovementCollision observed{observed_scene,support->entity_boxes()};
+    auto reacquired = start_info;
+    if (!rising_support_contact(reacquired, *scratch.last_reference_collision_position,
+            observed, start_collision, *support, *source_time, from, scratch.collision, config))
+      return attempted;
+    const auto repaired = hlclient::movement::LocalPlayerMovementState::create(reacquired,config.state_limits);
+    if (!repaired) return attempted;
+    scratch.last_reference_collision_position.reset();
+    scratch.last_reference_collision_trace.reset();
+    scratch.last_reference_collision_hull.reset();
+    scratch.last_reference_collision_start.reset();
+    scratch.last_reference_collision_end.reset();
+    return simulate_ladder_or_walk(*repaired.state,command,environment,
+        start_collision,scratch,config,ladder_context,ladder_policy);
+  }();
   if (!result) return result;
   auto info = hlclient::movement::local_player_movement_state_create_info(*result.state);
   if (info.ground.grounded && info.ground.hit) {
@@ -807,9 +980,10 @@ ReferenceSupportPresentation sample_reference_support_presentation(
       if (std::isfinite(old_plane) && std::isfinite(new_plane) &&
           std::isfinite(contact_delta) && std::abs(contact_delta)<=maximum_contact_translation) {
         const double desired_plane=old_plane+(new_plane-old_plane)*alpha;
-        const double to_seconds=static_cast<double>(to.simulation_time_nanoseconds())*1e-9;
-        const double scene_plane=new_plane+normal_z*support->displacement(hit,to_seconds,out.server_seconds);
-        const double shift=(desired_plane-scene_plane)/normal_z;
+        const auto sampled_plane=sampled_support_plane(*out.scene,hit,new_ground.plane());
+        const double shift=sampled_plane
+            ? (desired_plane-sampled_plane->distance)/normal_z
+            : std::numeric_limits<double>::quiet_NaN();
         const auto matching=[&](const auto& instance) {
           return instance.role==collision::BrushCollisionRole::solid &&
               instance.identity.source_model_index==hit.source_model_index &&

@@ -21,28 +21,35 @@ Raw captures and logs containing authentication or identity material remain
 only below ignored `manual-artifacts/connect-captures/`. They are not source,
 test data, documentation, CI artifacts, or Git objects.
 
-## Confirmed wire layout
+## Current wire layout (LF boundary corrected 2026-10-18)
 
 The exact redacted layout is:
 
 ```text
 FF FF FF FF
 connect SP 48 SP <signed-decimal-challenge> SP
-"<protocol-info>" SP "<user-info>"<AUTH_BINARY_REDACTED:length=213>
+"<protocol-info>" SP "<user-info>" LF <AUTH_BINARY_REDACTED:length=N>
 ```
 
 There are exactly four ASCII spaces in fixed syntax. Only the two info strings
-are quoted. The binary authentication suffix starts immediately after the
-user-info closing quote: there is no separating space or length field. There
-is no packet terminator at all—no LF, NUL, or hidden trailing byte. The final
-authentication byte is the final datagram byte.
+are quoted. Exactly one LF terminates the text after the user-info closing
+quote. The opaque binary ticket begins after that LF, with no extra space,
+NUL or length field. No terminator is appended after the ticket: the final
+authentication byte is the final datagram byte. Parsing consumes exactly one
+LF, not arbitrary whitespace; a ticket may itself begin with LF or NUL.
 
-Observed requests were 488, 489, or 490 bytes as the decimal challenge width
-changed. The observed fixed-size relation for the captured 66-byte protocol
-info, 179-byte user info, and 213-byte binary suffix is:
+The previous capture interpretation incorrectly grouped everything after the
+closing quote into authentication and omitted the text-line delimiter. The
+old 488/489/490-byte observations and `kObserved*` constants remain historical
+metadata, not proof of a valid Steam ticket boundary. Xash3D's sender and the
+independent ReHLDS line reader establish the boundary; see
+[Steam connection diagnosis](STEAM_PUBLIC_SERVER_DIAGNOSTICS.md).
+
+With a 66-byte protocol info, 179-byte user info and an actual 213-byte
+synthetic ticket, the corrected generated-size relation is:
 
 ```text
-total = 479 + signed-decimal challenge length
+total = 480 + signed-decimal challenge length
 ```
 
 The project uses a conservative 1,400-byte hard datagram bound. That is a
@@ -133,7 +140,8 @@ codec performs no escaping, locale conversion, normalization, or repair.
 
 - the captured protected info value (`cdkey` slot), observed as 32 printable
   ASCII-hex bytes;
-- the immediately appended raw binary suffix, observed as 213 bytes.
+- the raw binary ticket after the header's LF (the fixed development profile
+  still uses 213 bytes; live Steam supplies its actual returned length).
 
 The type is move-only, exposes sizes and boolean comparison only, has no
 string/stream conversion, and is readable only by the connect codec. M2.2 adds

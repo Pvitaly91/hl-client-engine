@@ -445,6 +445,8 @@ std::string_view to_string(
         return "publication_failed";
     case RuntimeReplayVisualProjectionErrorCode::unable_to_retain_candidate:
         return "unable_to_retain_candidate";
+    case RuntimeReplayVisualProjectionErrorCode::asset_preparation_cancelled:
+        return "asset_preparation_cancelled";
     }
     return "unknown";
 }

@@ -17,6 +17,7 @@ inline constexpr std::size_t kMaximumConnectRejectMessageSize = 512U;
 inline constexpr std::size_t kMaximumConnectRejectPresentationSize = 256U;
 inline constexpr std::byte kConnectAcceptedResponseClass{'B'};
 inline constexpr std::byte kConnectRejectedResponseClass{'9'};
+inline constexpr std::byte kConnectPasswordRejectedResponseClass{'8'};
 
 struct ConnectAccepted {
     std::uint32_t user_id{0U};

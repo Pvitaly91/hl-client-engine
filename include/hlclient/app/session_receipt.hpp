@@ -93,6 +93,7 @@ struct SessionReceiptCounters final {
 enum class SessionCloseReason {
     not_observed, window_close, duration_limit, server_disconnect,
     startup_cancel, fatal_failure, runner_termination,
+    console_disconnect,
 };
 enum class SessionCloseOutcome {
     not_requested, pending, cancel_without_protocol_disconnect,
@@ -192,7 +193,8 @@ private:
 [[nodiscard]] std::optional<SessionReceiptSnapshot> decode_session_receipt(
     std::string_view);
 // Deterministic leaf whitelist. Six snapshots per generation plus one
-// process-final leaf. Terminal is write-once for the complete process.
+// run-final leaf. Terminal is write-once for this owning run identity; another
+// connection attempt in the same process uses a new run and output scope.
 [[nodiscard]] std::wstring session_receipt_leaf(
     SessionReceiptRole, std::uint32_t generation_ordinal, SessionReceiptStage);
 [[nodiscard]] std::string_view to_string(SessionReceiptStage) noexcept;

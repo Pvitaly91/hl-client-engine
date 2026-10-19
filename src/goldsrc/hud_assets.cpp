@@ -1,5 +1,6 @@
 #include <hlclient/goldsrc/hud_assets.hpp>
 #include <hlclient/goldsrc/hud_manifest.hpp>
+#include <hlclient/goldsrc/text_messages.hpp>
 #include <hlclient/goldsrc/sprite/goldsrc_sprite_importer.hpp>
 #include <hlclient/assets/asset_manager.hpp>
 #include <hlclient/hash/sha256.hpp>
@@ -14,6 +15,26 @@
 namespace hlclient::goldsrc {
 namespace {
 using Status = game_api::HudResourceStatus;
+bool valid_sprite_name(std::string_view name) noexcept {
+    return name.starts_with("sprites/") && name.ends_with(".spr") &&
+        valid_hud_sprite_basename(name.substr(8U, name.size() - 12U));
+}
+bool valid_sprite_request(const game_api::HudSpriteRequest& request) noexcept {
+    return !request.role.empty() && request.role.size() <= kMaximumHudManifestTokenBytes &&
+        std::all_of(request.role.begin(), request.role.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '_' || c == '-';
+        }) && request.resolution && request.resolution <= 65'535U &&
+        request.frame < game_api::kMaximumHudSpriteFrames && valid_sprite_name(request.sprite_name);
+}
+bool supplemental_count_bounded(std::span<const game_api::HudManifestRequest> requests) noexcept {
+    std::size_t count{};
+    for (const auto& request : requests) {
+        if (request.supplemental_sprites.size() > game_api::kMaximumHudResourceEntries - count) return false;
+        count += request.supplemental_sprites.size();
+    }
+    return true;
+}
 Status read_status(const filesystem::FileReadResult& value) noexcept {
     if (!value.error) return Status::open_failed;
     switch (value.error->code) {
@@ -60,9 +81,9 @@ public:
     filesystem::FileReadResult read_file(const std::filesystem::path& path) const override {
         const auto name = path.generic_string();
         const bool manifest = valid_hud_descriptor_name(name);
-        const bool sprite = name.starts_with("sprites/") && name.ends_with(".spr") &&
-            valid_hud_sprite_basename(std::string_view{name}.substr(8U, name.size() - 12U));
-        if ((!manifest && !sprite) || stop_.stop_requested())
+        const bool sprite = valid_sprite_name(name);
+        const bool titles=name=="titles.txt";
+        if ((!manifest && !sprite && !titles) || stop_.stop_requested())
             return rejected_read(path, filesystem::FileReadErrorCode::InvalidVirtualPath);
         if (std::chrono::steady_clock::now() >= deadline_)
             return rejected_read(path, filesystem::FileReadErrorCode::IoError);
@@ -81,7 +102,8 @@ public:
                 filesystem::FileReadErrorCode::InvalidVirtualPath;
             return rejected_read(path, code);
         }
-        const auto maximum = manifest ? kMaximumHudManifestBytes : kMaximumHudSpriteSourceBytes;
+        const auto maximum = titles ? game_api::kMaximumTextMessageBytes :
+            manifest ? kMaximumHudManifestBytes : kMaximumHudSpriteSourceBytes;
         if (resolved.file->file_size() > maximum ||
             resolved.file->file_size() > kMaximumHudAggregateSourceBytes - bytes_read_) {
             resolved.file->close(); return rejected_read(path, filesystem::FileReadErrorCode::TooLarge);
@@ -115,7 +137,16 @@ private:
     mutable std::size_t bytes_read_{};
 };
 bool valid_request(const game_api::HudManifestRequest& request) noexcept {
-    if (!valid_hud_descriptor_name(request.name)) return false;
+    if (!valid_hud_descriptor_name(request.name) ||
+        request.supplemental_sprites.size() > game_api::kMaximumHudResourceEntries) return false;
+    for (std::size_t i = 0U; i < request.supplemental_sprites.size(); ++i) {
+        const auto& sprite = request.supplemental_sprites[i];
+        if (!valid_sprite_request(sprite)) return false;
+        for (std::size_t previous = 0U; previous < i; ++previous) {
+            const auto& other = request.supplemental_sprites[previous];
+            if (sprite.role == other.role && sprite.resolution == other.resolution) return false;
+        }
+    }
     if (!request.count_compatibility) return true;
     const auto& compatibility = *request.count_compatibility;
     return compatibility.exact_source_sha256.size() == 64U &&
@@ -142,6 +173,7 @@ HudPreparedAssets prepare_hud_assets(const filesystem::IFileSystem& source,
     std::span<const game_api::HudManifestRequest> requests, std::stop_token stop) {
     HudPreparedAssets out;
     if (requests.empty() || requests.size() > game_api::kMaximumHudResourceDescriptors) return out;
+    if (!supplemental_count_bounded(requests)) return failed_preparation(requests, Status::resource_limit);
     std::set<std::string> requested_names;
     std::size_t total_entries{};
     for (const auto& request : requests) {
@@ -164,16 +196,31 @@ HudPreparedAssets prepare_hud_assets(const filesystem::IFileSystem& source,
                 descriptor.parsed_count = static_cast<std::uint32_t>(parsed.records.size());
                 descriptor.exact_count_compatibility_applied = parsed.exact_count_compatibility_applied;
                 if (!parsed) descriptor.status = Status::invalid_manifest;
-                else if (parsed.records.size() > game_api::kMaximumHudResourceEntries - total_entries)
+                else if (parsed.records.size() > game_api::kMaximumHudResourceEntries - total_entries ||
+                    request.supplemental_sprites.size() >
+                        game_api::kMaximumHudResourceEntries - total_entries - parsed.records.size())
                     descriptor.status = Status::resource_limit;
+                else if (std::any_of(request.supplemental_sprites.begin(), request.supplemental_sprites.end(),
+                    [&](const auto& sprite) {
+                        return std::any_of(parsed.records.begin(), parsed.records.end(), [&](const auto& record) {
+                            return sprite.role == record.role && sprite.resolution == record.resolution;
+                        });
+                    })) descriptor.status = Status::not_authorized;
                 else {
-                    out.source_bytes += opened.file->bytes.size(); total_entries += parsed.records.size();
+                    out.source_bytes += opened.file->bytes.size();
+                    total_entries += parsed.records.size() + request.supplemental_sprites.size();
                     descriptor.status = Status::ready;
                     for (const auto& record : parsed.records) {
                         game_api::HudResourceEntry entry;
                         entry.role = record.role; entry.resolution = record.resolution;
                         entry.sprite_name = "sprites/" + record.sprite_basename + ".spr";
                         entry.source = record.source;
+                        descriptor.entries.push_back(std::move(entry));
+                    }
+                    for (const auto& sprite : request.supplemental_sprites) {
+                        game_api::HudResourceEntry entry;
+                        entry.role = sprite.role; entry.resolution = sprite.resolution;
+                        entry.sprite_name = sprite.sprite_name; entry.frame = sprite.frame;
                         descriptor.entries.push_back(std::move(entry));
                     }
                 }
@@ -184,7 +231,13 @@ HudPreparedAssets prepare_hud_assets(const filesystem::IFileSystem& source,
     struct Cached final { Status status{}; std::uint64_t id{}, revision{}; std::string sha;
         std::shared_ptr<const entity_render::SpriteRenderAsset> asset; };
     std::map<std::string, Cached> cache;
-    for (auto& descriptor : out.resources.descriptors) for (auto& entry : descriptor.entries) {
+    for (auto& descriptor : out.resources.descriptors) for (std::size_t entry_index = 0U;
+        entry_index < descriptor.entries.size(); ++entry_index) {
+        auto& entry = descriptor.entries[entry_index];
+        // Only explicit trusted supplemental requests are appended beyond the
+        // successfully parsed record count. Never infer whole-frame authority
+        // from an empty/invalid rectangle supplied by the manifest itself.
+        const bool whole_frame = entry_index >= descriptor.parsed_count;
         auto cached = cache.find(entry.sprite_name);
         if (cached == cache.end()) {
             Cached value; value.status = Status::resource_limit;
@@ -209,8 +262,8 @@ HudPreparedAssets prepare_hud_assets(const filesystem::IFileSystem& source,
                     sprite::GoldSrcSpriteImportLimits limits;
                     limits.maximum_source_bytes = kMaximumHudSpriteSourceBytes;
                     limits.maximum_width = limits.maximum_height = 4'096U;
-                    limits.maximum_top_level_entries = limits.maximum_flattened_frames = 64U;
-                    limits.maximum_group_frames = 64U;
+                    limits.maximum_top_level_entries = limits.maximum_flattened_frames = game_api::kMaximumHudSpriteFrames;
+                    limits.maximum_group_frames = game_api::kMaximumHudSpriteFrames;
                     limits.maximum_metadata_bytes = 64U * 1024U;
                     limits.maximum_total_indexed_bytes = std::min<std::size_t>(16U * 1024U * 1024U, (remaining - metadata_reserve) / 13U);
                     limits.maximum_total_rgba_bytes = std::min<std::size_t>(64U * 1024U * 1024U, ((remaining - metadata_reserve) / 13U) * 8U);
@@ -254,10 +307,15 @@ HudPreparedAssets prepare_hud_assets(const filesystem::IFileSystem& source,
         }
         const auto& value = cached->second;
         entry.status = value.status; entry.asset_sha256 = value.sha;
-        if (value.status == Status::ready && value.asset && !value.asset->frames().empty()) {
-            const auto& frame = value.asset->frames().front();
+        if (value.status == Status::ready && value.asset) {
+            if (entry.frame >= value.asset->frames().size()) {
+                entry.status = Status::invalid_rectangle;
+                ++out.rejected_entries; continue;
+            }
+            const auto& frame = value.asset->frames()[entry.frame];
             entry.frame_width = frame.geometry.width; entry.frame_height = frame.geometry.height;
             entry.blend = blend_for(value.asset->texture_format());
+            if (whole_frame) entry.source = {0U, 0U, entry.frame_width, entry.frame_height};
             if (!valid_hud_source_rectangle(entry.source, entry.frame_width, entry.frame_height))
                 entry.status = Status::invalid_rectangle;
             else if (frame.profile == entity_render::SpriteRenderTextureProfile::unsupported)
@@ -269,7 +327,16 @@ HudPreparedAssets prepare_hud_assets(const filesystem::IFileSystem& source,
     std::string identity;
     for (const auto& descriptor : out.resources.descriptors) {
         identity += descriptor.name; identity += descriptor.source_sha256;
-        for (const auto& entry : descriptor.entries) { identity += entry.sprite_name; identity += entry.asset_sha256; }
+        for (std::size_t index = 0U; index < descriptor.entries.size(); ++index) {
+            const auto& entry = descriptor.entries[index];
+            identity += entry.sprite_name; identity += entry.asset_sha256;
+            if (index >= descriptor.parsed_count) {
+                // A different explicit frame/role/tier must publish a new set
+                // revision even when it shares the same immutable SPR bytes.
+                identity += "|supplement:" + entry.role + ":" + std::to_string(entry.resolution) +
+                    ":" + std::to_string(entry.frame) + ";";
+            }
+        }
     }
     const auto digest = hash::sha256(std::as_bytes(std::span{identity.data(), identity.size()}));
     if (digest) out.resources.revision = revision(*digest);
@@ -281,8 +348,10 @@ struct ApprovedHudAssets::Impl final {
     std::jthread worker;
 };
 ApprovedHudAssets::ApprovedHudAssets(PreparedSoundResources resources,
-    std::span<const game_api::HudManifestRequest> requests) : impl_{std::make_unique<Impl>()} {
+    std::span<const game_api::HudManifestRequest> requests,std::string_view text_resource) : impl_{std::make_unique<Impl>()} {
     if (requests.size() > game_api::kMaximumHudResourceDescriptors ||
+        !supplemental_count_bounded(requests) ||
+        (!text_resource.empty() && text_resource!="titles.txt") ||
         std::any_of(requests.begin(), requests.end(), [](const auto& request) { return !valid_request(request); })) {
         impl_->result = std::make_shared<const HudPreparedAssets>(failed_preparation(requests, Status::not_authorized)); return;
     }
@@ -291,10 +360,20 @@ ApprovedHudAssets::ApprovedHudAssets(PreparedSoundResources resources,
     auto failure = std::make_shared<const HudPreparedAssets>(failed_preparation(requests, Status::decode_failed));
     std::vector<game_api::HudManifestRequest> copied{requests.begin(), requests.end()};
     try { impl_->worker = std::jthread{[impl = impl_.get(), resources = std::move(resources),
-        requests = std::move(copied), failure](std::stop_token stop) {
+        requests = std::move(copied), text_resource=std::string{text_resource}, failure](std::stop_token stop) {
         std::shared_ptr<const HudPreparedAssets> completed;
-        try { completed = std::make_shared<const HudPreparedAssets>(
-            prepare_hud_assets(ExactWorldHudSource{resources, stop}, requests, stop)); }
+        try {
+            ExactWorldHudSource source{resources,stop};
+            auto prepared=prepare_hud_assets(source,requests,stop);
+            if(!text_resource.empty() && !stop.stop_requested()) {
+                const auto opened=source.read_file(text_resource);
+                prepared.text_messages_status=opened ? Status::decode_failed : read_status(opened);
+                if(opened)if(auto catalogue=parse_text_message_catalogue(opened.file->bytes)) {
+                    prepared.text_messages=std::move(*catalogue);prepared.text_messages_status=Status::ready;
+                }
+            }
+            completed=std::make_shared<const HudPreparedAssets>(std::move(prepared));
+        }
         catch (...) { completed = failure; }
         if (!stop.stop_requested()) { std::lock_guard lock{impl->mutex}; impl->result = std::move(completed); }
     }}; } catch (...) { impl_->result = std::move(failure); }

@@ -139,11 +139,21 @@ hlclient_add_library(
 )
 add_library(hlclient::core ALIAS hlclient_core)
 
+hlclient_add_library(hlclient_console
+    src/console/console_model.cpp
+    src/console/command_registry.cpp
+    src/console/command_executor.cpp
+    src/console/console_config.cpp
+    src/console/console_bindings.cpp)
+add_library(hlclient::console ALIAS hlclient_console)
+target_link_libraries(hlclient_console PUBLIC hlclient::core hlclient::gameplay_input)
+
 hlclient_add_library(hlclient_session_receipts
     include/hlclient/app/session_receipt.hpp
     src/app/session_receipt.cpp
     include/hlclient/app/movement_diagnostics.hpp
     src/app/movement_diagnostics.cpp
+    src/app/multiplayer_timeline.cpp
     include/hlclient/app/remote_movement_diagnostics.hpp
     src/app/remote_movement_diagnostics.cpp
     include/hlclient/app/movement_session_diagnostics.hpp
@@ -707,6 +717,7 @@ set_property(
 hlclient_add_library(
     hlclient_goldsrc_client_message
     include/hlclient/goldsrc/client_message.hpp
+    src/goldsrc/console_request.cpp
     src/goldsrc/client_message.cpp)
 add_library(hlclient::goldsrc_client_message ALIAS hlclient_goldsrc_client_message)
 target_link_libraries(hlclient_goldsrc_client_message
@@ -1252,7 +1263,7 @@ if(WIN32)
     target_compile_definitions(hlclient_external_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(hlclient_external_launcher PUBLIC
         hlclient::windows_process_orchestrator hlclient::windows_secure_output hlclient::core
-        PRIVATE bcrypt)
+        PRIVATE bcrypt shell32 ole32 uuid)
 
     hlclient_add_library(
         hlclient_windows_reparse_provenance
@@ -1366,6 +1377,18 @@ target_link_libraries(
 )
 set_property(
     TARGET hlclient_goldsrc_local_resources
+    PROPERTY FOLDER "Engine/Resources/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_file_consistency
+    include/hlclient/goldsrc/file_consistency_response.hpp
+    src/goldsrc/file_consistency_response.cpp
+)
+add_library(hlclient::goldsrc_file_consistency ALIAS hlclient_goldsrc_file_consistency)
+target_link_libraries(hlclient_goldsrc_file_consistency
+    PUBLIC hlclient::goldsrc_local_resources
+    PRIVATE hlclient::hash_md5 hlclient::goldsrc_usercmd_codec)
+set_property(TARGET hlclient_goldsrc_file_consistency
     PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
@@ -1517,6 +1540,8 @@ hlclient_add_library(
     hlclient_studio_pose
     include/hlclient/goldsrc/studio/goldsrc_studio_pose.hpp
     src/goldsrc/studio/goldsrc_studio_pose.cpp
+    include/hlclient/goldsrc/studio/goldsrc_studio_entity_animation.hpp
+    src/goldsrc/studio/goldsrc_studio_entity_animation.cpp
 )
 add_library(hlclient::studio_pose ALIAS hlclient_studio_pose)
 target_link_libraries(
@@ -1680,6 +1705,8 @@ hlclient_add_library(
     src/app/authentication_material_file.cpp
     src/app/explicit_file_authentication_provider.cpp
     src/app/steam_authentication_provider.cpp
+    include/hlclient/app/console_steam_authentication.hpp
+    src/app/console_steam_authentication.cpp
 )
 add_library(hlclient::app_support ALIAS hlclient_app_support)
 target_link_libraries(
@@ -1729,7 +1756,7 @@ hlclient_add_library(hlclient_game_client_host
     include/hlclient/game_api/game_client_host.hpp
     src/game_api/game_client_host.cpp)
 add_library(hlclient::game_client_host ALIAS hlclient_game_client_host)
-target_link_libraries(hlclient_game_client_host PUBLIC hlclient::game_api)
+target_link_libraries(hlclient_game_client_host PUBLIC hlclient::game_api PRIVATE hlclient::core)
 
 hlclient_add_library(
     hlclient_renderer_api
@@ -1811,6 +1838,7 @@ target_link_libraries(
     hlclient_goldsrc_client PUBLIC hlclient::goldsrc_live_runtime)
 target_link_libraries(hlclient_goldsrc_live_runtime
     PUBLIC hlclient::game_client_host PRIVATE hlclient::game_policy)
+target_link_libraries(hlclient_goldsrc_live_runtime PRIVATE hlclient::goldsrc_file_consistency)
 set_property(
     TARGET hlclient_goldsrc_live_runtime
     PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Live")
@@ -2279,6 +2307,10 @@ hlclient_add_library(
     src/app/runtime_replay_visual_projection.cpp
     include/hlclient/app/runtime_replay_local_assets.hpp
     src/app/runtime_replay_local_assets.cpp
+    include/hlclient/app/remote_support_presentation.hpp
+    src/app/remote_support_presentation.cpp
+    include/hlclient/app/multiplayer_presentation_diagnostics.hpp
+    src/app/multiplayer_presentation_diagnostics.cpp
     include/hlclient/app/world_impact_presentation.hpp
     src/app/world_impact_presentation.cpp
     include/hlclient/app/remote_effect_presentation.hpp
@@ -2318,6 +2350,7 @@ target_link_libraries(hlclient_application_runtime_replay
 target_link_libraries(hlclient_application_runtime_replay PRIVATE hlclient::goldsrc_usercmd_session)
 
 hlclient_add_library(hlclient_goldsrc_hud_assets
+    include/hlclient/goldsrc/text_messages.hpp src/goldsrc/text_messages.cpp
     include/hlclient/goldsrc/hud_manifest.hpp src/goldsrc/hud_manifest.cpp
     include/hlclient/goldsrc/hud_assets.hpp src/goldsrc/hud_assets.cpp)
 add_library(hlclient::goldsrc_hud_assets ALIAS hlclient_goldsrc_hud_assets)
@@ -2332,6 +2365,7 @@ target_link_libraries(hlclient_application_runtime_replay PUBLIC hlclient::golds
 
 if(HLCLIENT_BUILD_GAME_HALFLIFE)
     hlclient_add_library(hlclient_game_halflife
+        src/games/halflife/console_commands.cpp
         src/games/halflife/sprite_hud.cpp
         src/games/halflife/screen_effects.cpp
         include/hlclient/games/halflife/screen_effects.hpp
@@ -2389,7 +2423,7 @@ if(HLCLIENT_BUILD_GAME_HALFLIFE)
         src/games/halflife/action_evidence.cpp)
     add_library(hlclient::game_halflife ALIAS hlclient_game_halflife)
     target_link_libraries(hlclient_game_halflife
-        PUBLIC hlclient::game_api
+        PUBLIC hlclient::game_api hlclient::console
         PRIVATE hlclient::game_policy hlclient::client
             hlclient::gameplay_input hlclient::goldsrc_usercmd_api
             hlclient::goldsrc_client_message hlclient::studio_pose)
@@ -2494,7 +2528,20 @@ target_link_libraries(
 )
 set_property(TARGET hlclient_renderer_opengl PROPERTY FOLDER "Engine/Renderer")
 
+hlclient_add_library(hlclient_console_assets src/goldsrc/console_background.cpp)
+add_library(hlclient::console_assets ALIAS hlclient_console_assets)
+target_link_libraries(hlclient_console_assets PUBLIC hlclient::asset_api hlclient::local_asset_source)
+hlclient_add_library(hlclient_application_console
+    src/app/console_application.cpp src/app/console_screen.cpp)
+add_library(hlclient::application_console ALIAS hlclient_application_console)
+target_link_libraries(hlclient_application_console PUBLIC hlclient::console
+    hlclient::platform hlclient::renderer_opengl hlclient::game_api)
+if(WIN32)
+    target_link_libraries(hlclient_application_console PRIVATE hlclient::external_launcher)
+endif()
+
 add_executable(hlclient apps/hlclient/main.cpp)
+target_link_libraries(hlclient PRIVATE hlclient::application_console hlclient::console_assets)
 target_compile_definitions(hlclient PRIVATE
     HLCLIENT_BUILD_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>
     HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
@@ -3641,6 +3688,7 @@ set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT
 foreach(
     _hlclient_sanitized_target
     IN ITEMS
+        hlclient_console hlclient_application_console hlclient_console_assets
         hlclient_audio hlclient_audio_sdl hlclient_goldsrc_audio hlclient_goldsrc_sound_assets hlclient_goldsrc_hud_assets
         hlclient_tga_image hlclient_goldsrc_sky_assets
         hlclient_collision_api
@@ -3690,6 +3738,7 @@ endforeach()
 
 if(WIN32)
     # Instrument the shared log-reader lifetime as well as its test caller.
+    hlclient_enable_address_sanitizer(hlclient_external_launcher)
     hlclient_enable_address_sanitizer(hlclient_windows_process_orchestrator)
     hlclient_enable_address_sanitizer(hlclient_windows_reparse_provenance)
     hlclient_enable_address_sanitizer(
@@ -3705,6 +3754,13 @@ endif()
 if(BUILD_TESTING)
     add_subdirectory(tests/core_api)
     if(WIN32)
+        add_test(NAME hlclient_console_idle_no_assets_e33
+            COMMAND "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+                -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File "${PROJECT_SOURCE_DIR}/scripts/test_console_idle_e33.ps1"
+                -ToolPath $<TARGET_FILE:hlclient>)
+        set_tests_properties(hlclient_console_idle_no_assets_e33 PROPERTIES
+            LABELS "offline;e33;console;application;no-stock" TIMEOUT 45)
         # Owned byte/filesystem fixtures only; no installed map/game/device.
         # Register in game-OFF builds as well as the ordinary client build.
         add_test(NAME hlclient_gentest_multiplayer_map_no_stock

@@ -1,5 +1,57 @@
 # GoldSrc initial sign-on boundary
 
+## Early Director control compatibility (2026-10-19)
+
+The normal client's initial and post-serverinfo service streams also accept
+the standard `svc_director` (51) envelope: one unsigned byte `N`, followed by
+exactly `N` opaque bytes. This is the framing already used by the runtime
+decoder, now shared through `ByteReader::read_uint8_sized_bytes`. No Director
+command is executed, and no embedded service opcode, command text or cvar
+query is interpreted. Only length/cursor metadata is published. Empty bodies
+are accepted consistently with the existing runtime decoder; the wire length
+cannot exceed 255 bytes.
+
+An incomplete length/body fails atomically. Unknown following opcodes still
+fail at their actual cursor. The existing message, payload, FIFO and event
+budgets apply to Director records; they neither satisfy required extra-info
+nor authorize a resource/spawn request. `serverinfo` and the later boundary
+remain owned by their original decoders. The two later resource-control gates
+admit only an already-decoded auxiliary `svc_director`, not arbitrary auxiliary
+messages. This compatibility rule does not depend on a server address.
+
+The reported failure was `initial_signon`, source sequence 1, opcode 51 at
+offset 0 in user attempt `90fd0d55057f8d1c6061a52ae2b153a9`. Its wrapper also
+printed cascading resource-transition failures; those were not the owner of
+the rejected message. The report does not contain the Director body, so test
+fixtures are independently authored standard envelopes, not a claimed replay
+of captured wire bytes. See `STEAM_PUBLIC_SERVER_DIAGNOSTICS.md` for evidence
+and verification results.
+
+## Bounded event publication and retained history (2026-10-19)
+
+The initial stage's event ring and retained early-message history have distinct
+bounds. The normal event ring defaults to 128 slots (hard maximum 256), enough
+for a default 64-message service batch plus its payload/lifecycle metadata.
+`maximum_retained_messages` independently defaults to, and cannot exceed, 256
+records. Together with the unchanged string and payload bounds this keeps
+owning state finite; it does not permit an unbounded early-message stream.
+
+When a complete validated batch can fit an empty ring but not its current free
+space, the stage keeps exactly one owning decoded candidate and yields. It
+publishes neither partial message history nor partial batch events, and does
+not consume another driver event or perform another network update while that
+candidate is blocked. The caller can poll existing events and resume it on a
+later update. The composite already drains nested progress before and after
+each bounded update. No packet/body is decoded again, reordered or dropped to
+make room. Original source/receive provenance is retained.
+
+A batch larger than the configured empty ring, or history exceeding its own
+configured cap, remains a terminal capacity error. Explicit small caps and
+malformed/unsupported wire-message rejection remain effective. Cancellation
+and backwards-time errors release pending ownership through the same cleanup
+path. A standalone consumer that never polls can remain paused at bounded
+consumer backpressure; it is not reported as a remote protocol failure.
+
 ## Scope
 
 M2.4.1 adds the first semantic layer above the persistent GoldSrc netchan:

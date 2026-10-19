@@ -1,9 +1,12 @@
 #pragma once
+#include <hlclient/goldsrc/console_request.hpp>
+#include <hlclient/core/prediction_work_diagnostics.hpp>
 #include <hlclient/game_api/game_client_host.hpp>
 
 #include <hlclient/client/client_world_state.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
 #include <hlclient/goldsrc/entity_baseline_decoder.hpp>
+#include <hlclient/goldsrc/file_consistency_response.hpp>
 #include <hlclient/goldsrc/resource_client_response_stage.hpp>
 #include <hlclient/goldsrc/reference_prediction_seed.hpp>
 #include <hlclient/goldsrc/runtime_control_decoder.hpp>
@@ -24,9 +27,12 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace hlclient::world_scene_render { class WorldSceneRenderPackage; }
+namespace hlclient::core { struct MovementCorrectionWitness; class MultiplayerDiagnosticSink; }
+namespace hlclient::local_resources { class LocalResourceEnvironment; }
 namespace hlclient::goldsrc {
 namespace collision { class BrushCollisionScene; }
 
@@ -92,6 +98,10 @@ struct LiveVisualControlInput final {
     // Owning pre-command UI consumption. Clears only unsent current/pending
     // input, never an already materialized/history/transmitted command.
     gameplay_input::GameplayButtonMask consumed_buttons{0U};
+    // Actual normalized-input publication time, never a scheduler deadline.
+    std::optional<std::uint64_t> input_sample_ns;
+    // Presentation owner's effective buffer reserve, not observed actor age.
+    std::optional<double> effective_interpolation_seconds;
 };
 
 // Bounded project-action edge latch. The owning stage adds presses only after
@@ -217,10 +227,24 @@ struct LiveRuntimeStageConfig final {
     bool reference_prediction{false};
     bool effect_diagnostics{false};
     bool movement_diagnostics{false};
+    // Optional owning application's receipt generations, sampled only when a
+    // diagnostic event publishes. This never participates in physics identity.
+    std::function<std::array<std::uint64_t,2>()> movement_diagnostic_generations;
+    // Synchronous numeric owning events, once per correction attempt. Optional
+    // diagnostic failures never participate in simulation or authority commit.
+    std::function<void(const core::MovementCorrectionWitness&)> movement_correction_sink;
     // Optional application-selected compatibility profile, not a wire rewrite.
     std::optional<std::string> required_game_directory;
     std::shared_ptr<game_api::GameClientHost> game_client;
     std::shared_ptr<CommittedSoundQueue> sound_events;
+    // Owning approved resource roots for requested file-consistency hashes.
+    // No filesystem work is started when the server requested no checks.
+    std::shared_ptr<const local_resources::LocalResourceEnvironment>
+        file_consistency_environment;
+    FileConsistencyReadPolicy file_consistency_read_policy{
+        FileConsistencyReadPolicy::game_assets_only};
+    // Borrowed diagnostic-only observer; the application retains its lifetime.
+    core::MultiplayerDiagnosticSink* multiplayer_diagnostics{nullptr};
 };
 
 enum class LiveReferencePredictionState : std::uint8_t {
@@ -238,6 +262,21 @@ enum class LiveReferencePredictionState : std::uint8_t {
     }
     return "unknown";
 }
+
+struct LiveVelocityStopDiagnostic final {
+    movement::VelocityStopTransition transition;
+    std::uint64_t capture_ordinal{}, prediction_epoch{}, source_record_identity{};
+    std::uint64_t scene_record_identity{}, scene_revision{};
+    std::uint64_t network_generation{}, map_generation{}, life_epoch{}, life_deaths{};
+    std::optional<std::uint64_t> observed_ns;
+    std::optional<std::int64_t> command_sample_ns;
+    std::optional<std::uint32_t> source_sequence;
+    std::optional<double> source_server_time, scene_server_time;
+    std::optional<GoldSrcWireUserCmd> command;
+    std::uint32_t history_anchor_command{}, history_latest_command{};
+    std::uint8_t source_freshness{}, predecessor_decision{};
+    bool replay{}, source_matches_scene{};
+};
 
 struct LiveReferencePredictionSnapshot final {
     // Derived render-only scene at exactly the player presentation time.
@@ -296,6 +335,8 @@ struct LiveReferencePredictionSnapshot final {
         collision_identity;
     std::optional<double> command_simulation_seconds;
     std::optional<std::int64_t> render_sample_time_ns;
+    // Actual selected command/pair time, not merely the requested sample time.
+    std::optional<std::int64_t> presentation_selected_time_ns;
     std::optional<double> support_observation_seconds;
     std::optional<double> support_velocity_z;
     std::optional<movement::LocalMovementPositionTest> collision_position_evidence;
@@ -318,6 +359,16 @@ struct LiveReferencePredictionSnapshot final {
     std::optional<ReferencePredictionAnchorStatus> last_anchor_status;
     bool anchor_coherent_reliable_frame{false};
     std::string_view collision_query_purpose{"unavailable"};
+    std::optional<LiveVelocityStopDiagnostic> velocity_stop;
+    std::uint64_t correction_events_published{},correction_sink_failures{};
+    // Current alive-life recovery only, separate from the legacy suspension
+    // interval which can include death. Timestamp uses the stage owner clock.
+    std::optional<std::int64_t> life_wait_started_ns;
+    double life_wait_duration_ms{0.0};
+    std::string_view recovery_wait_reason{"none"};
+    // Most recent bound candidate, not the accepted anchor_command and not
+    // proof of execution. It may still be blocked by the current life floor.
+    std::optional<std::uint32_t> candidate_anchor_command;
 };
 
 // Metadata-only measurement of the most recent owning update. Actual clocks
@@ -332,6 +383,7 @@ struct LiveRuntimeMovementDiagnostics final {
     double collision_scene_ms{0.0};
     double prediction_command_ms{0.0};
     double prediction_replay_ms{0.0};
+    core::PredictionWorkDiagnostics prediction_work;
     std::size_t driver_queue_before{0U};
     std::size_t driver_queue_after{0U};
     std::size_t processed_driver_events{0U};
@@ -402,6 +454,7 @@ enum class LiveRuntimeStageErrorCode : std::uint8_t {
     initialization_context_missing,
     unsupported_game_profile,
     spawn_request_build_failed,
+    file_consistency_response_failed,
     spawn_request_queue_failed,
     spawn_request_transmit_mismatch,
     signon_reply_queue_failed,
@@ -443,6 +496,7 @@ struct LiveRuntimeStageError final {
     std::optional<ResourceResponsePayloadDiagnostic>
         response_payload_diagnostic;
     std::optional<StockSpawnRequestErrorCode> spawn_request_code;
+    std::optional<FileConsistencyResponseErrorCode> file_consistency_code;
     std::optional<ServicePayloadEnvelopeErrorCode> envelope_code;
     std::optional<RuntimeControlDecodeErrorCode> control_code;
     std::optional<EntityBaselineDecodeErrorCode> baseline_code;
@@ -536,6 +590,15 @@ struct LiveWeaponCommandSubmission final {
     std::optional<assets::AssetVector3> player_origin;
     std::optional<bool> player_ducked;
 };
+
+// Lifetime receipt totals only. Unlike the owning diagnostic snapshot, this
+// view never copies command history, transmit ranges or server sample windows.
+struct LiveUserCmdReceiptCounters final {
+    std::size_t new_command_submission_count{0U};
+    std::size_t transmitted_packet_count{0U};
+    std::size_t server_sample_count{0U};
+};
+static_assert(std::is_trivially_copyable_v<LiveUserCmdReceiptCounters>);
 
 struct LiveUserCmdCheckState final {
     std::size_t use_generated_count{}, use_command_press_count{}, use_command_release_count{};
@@ -795,6 +858,8 @@ public:
     [[nodiscard]] bool activate_live_visual_control(
         LiveRuntimeStageTimePoint now) noexcept;
     [[nodiscard]] bool request_weapon_selection(std::uint8_t weapon_id);
+    // Queued for reliable delivery only; never reports server execution.
+    [[nodiscard]] bool request_console_command(const ConsoleServerCommandRequest& request);
 
     [[nodiscard]] std::optional<LiveRuntimeStageEvent> poll_event();
     [[nodiscard]] LiveRuntimeStageState state() const noexcept;
@@ -820,6 +885,10 @@ public:
     [[nodiscard]] std::string_view live_sky_name() const noexcept;
     [[nodiscard]] std::optional<LiveUserCmdCheckState>
     live_usercmd_snapshot() const;
+    // Availability matches live_usercmd_snapshot(), including retained totals
+    // after terminal cleanup; no history or diagnostic-window allocation.
+    [[nodiscard]] std::optional<LiveUserCmdReceiptCounters>
+    live_usercmd_receipt_counters() const noexcept;
     [[nodiscard]] std::size_t live_use_new_submission_count() const noexcept;
     [[nodiscard]] std::optional<LiveWeaponCommandSubmission>
     poll_weapon_command_submission();
@@ -884,6 +953,8 @@ private:
         return "unsupported_game_profile";
     case LiveRuntimeStageErrorCode::spawn_request_build_failed:
         return "spawn_request_build_failed";
+    case LiveRuntimeStageErrorCode::file_consistency_response_failed:
+        return "file_consistency_response_failed";
     case LiveRuntimeStageErrorCode::spawn_request_queue_failed:
         return "spawn_request_queue_failed";
     case LiveRuntimeStageErrorCode::spawn_request_transmit_mismatch:

@@ -191,6 +191,87 @@ TEST_CASE("Readiness limits are positive and hard capped",
         1U, goldsrc::kMaximumLocatorVirtualNameBytes + 1U}));
 }
 
+TEST_CASE("Readiness default preserves the complete large resource list",
+          "[goldsrc][local-resource][readiness][limits][custom-server]")
+{
+    ScopedLocalResourceTestRoot root;
+    root.write("valve", "maps/test_map.bsp", "map");
+    auto environment = fixture::make_environment(root);
+    std::vector<resource_list_test_fixture::EntrySpec> specs{
+        {2U, "maps/test_map.bsp", 1U, 0U, 0U}};
+    for (std::size_t index = 1U; index < goldsrc::kMaximumResourceCount; ++index) {
+        specs.push_back({3U, "{d" + std::to_string(index),
+                         static_cast<std::uint16_t>(index), 0U, 0U});
+    }
+    const auto list = fixture::parse_resource_list(specs);
+    const auto inventory = fixture::build_inventory(list, *environment);
+    const auto server = fixture::parse_server_info("maps/test_map.bsp");
+    const auto built = fixture::build_readiness(list, inventory, server, *environment);
+    REQUIRE(built);
+    REQUIRE(built.state);
+    CHECK(built.state->entry_count() == specs.size());
+    CHECK(built.state->complete_for_supported_local_profile());
+    CHECK(built.state->summary().metadata_only_count() == specs.size() - 1U);
+    CHECK(built.state->world_geometry_ready());
+    CHECK(built.state->entries().back().wire_ordinal() == specs.size() - 1U);
+
+    goldsrc::LocalResourceReadinessLimits limits;
+    limits.maximum_entry_count = 1024U;
+    const auto limited = goldsrc::LocalResourceReadinessBuilder{limits}.build(
+        list, inventory, server, goldsrc::GoldSrcResourceNameMapper{}, *environment);
+    REQUIRE_FALSE(limited);
+    CHECK_FALSE(limited.state);
+    REQUIRE(limited.error);
+    CHECK(limited.error->code ==
+          goldsrc::LocalResourceReadinessErrorCode::entry_count_limit_exceeded);
+}
+
+TEST_CASE("Readiness preserves non-bindable decal 4095 metadata by ordinal without indexed lookup",
+          "[goldsrc][local-resource][readiness][custom-server][decal-metadata]")
+{
+    ScopedLocalResourceTestRoot root;
+    root.write("valve", "maps/test_map.bsp", "map");
+    root.write("valve", "sound/test.wav", "sound");
+    auto environment = fixture::make_environment(root);
+    const auto server = fixture::parse_server_info("maps/test_map.bsp");
+    for (const std::size_t metadata_count : {1U, 3U}) {
+        INFO("metadata_count=" << metadata_count);
+        std::vector<resource_list_test_fixture::EntrySpec> specs;
+        for (std::size_t ordinal = 0U; ordinal < metadata_count; ++ordinal) {
+            specs.push_back({3U, "{missing_" + std::to_string(ordinal), 4095U, 0U, 0U});
+        }
+        specs.push_back({2U, "maps/test_map.bsp", 4095U, 0U, 0U});
+        specs.push_back({0U, "test.wav", 4095U, 0U, 0U});
+        specs.push_back({3U, "{ordinary", 3U, 0U, 0U});
+        const auto list = fixture::parse_resource_list(specs);
+        const auto inventory = fixture::build_inventory(list, *environment);
+        const auto built = fixture::build_readiness(list, inventory, server, *environment);
+        REQUIRE(built);
+        REQUIRE(built.state);
+        const auto& readiness = *built.state;
+        REQUIRE(readiness.entry_count() == specs.size());
+        CHECK(readiness.complete_for_supported_local_profile());
+        CHECK(readiness.summary().metadata_only_count() == metadata_count + 1U);
+        for (std::size_t ordinal = 0U; ordinal < specs.size(); ++ordinal) {
+            CHECK(inventory.entries()[ordinal].wire_ordinal() == ordinal);
+            CHECK(readiness.entries()[ordinal].wire_ordinal() == ordinal);
+            CHECK(readiness.entries()[ordinal].resource_index() == specs[ordinal].index);
+        }
+        for (std::size_t ordinal = 0U; ordinal < metadata_count; ++ordinal) {
+            CHECK(readiness.entries()[ordinal].status() == goldsrc::LocalResourceReadinessStatus::metadata_only);
+            CHECK_FALSE(readiness.entries()[ordinal].locator());
+        }
+        CHECK_FALSE(readiness.find_exact(goldsrc::ResourceType::decal, 4095U));
+        REQUIRE(readiness.find_exact(goldsrc::ResourceType::model, 4095U));
+        CHECK(readiness.find_exact(goldsrc::ResourceType::model, 4095U)->wire_ordinal() == metadata_count);
+        REQUIRE(readiness.find_exact(goldsrc::ResourceType::sound, 4095U));
+        CHECK(readiness.find_exact(goldsrc::ResourceType::sound, 4095U)->wire_ordinal() == metadata_count + 1U);
+        REQUIRE(readiness.find_exact(goldsrc::ResourceType::decal, 3U));
+        CHECK(readiness.find_exact(goldsrc::ResourceType::decal, 3U)->wire_ordinal() == metadata_count + 2U);
+        CHECK(readiness.world_selection().wire_ordinal() == metadata_count);
+    }
+}
+
 static_assert(std::is_copy_constructible_v<
               goldsrc::LocalResourceReadinessState>);
 static_assert(!std::is_copy_assignable_v<

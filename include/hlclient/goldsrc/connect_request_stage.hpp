@@ -108,6 +108,10 @@ struct ConnectRequestTraceEvent {
     std::size_t user_info_size{0U};
     std::size_t authentication_size{0U};
     std::string context;
+    // Separate binary ticket length from the legacy total including cdkey.
+    std::optional<std::size_t> authentication_suffix_size;
+    // Inspects only the final text-header byte, never ticket contents.
+    std::optional<bool> authentication_line_delimiter;
 };
 
 // Connect trace events expose metadata only. They intentionally contain no raw
@@ -414,8 +418,11 @@ public:
     [[nodiscard]] bool activate_live_visual_control(
         ChallengeExchangeTimePoint now) noexcept;
     [[nodiscard]] bool request_weapon_selection(std::uint8_t weapon_id);
+    [[nodiscard]] bool request_console_command(const ConsoleServerCommandRequest& request);
     [[nodiscard]] std::optional<LiveUserCmdCheckState>
     live_usercmd_snapshot() const;
+    [[nodiscard]] std::optional<LiveUserCmdReceiptCounters>
+    live_usercmd_receipt_counters() const noexcept;
     [[nodiscard]] std::size_t live_use_new_submission_count() const noexcept;
     [[nodiscard]] std::optional<LiveWeaponCommandSubmission>
     poll_weapon_command_submission();

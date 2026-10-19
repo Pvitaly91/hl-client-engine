@@ -3,6 +3,7 @@
 #include <hlclient/games/halflife/client_module.hpp>
 #include <hlclient/goldsrc/runtime_replay_fixture.hpp>
 #include <hlclient/goldsrc/server_audio.hpp>
+#include <hlclient/core/log.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
 #include <array>
@@ -49,7 +50,7 @@ struct PeerReplay {
         init.max_clients = 2U; init.receiving_player_entity = 1U;
         init.game_client = host; init.sound_events = queue;
         init.user_message_definitions = {{201U, 9, "ScoreInfo"}, {202U, -1, "SayText"},
-            {203U, 1, "Health"}, {204U, 2, "AmmoX"}, {205U, 3, "CurWeapon"}};
+            {203U, 1, "Health"}, {204U, 2, "AmmoX"}, {205U, 3, "CurWeapon"}, {206U,-1,"TextMsg"}, {207U,-1,"DeathMsg"}};
         auto initialized = gs::RuntimeReplaySession::initialize(std::move(init), world); REQUIRE(initialized);
         session = std::move(initialized.session);
     }
@@ -196,7 +197,8 @@ TEST_CASE("E28 registered SayText is bounded inert byte plus exact terminated te
           "[e28][peer-disconnect][saytext][runtime-replay][game-module]") {
     PeerReplay f; f.seed();
     // Source shape: pinned SDK ClientDisconnect writes entity byte then string.
-    // Text is never executed, formatted, rendered or exported by this parser.
+    // Text is never executed or printf-formatted; E33 delivers it as inert
+    // bounded display data only after the complete record commits.
     REQUIRE(f.apply(registered(202U, say_text("%s%n;quit\n"))));
     auto server_text = say_text(""); server_text[0] = std::byte{0U};
     REQUIRE(f.apply(registered(202U, server_text)));
@@ -216,4 +218,76 @@ TEST_CASE("E28 registered SayText is bounded inert byte plus exact terminated te
     REQUIRE(invalid_slot.error->module_error);
     CHECK(invalid_slot.error->module_error->code == api::GameMessageErrorCode::invalid_identifier);
     CHECK(f.world.runtime_observation() == before);
+}
+TEST_CASE("E33 accepted SayText TextMsg and svc_print reach the console only after commit",
+          "[e33][console][server-text][runtime-replay][game-module][no-stock]") {
+    namespace core=hlclient::core;
+    PeerReplay fixture;fixture.seed();core::initialize_logging();core::reset_console_log();
+    Bytes wire=registered(202U,say_text("hello;quit"));
+    Bytes text{std::byte{2U}};
+    for(const auto value:{"%s scored %s %n","Candidate","10"}) {
+        for(const unsigned char c:std::string_view{value})text.push_back(std::byte{c});text.push_back(std::byte{0});
+    }
+    append(wire,registered(206U,text));
+    wire.push_back(std::byte{8U});
+    for(const unsigned char c:std::string_view{"status response\n[external-status] stage=completed"})wire.push_back(std::byte{c});
+    wire.push_back(std::byte{0});
+    const auto record=fixture.record(std::move(wire));REQUIRE(fixture.session->apply_record(record));
+    const auto output=core::drain_console_log();REQUIRE(output.records.size()==4U);
+    CHECK(output.records[0].message=="[server] hello;quit");
+    CHECK(output.records[1].message=="[server] Candidate scored 10 %n");
+    CHECK(output.records[2].message=="[server] status response");
+    CHECK(output.records[3].message=="[server] [external-status] stage=completed");
+    const auto committed=fixture.world.runtime_observation();
+    CHECK_FALSE(fixture.session->apply_record(record));CHECK(core::drain_console_log().records.empty());
+    CHECK(fixture.world.runtime_observation()==committed);
+    Bytes instructions{std::byte{9U}};
+    for(const unsigned char c:std::string_view{"exec malicious.cfg;quit\n"})instructions.push_back(std::byte{c});
+    instructions.push_back(std::byte{0});REQUIRE(fixture.apply(std::move(instructions)));
+    CHECK(core::drain_console_log().records.empty());
+    CHECK(fixture.world.runtime_observation()->weapon_hud.health==100U);
+}
+TEST_CASE("E33 malformed suffix prevents earlier server text from escaping an abandoned record",
+          "[e33][console][server-text][runtime-replay][game-module][no-stock]") {
+    namespace core=hlclient::core;
+    PeerReplay fixture;fixture.seed();core::initialize_logging();core::reset_console_log();
+    auto wire=registered(202U,say_text("must not publish"));
+    append(wire,registered(206U,{std::byte{0U},std::byte{'x'},std::byte{0U}}));
+    const auto before=fixture.world.runtime_observation();
+    REQUIRE_FALSE(fixture.apply(std::move(wire)));
+    CHECK(fixture.world.runtime_observation()==before);CHECK(core::drain_console_log().records.empty());
+}
+
+TEST_CASE("E33.2 actual replay commit orders DeathMsg SayText TextMsg and print without partial publication",
+          "[e33][e33_2][e14][console][server-text][runtime-replay][game-module][no-stock]") {
+    namespace core=hlclient::core;
+    core::initialize_logging();core::reset_console_log();PeerReplay f;f.seed();
+    CHECK(core::drain_console_log().records.empty());
+    const auto text=[](unsigned destination,std::string_view value) {
+        Bytes body{std::byte(destination)};for(unsigned char c:value)body.push_back(std::byte{c});body.push_back(std::byte{});return body;
+    };
+    const Bytes death{std::byte{1},std::byte{2},std::byte{'g'},std::byte{'a'},std::byte{'u'},std::byte{'s'},std::byte{'s'},std::byte{}};
+    Bytes wire=registered(202,say_text("chat before"));append(wire,registered(207,death));
+    append(wire,info::make_message(0,11,"\\name\\Renamed"));
+    append(wire,registered(206,text(1,"joined announcement")));
+    append(wire,registered(206,text(4,"center-only")));
+    append(wire,registered(202,say_text("- Candidate has left the game\n")));
+    wire.push_back(std::byte{8});for(unsigned char c:std::string_view{"print after"})wire.push_back(std::byte{c});wire.push_back(std::byte{});
+    const auto record=f.record(wire);REQUIRE(f.session->apply_record(record));
+    const auto output=core::drain_console_log();REQUIRE(output.records.size()==5);
+    CHECK(output.records[0].message=="[server] chat before");
+    CHECK(output.records[1].message=="[game] Observer killed Candidate with tau cannon");
+    CHECK(output.records[2].message=="[server] joined announcement");
+    CHECK(output.records[3].message=="[server] - Candidate has left the game");
+    CHECK(output.records[4].message=="[server] print after");
+    CHECK_FALSE(f.session->apply_record(record));CHECK(core::drain_console_log().records.empty());
+    for(const bool bad_body:{false,true}) {
+        PeerReplay rejected;rejected.seed();core::reset_console_log();
+        auto bad=registered(207,death);append(bad,registered(202,say_text("never committed")));
+        if(bad_body)append(bad,registered(206,{std::byte{2},std::byte{'x'}}));
+        else bad.push_back(std::byte{255});
+        const auto before=rejected.world.runtime_observation();CHECK_FALSE(rejected.apply(std::move(bad)));
+        CHECK(rejected.world.runtime_observation()==before);CHECK(core::drain_console_log().records.empty());
+    }
+    core::reset_console_log();
 }

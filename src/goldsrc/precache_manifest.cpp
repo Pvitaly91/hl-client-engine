@@ -257,6 +257,7 @@ const PrecacheManifestEntry* PrecacheManifestState::find(
     const ResourceType type,
     const std::uint16_t resource_index) const noexcept
 {
+    if (!resource_has_bindable_index(type, resource_index)) return nullptr;
     const PrecacheSlotTable* table = nullptr;
     switch (type) {
     case ResourceType::sound: table = &sound_slots_; break;
@@ -434,6 +435,11 @@ PrecacheManifestBuildResult PrecacheManifestBuilder::build_from_readiness(
                     std::nullopt,
                     entry.wire_ordinal());
             }
+            // Non-bindable decal 4095 metadata remains an ordinal row, not a
+            // precache slot. It must not inflate or alias the decal table.
+            if (!resource_has_bindable_index(entry.resource_type(), entry.resource_index())) {
+                continue;
+            }
             const auto required =
                 static_cast<std::size_t>(entry.resource_index()) + 1U;
             if (required > limits_.maximum_slots_per_type) {
@@ -468,17 +474,19 @@ PrecacheManifestBuildResult PrecacheManifestBuilder::build_from_readiness(
         std::vector<PrecacheManifestEntry> entries;
         entries.reserve(readiness.entry_count());
         for (const auto& entry : readiness.entries()) {
-            const auto table = *type_slot(entry.resource_type());
-            auto& slot = slot_storage[table][entry.resource_index()];
-            if (slot) {
-                return failure(
-                    PrecacheManifestErrorCode::duplicate_type_local_slot,
-                    "Duplicate type-local precache slot invariant failed",
-                    std::nullopt,
-                    std::nullopt,
-                    entry.wire_ordinal());
+            if (resource_has_bindable_index(entry.resource_type(), entry.resource_index())) {
+                const auto table = *type_slot(entry.resource_type());
+                auto& slot = slot_storage[table][entry.resource_index()];
+                if (slot) {
+                    return failure(
+                        PrecacheManifestErrorCode::duplicate_type_local_slot,
+                        "Duplicate type-local precache slot invariant failed",
+                        std::nullopt,
+                        std::nullopt,
+                        entry.wire_ordinal());
+                }
+                slot = entries.size();
             }
-            slot = entries.size();
 
             std::optional<local_resources::LocalResourceLocator> locator;
             if (entry.locator()) {

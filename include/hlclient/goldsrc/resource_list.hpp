@@ -32,8 +32,11 @@ inline constexpr std::size_t kDefaultMaximumResourceMessageBits = 1'048'576U;
 inline constexpr std::size_t kMaximumResourceMessageBits = 8'388'608U;
 inline constexpr std::size_t kDefaultMaximumResourceMessageBytes = 131'072U;
 inline constexpr std::size_t kMaximumResourceMessageBytes = 1'048'576U;
-inline constexpr std::size_t kDefaultMaximumResourceCount = 1'024U;
 inline constexpr std::size_t kMaximumResourceCount = 4'095U;
+// The entry count is a 12-bit field, independent of the per-type precache
+// index. Customized servers can legitimately exceed 1024 total entries.
+// Message bytes, individual/aggregate name bytes, types and flags remain capped.
+inline constexpr std::size_t kDefaultMaximumResourceCount = kMaximumResourceCount;
 inline constexpr std::size_t kDefaultMaximumResourceNameLength = 255U;
 inline constexpr std::size_t kMaximumResourceNameLength = 4'096U;
 inline constexpr std::size_t kDefaultMaximumResourceTotalNameBytes = 65'536U;
@@ -49,7 +52,9 @@ inline constexpr std::uint64_t kMaximumResourceTotalDeclaredSize =
 inline constexpr std::uint8_t kDefaultMaximumResourceFlags =
     kMaximumSupportedStandardResourceFlagsMask;
 inline constexpr std::uint8_t kMaximumResourceFlags = 0x0fU;
-inline constexpr std::size_t kDefaultMaximumResourceListEvents = 2'048U;
+// Atomic publication: list-ready + one event per entry + two boundaries.
+inline constexpr std::size_t kDefaultMaximumResourceListEvents =
+    kDefaultMaximumResourceCount + 3U;
 inline constexpr std::size_t kMaximumResourceListEvents = 8'192U;
 inline constexpr std::size_t kResourceListDiagnosticTextLimit = 256U;
 
@@ -90,6 +95,18 @@ enum class ResourceType : std::uint8_t {
     generic = 4U,
     event_script = 5U,
 };
+
+// Customized GoldSrc servers can announce non-custom decals at the all-ones
+// wire index. Xash retains these resource rows but does not install them in its
+// bounded decal table. Preserve their metadata without binding a precache slot;
+// this is not an assertion that the protocol assigns a special sentinel value.
+[[nodiscard]] constexpr bool resource_has_bindable_index(
+    const ResourceType type,
+    const std::uint16_t index) noexcept
+{
+    return type != ResourceType::decal ||
+           index != kMaximumResourceIndexWireValue;
+}
 
 class ResourceName final {
 public:
@@ -248,6 +265,11 @@ public:
     // file-size claim and must not be used as an allocation request.
     [[nodiscard]] std::uint64_t total_size_code_sum() const noexcept;
     [[nodiscard]] std::size_t total_name_byte_count() const noexcept;
+    [[nodiscard]] bool file_consistency_required() const noexcept;
+    // Full resource-list wire ordinals, not per-type resource indices. The
+    // ordered request owns its storage and never grants access to local files.
+    [[nodiscard]] const std::vector<std::uint16_t>& file_consistency_ordinals()
+        const noexcept;
     [[nodiscard]] const ResourceEntry* find_exact(
         ResourceType type,
         std::uint16_t index) const noexcept;
@@ -270,6 +292,8 @@ private:
         ResourceTypeSummary type_summary,
         std::uint64_t total_size_code_sum,
         std::size_t total_name_byte_count,
+        bool file_consistency_required,
+        std::vector<std::uint16_t> file_consistency_ordinals,
         std::size_t source_opcode_byte_offset,
         std::size_t source_payload_bit_length,
         std::size_t bits_consumed,
@@ -282,6 +306,8 @@ private:
     ResourceTypeSummary type_summary_;
     std::uint64_t total_size_code_sum_{0U};
     std::size_t total_name_byte_count_{0U};
+    bool file_consistency_required_{false};
+    std::vector<std::uint16_t> file_consistency_ordinals_;
     std::size_t source_opcode_byte_offset_{0U};
     std::size_t source_payload_bit_length_{0U};
     std::size_t bits_consumed_{0U};
@@ -311,6 +337,10 @@ enum class ResourceListErrorCode {
     total_declared_size_limit_exceeded,
     unsupported_resource_flags,
     unsupported_resource_profile,
+    truncated_file_consistency,
+    invalid_file_consistency_ordinal,
+    unordered_file_consistency_ordinal,
+    file_consistency_request_limit_exceeded,
     truncated_padding,
     nonzero_padding,
     unexpected_trailing_data,
@@ -535,6 +565,14 @@ public:
         return "unsupported_resource_flags";
     case ResourceListErrorCode::unsupported_resource_profile:
         return "unsupported_resource_profile";
+    case ResourceListErrorCode::truncated_file_consistency:
+        return "truncated_file_consistency";
+    case ResourceListErrorCode::invalid_file_consistency_ordinal:
+        return "invalid_file_consistency_ordinal";
+    case ResourceListErrorCode::unordered_file_consistency_ordinal:
+        return "unordered_file_consistency_ordinal";
+    case ResourceListErrorCode::file_consistency_request_limit_exceeded:
+        return "file_consistency_request_limit_exceeded";
     case ResourceListErrorCode::truncated_padding: return "truncated_padding";
     case ResourceListErrorCode::nonzero_padding: return "nonzero_padding";
     case ResourceListErrorCode::unexpected_trailing_data:

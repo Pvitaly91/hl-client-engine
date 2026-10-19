@@ -100,7 +100,8 @@ TEST_CASE("Remote visibility evidence is owned and separates every CPU rejection
   fixture.summary.model_names.emplace(7U,"models/project-owned.mdl");
   fixture.state.packet_entities[0U].effects=128U; CHECK(stage(frame.get())==Stage::server_hidden128);
   fixture.state.packet_entities[0U].effects=0U;
-  fixture.state.packet_entities[0U].render_mode=1U; CHECK(stage(frame.get())==Stage::unsupported_render_mode);
+  fixture.state.packet_entities[0U].render_mode=1U; CHECK(stage(frame.get())==Stage::queued_visible);
+  fixture.state.packet_entities[0U].render_mode=6U; CHECK(stage(frame.get())==Stage::unsupported_render_mode);
   fixture.state.packet_entities[0U].render_mode=0U;
   fixture.summary.remote_players[0U].status=game_api::RemotePlayerPresentationStatus::unsupported_skeleton;
   CHECK(stage(frame.get())==Stage::game_not_ready);

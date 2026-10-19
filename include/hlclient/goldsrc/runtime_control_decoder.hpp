@@ -50,6 +50,7 @@ enum class RuntimeControlOpcode : std::uint8_t {
   svc_lightstyle = 12U,
   svc_updateuserinfo = 13U,
   svc_stopsound = 16U,
+  svc_pings = 17U,
   svc_particle = 18U,
   svc_event_reliable = 21U,
   svc_temp_entity = 23U,
@@ -57,15 +58,26 @@ enum class RuntimeControlOpcode : std::uint8_t {
   svc_signonnum = 25U,
   svc_centerprint = 26U,
   svc_spawnstaticsound = 29U,
-  svc_finale = 32U,
+  svc_intermission = 30U,
+  svc_finale = 31U,
+  svc_cdtrack = 32U,
   svc_cutscene = 34U,
   svc_weaponanim = 35U,
   svc_roomtype = 37U,
   svc_addangle = 38U,
   svc_choke = 42U,
+  svc_customization = 46U,
   svc_crosshairangle = 47U,
   svc_soundfade = 48U,
+  svc_filetxferfailed = 49U,
+  svc_director = 51U,
   svc_voiceinit = 52U,
+  svc_voicedata = 53U,
+  svc_sendextrainfo = 54U,
+  svc_timescale = 55U,
+  svc_resourcelocation = 56U,
+  svc_sendcvarvalue = 57U,
+  svc_sendcvarvalue2 = 58U,
 };
 
 enum class RuntimeControlMessageKind : std::uint8_t {
@@ -84,6 +96,10 @@ enum class RuntimeControlMessageKind : std::uint8_t {
   voice_initialization,
   user_message,
   scripted_events,
+  customization,
+  player_pings,
+  voice_data,
+  auxiliary_control,
 };
 
 struct RuntimeControlDecodeLimits final {
@@ -175,6 +191,59 @@ struct RuntimeControlVoiceInitialization final {
              const RuntimeControlVoiceInitialization &) = default;
 };
 
+// Inert framing metadata for another player's resource announcement. The
+// filename and optional MD5 bytes are consumed, never retained, resolved or
+// used to request a download. This does not register or render a custom decal.
+struct RuntimeControlCustomization final {
+  std::uint8_t player_index{0U};
+  std::uint8_t resource_type{0U};
+  std::size_t resource_name_length{0U};
+  std::uint16_t resource_index{0U};
+  std::int32_t download_size{0};
+  std::uint8_t flags{0U};
+  std::size_t opaque_hash_size{0U};
+
+  [[nodiscard]] friend bool operator==(const RuntimeControlCustomization &,
+                                       const RuntimeControlCustomization &) = default;
+};
+
+// Protocol player slots are zero-based, unlike entity references. Preserve
+// wire order (including duplicate slots) so consumers can apply last-wins
+// updates without inventing measurements for players absent from the list.
+struct RuntimeControlPingEntry final {
+  std::uint8_t player_index{0U};
+  std::uint16_t ping_ms{0U};
+  std::uint8_t packet_loss{0U};
+  [[nodiscard]] friend bool operator==(const RuntimeControlPingEntry &,
+                                       const RuntimeControlPingEntry &) = default;
+};
+
+struct RuntimeControlPings final {
+  std::size_t entry_count{0U};
+  std::size_t encoded_body_bits{0U};
+  std::vector<RuntimeControlPingEntry> entries;
+  [[nodiscard]] friend bool operator==(const RuntimeControlPings &,
+                                       const RuntimeControlPings &) = default;
+};
+
+// Voice content and auxiliary strings are consumed, never retained.
+struct RuntimeControlVoiceData final {
+  std::uint8_t sender_index{0U};
+  std::uint16_t payload_size{0U};
+  [[nodiscard]] friend bool operator==(const RuntimeControlVoiceData &,
+                                       const RuntimeControlVoiceData &) = default;
+};
+
+struct RuntimeControlAuxiliaryControl final {
+  // Complete framed body size, excluding its opcode.
+  std::size_t body_size{0U};
+  std::size_t text_length{0U};
+  std::optional<std::int32_t> request_id;
+  std::optional<std::uint8_t> value;
+  [[nodiscard]] friend bool operator==(const RuntimeControlAuxiliaryControl &,
+                                       const RuntimeControlAuxiliaryControl &) = default;
+};
+
 struct RuntimeControlUserMessage final {
   std::uint8_t identifier{0U};
   std::int8_t declared_size{0};
@@ -263,6 +332,37 @@ struct RuntimeControlDecal final {
 
   [[nodiscard]] friend bool operator==(const RuntimeControlDecal &,
                                        const RuntimeControlDecal &) = default;
+};
+
+// TE_PLAYERDECAL's player byte selects a custom spray at a downstream engine
+// boundary. Framing this observation does not load or display its pixels.
+struct RuntimeControlPlayerDecal final {
+  std::uint8_t player{0U};
+  std::array<std::int16_t, 3U> coordinate_eighths{};
+  std::uint16_t entity_reference{0U};
+  std::uint8_t decal_reference{0U};
+  [[nodiscard]] friend bool operator==(const RuntimeControlPlayerDecal &,
+                                       const RuntimeControlPlayerDecal &) = default;
+};
+
+// Valve SDK UTIL_HudMessage limits its NUL-terminated text to 511 bytes.
+inline constexpr std::size_t kMaximumRuntimeTextMessageBytes = 511U;
+
+// Exact TE_TEXTMESSAGE wire metadata only. Coordinates are signed 1.2.13,
+// times are unsigned 8.8. Server text is untrusted and is neither retained,
+// rendered nor executed here; only its bounded length is observed.
+struct RuntimeControlTextMessage final {
+  std::uint8_t channel{};
+  std::array<std::int16_t, 2U> position_fixed13{};
+  std::uint8_t effect{};
+  std::array<std::uint8_t, 4U> text_color{}, effect_color{};
+  std::uint16_t fade_in_ticks{}, fade_out_ticks{}, hold_ticks{};
+  // Present exactly for effect 2, not for other (even unknown) effect bytes.
+  std::optional<std::uint16_t> effect_ticks;
+  std::size_t text_length{};
+
+  [[nodiscard]] friend bool operator==(const RuntimeControlTextMessage &,
+                                       const RuntimeControlTextMessage &) = default;
 };
 
 // Owning wire observation only. This does not spawn blood, load sprites or
@@ -370,7 +470,10 @@ using RuntimeControlMessageBody =
                  RuntimeControlScriptedEvents, RuntimeControlBloodSprite,
                  RuntimeControlExplosion, RuntimeControlSmoke,
                  RuntimeControlSparks, RuntimeControlBubbles,
-                 RuntimeControlBeamFollow>;
+                 RuntimeControlBeamFollow, RuntimeControlCustomization,
+                 RuntimeControlPings, RuntimeControlVoiceData,
+                 RuntimeControlAuxiliaryControl, RuntimeControlPlayerDecal,
+                 RuntimeControlTextMessage>;
 
 struct RuntimeControlEvent final {
   RuntimeControlOpcode opcode{RuntimeControlOpcode::svc_nop};

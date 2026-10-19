@@ -8,6 +8,7 @@
 #include <thread>
 #include <windows.h>
 #include <bcrypt.h>
+#include <shlobj.h>
 
 namespace hlclient::platform::windows {
 namespace {
@@ -128,6 +129,36 @@ bool save_external_settings(const std::filesystem::path&path,const core::Externa
 {
     auto text=core::encode_external_launch_configuration(configuration);return text && write_external_text_atomic(path,*text,true);
 }
+std::optional<std::filesystem::path> default_external_settings_path()
+{
+    PWSTR local{};
+    if(FAILED(::SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_DEFAULT,nullptr,&local)))return {};
+    const auto result=std::filesystem::path{local}/L"HLClientEngine"/L"launcher.json";
+    ::CoTaskMemFree(local);
+    return result;
+}
+bool merge_external_settings(const std::filesystem::path& path,
+    const core::ExternalLaunchConfiguration& baseline,const core::ExternalLaunchConfiguration& edited)
+{
+    if(!path.is_absolute() || path.filename().empty())return false;
+    // A bounded native lock serializes the three-way read/replace across
+    // launcher and client processes. Failure leaves the previous file intact.
+    Handle mutex{::CreateMutexW(nullptr,FALSE,L"Local\\HLClientEngine.SharedLauncherSettings.v1")};
+    if(!mutex)return false;
+    const auto acquired=::WaitForSingleObject(mutex.get(),100);
+    if(acquired!=WAIT_OBJECT_0 && acquired!=WAIT_ABANDONED)return false;
+    struct Release final {HANDLE value;~Release(){::ReleaseMutex(value);}} release{mutex.get()};
+    auto current=baseline;
+    const auto attributes=::GetFileAttributesW(path.c_str());
+    if(attributes!=INVALID_FILE_ATTRIBUTES) {
+        const auto bytes=read_external_text(path,core::kExternalLaunchMaximumBytes);
+        const auto loaded=bytes?core::decode_external_launch_configuration(*bytes):core::ExternalLaunchConfigurationResult{};
+        if(!loaded)return false;
+        current=*loaded.configuration;
+    } else if(::GetLastError()!=ERROR_FILE_NOT_FOUND && ::GetLastError()!=ERROR_PATH_NOT_FOUND)return false;
+    const auto merged=core::merge_external_launch_configuration(baseline,edited,current);
+    return merged && save_external_settings(path,*merged);
+}
 struct ExternalClientProcess::Impl {
     Handle process,cancel;DWORD pid{},error{};std::uint64_t creation{};
     std::optional<BoundedProcessLogCapture> log;
@@ -174,12 +205,31 @@ BoundedProcessLogSnapshot ExternalClientProcess::finish_log(){return impl_->log?
 std::optional<ExternalStatusMarker> latest_external_status_marker(const std::string_view log)
 {
     std::optional<ExternalStatusMarker> out;std::size_t start=0;
-    constexpr std::array stages{"checking_resources","connecting","authentication","signon","preparing_map","in_game","disconnecting","completed","error"};
+    constexpr std::array stages{"idle","recoverable_error","checking_resources","connecting","authentication","signon","preparing_map","in_game","disconnecting","completed","error"};
     while(start<log.size()){const auto end=log.find('\n',start);if(end==std::string_view::npos)break;auto line=log.substr(start,end-start);start=end+1;if(!line.empty() && line.back()=='\r')line.remove_suffix(1);
         constexpr std::string_view prefix="[external-status] stage=";if(!line.starts_with(prefix) || line.size()>256)continue;line.remove_prefix(prefix.size());const auto space=line.find(' ');const auto stage=line.substr(0,space);if(std::find(stages.begin(),stages.end(),stage)==stages.end())continue;std::string reason;
         if(space!=std::string_view::npos){line.remove_prefix(space+1);if(!line.starts_with("reason="))continue;line.remove_prefix(7);if(line.size()>96)continue;bool valid=true;for(const auto c:line)if(!((c>='a'&&c<='z') || (c>='0'&&c<='9') || c=='_' || c=='-'))valid=false;if(!valid)continue;reason=line;}
         out=ExternalStatusMarker{std::string{stage},std::move(reason)};
     }return out;
+}
+std::string external_progress_stage(const std::string_view previous_stage,
+    const std::optional<ExternalStatusMarker>& current_marker,
+    const ExternalFailureMarkers& history,const bool gameplay_receipt_ready,const bool cancelled)
+{
+    if(cancelled)return "disconnecting";
+    if(current_marker) {
+        constexpr std::array stages{"idle","recoverable_error","checking_resources","connecting","authentication","signon","preparing_map","in_game","disconnecting","completed","error"};
+        if(std::find(stages.begin(),stages.end(),current_marker->stage)!=stages.end())return current_marker->stage;
+    }
+    if(!history.primary_reason.empty() || !history.cleanup_reason.empty())return "error";
+    if(gameplay_receipt_ready)return "in_game";
+    return std::string{previous_stage};
+}
+bool external_application_close_succeeded(const std::optional<ExternalStatusMarker>& final_marker,
+    const std::optional<std::uint32_t> exit_code,const bool forced) noexcept
+{
+    return !forced && exit_code && *exit_code==0U && final_marker &&
+        final_marker->stage=="completed" && final_marker->reason=="application_closed";
 }
 std::string redacted_external_status_log(const std::string_view log)
 {

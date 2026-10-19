@@ -173,7 +173,7 @@ TEST_CASE("Core neutral horizontal projection uses actual aspect and rejects inv
   observed.receiving_client->origin={10.,20.,30.};observed.receiving_client->view_offset={0.,0.,2.};
   app::LiveVisualCameraController camera;client::ClientWorldState world;
   game_api::CameraIntent policy; // No concrete module, catalogue or installed game.
-  for(double aspect:{4./3.,16./9.,16./10.}) {
+  for(double aspect:{4./3.,16./9.,16./10.,.1,10.}) {
     policy.horizontal_field_of_view_degrees=37.;
     REQUIRE(camera.update(&observed,next(),world,policy,false,{},aspect));
     CHECK(world.camera().vertical_field_of_view_radians==Catch::Approx(
@@ -184,5 +184,39 @@ TEST_CASE("Core neutral horizontal projection uses actual aspect and rejects inv
       CHECK_FALSE(camera.update(&observed,next(),world,policy,false,{},aspect));
       CHECK(world.camera()==before);
     }
+  }
+}
+
+TEST_CASE("Neutral reference-aspect projection keeps vertical coverage without scaling source geometry",
+          "[stock-viewmodel][game-api][camera-policy][live-visual]") {
+  using namespace hlclient;
+  input::InputStateTracker tracker;
+  const auto bindings=gameplay_input::GameplayInputBindingsBuilder{}.build({});REQUIRE(bindings);
+  const auto next=[&] {
+    tracker.begin_frame();const auto snapshot=tracker.publish_snapshot();tracker.end_frame();
+    auto result=gameplay_input::GameplayInputIntentBuilder{}.build(snapshot,*bindings.bindings,{},.02);
+    REQUIRE(result);return *result.intent;
+  };
+  client::RuntimeClientObservationState observed;observed.generation=1;
+  observed.client_metadata={1,client::RuntimeObservationFreshness::observed_in_record,
+      client::RuntimeObservationCompleteness::complete_reconstruction,client::RuntimeObservationSource{1,1,0,0,8}};
+  observed.receiving_client.emplace();
+  observed.receiving_client->origin={10.,20.,30.};observed.receiving_client->view_offset={0.,0.,28.};
+  app::LiveVisualCameraController camera;client::ClientWorldState world;
+  game_api::CameraIntent policy;policy.field_of_view_reference_aspect_ratio=4./3.;
+  for(double degrees:{90.,40.,20.}) for(double aspect:{4./3.,16./10.,16./9.,21./9.}) {
+    CAPTURE(degrees,aspect);policy.horizontal_field_of_view_degrees=degrees;
+    REQUIRE(camera.update(&observed,next(),world,policy,false,{},aspect));
+    const auto expected=2*std::atan(std::tan(degrees*std::acos(-1.)/360.)/(4./3.));
+    CHECK(world.camera().vertical_field_of_view_radians==Catch::Approx(expected));
+    CHECK(world.camera().position.z==58.F);
+    const auto saved=world.camera();
+    for(double invalid:{0.,-1.,9.,std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()}) {
+      policy.field_of_view_reference_aspect_ratio=invalid;
+      CHECK_FALSE(camera.update(&observed,next(),world,policy,false,{},aspect));
+      CHECK(world.camera()==saved);
+    }
+    policy.field_of_view_reference_aspect_ratio=4./3.;
   }
 }

@@ -167,6 +167,15 @@ std::uint64_t runtime_observation_visual_hash_v3(const RuntimeClientObservationS
             if(value) hash_unsigned(hash,*value);
         }
     }
+    // Preserve hashes of observations without this optional visual extension.
+    for(const auto& entity:state.packet_entities) {
+        if(!std::ranges::any_of(entity.render_color,[](const auto& value){return value.has_value();}))continue;
+        hash_byte(hash,0xc7U);hash_unsigned(hash,entity.entity_number);
+        for(const auto value:entity.render_color) {
+            hash_byte(hash,value ? 1U : 0U);
+            if(value)hash_unsigned(hash,*value);
+        }
+    }
     return hash;
 }
 
@@ -303,6 +312,9 @@ bool valid_runtime_observation(
             !finite_optional(entity.frame_rate) || !valid_vector(entity.velocity) ||
             (entity.render_effect && *entity.render_effect > 255U) ||
             (entity.render_amount && *entity.render_amount > 255U) ||
+            std::ranges::any_of(entity.render_color,[](const auto& value){return value && *value>255U;}) ||
+            (!entity.ordinary_visual_schema &&
+                std::ranges::any_of(entity.render_color,[](const auto& value){return value.has_value();})) ||
             (!entity.ordinary_visual_schema && (entity.render_effect || entity.render_amount)) ||
             (!entity.ordinary_visual_schema &&
                 (entity.animation_time_seconds || entity.frame_rate ||

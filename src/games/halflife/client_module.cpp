@@ -1,4 +1,5 @@
 #include <hlclient/games/halflife/client_module.hpp>
+#include <hlclient/games/halflife/weapon_diagnostics.hpp>
 #include <hlclient/games/halflife/server_messages.hpp>
 #include <hlclient/games/halflife/presentation.hpp>
 #include <hlclient/games/halflife/movement_policy.hpp>
@@ -33,6 +34,16 @@ namespace hlclient::games::halflife {
 namespace {
 class HalfLifeClientModule final : public game_api::IGameClientModule {
 public:
+    void set_weapon_diagnostic_observer(game_api::WeaponDiagnosticObserver* observer) noexcept override {
+        presentation_.set_weapon_diagnostic_observer(observer);
+        gauss_.set_weapon_diagnostic_observer(observer);egon_.set_weapon_diagnostic_observer(observer);
+    }
+    std::span<const game_api::WeaponDiagnosticCapability> weapon_diagnostic_capabilities() const noexcept override {
+        return halflife::weapon_diagnostic_capabilities;
+    }
+    game_api::WeaponDiagnosticObjectProfile weapon_diagnostic_object_profile(std::string_view model) const noexcept override {
+        return halflife::weapon_diagnostic_object_profile(model);
+    }
     explicit HalfLifeClientModule(bool mute_glock_fire_sound)
         : movement_(make_movement_policy()), mute_glock_fire_sound_(mute_glock_fire_sound) {}
     void reset(game_api::GameSessionIdentity identity) noexcept override {
@@ -42,6 +53,7 @@ public:
         screen_effects_.reset();
         shotgun_model_bound_=false;python_model_bound_=false;crossbow_model_bound_=false;rpg_model_bound_=false;
         state_ = {};
+        text_messages_.clear();server_text_.reset();
         hud_context_ = {};
         presentation_.reset();
         sprite_hud_.reset();
@@ -184,6 +196,16 @@ public:
         remote_effects_.contact(contact);
     }
     const game_api::GameMovementPolicy& movement_policy() const noexcept override { return movement_; }
+    game_api::ConsoleVisualTheme console_theme() const noexcept override {
+        game_api::ConsoleVisualTheme theme;
+        theme.title="HALF-LIFE";theme.background_resource="gfx/conback.lmp";
+        theme.backdrop={0.09F,0.075F,0.047F};theme.accent={0.95F,0.57F,0.12F,1};
+        theme.emblem={{{-0.28F,-0.42F,-0.06F,-0.42F,0.12F},
+            {-0.06F,-0.42F,0.30F,0.44F,0.12F},
+            {0.05F,-0.14F,-0.29F,0.44F,0.12F},
+            {0.30F,0.44F,0.44F,0.40F,0.12F}}};
+        theme.emblem_circle=true;return theme;
+    }
     gameplay_input::GameplayButtonMask edge_triggered_buttons(
         const client::RuntimeClientObservationState& state) const noexcept override {
         const bool selected=state.generation==identity_.network_generation &&
@@ -225,8 +247,10 @@ public:
         return result; // Diagnostic only: never used to classify/select/reset.
     }
     game_api::GameRecordResult stage_record(const game_api::GameRecordInput& input) const override {
-        return halflife::stage_record(input, input.previous ? &state_ : nullptr);
+        return halflife::stage_record(input, input.previous ? &state_ : nullptr,text_messages_);
     }
+    std::string_view text_message_preparation() const noexcept override {return "titles.txt";}
+    void bind_text_messages(const game_api::TextMessageCatalogue& values) override {text_messages_=values;}
     void commit_record(game_api::GameRecordState&& state) noexcept override {
         for(std::size_t slot=0;slot<state.multiplayer.players.size();++slot) {
             const auto& next=state.multiplayer.players[slot];const auto& previous=state_.multiplayer.players[slot];
@@ -237,6 +261,7 @@ public:
         presentation_.configure_maximum_clients(state.multiplayer.maximum_clients);
         sprite_hud_.committed(state); // Consume value events before the legacy projection moves them.
         screen_effects_.committed(state);
+        server_text_.committed(state);
         presentation_.commit_pickups(state);
         for(const auto& event:state.life_events) if(event.kind==client::RuntimeLifeEventKind::death_notice &&
             event.victim_entity && event.victim_entity<=remote_death_notices_.size())
@@ -547,6 +572,7 @@ public:
         const auto first_overlay_text=hud.draw.texts.size();
         compose_multiplayer_hud(state_.multiplayer, hud, hud_context_, time,
             sprite_hud_.base_descriptor(),sprite_hud_.base_tier(hud_context_));
+        server_text_.compose(hud,hud_context_,time);
         // TAB and the existing feed remain an overlay above gameplay sprites.
         // The renderer orders neutral primitives without knowing HUD meaning.
         for(std::size_t i=first_overlay_rectangle;i<hud.draw.rectangles.size();++i)hud.draw.rectangles[i].draw_order=100U;
@@ -652,6 +678,8 @@ private:
         egon_.append_frame(query,now,muzzle,result);return result;
     }
     GaussPresentation gauss_;
+    game_api::TextMessageCatalogue text_messages_;
+    ServerTextDisplay server_text_;
     game_api::ScreenEffectsFrame screen_effects(double now) const noexcept override {
         return screen_effects_.frame(now);
     }

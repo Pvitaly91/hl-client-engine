@@ -288,6 +288,8 @@ ResourceListState::ResourceListState(
     ResourceTypeSummary type_summary,
     const std::uint64_t total_size_code_sum,
     const std::size_t total_name_byte_count,
+    const bool file_consistency_required,
+    std::vector<std::uint16_t> file_consistency_ordinals,
     const std::size_t source_opcode_byte_offset,
     const std::size_t source_payload_bit_length,
     const std::size_t bits_consumed,
@@ -299,6 +301,8 @@ ResourceListState::ResourceListState(
       type_summary_{std::move(type_summary)},
       total_size_code_sum_{total_size_code_sum},
       total_name_byte_count_{total_name_byte_count},
+      file_consistency_required_{file_consistency_required},
+      file_consistency_ordinals_{std::move(file_consistency_ordinals)},
       source_opcode_byte_offset_{source_opcode_byte_offset},
       source_payload_bit_length_{source_payload_bit_length},
       bits_consumed_{bits_consumed},
@@ -334,10 +338,24 @@ std::size_t ResourceListState::total_name_byte_count() const noexcept
     return total_name_byte_count_;
 }
 
+bool ResourceListState::file_consistency_required() const noexcept
+{
+    return file_consistency_required_;
+}
+
+const std::vector<std::uint16_t>&
+ResourceListState::file_consistency_ordinals() const noexcept
+{
+    return file_consistency_ordinals_;
+}
+
 const ResourceEntry* ResourceListState::find_exact(
     const ResourceType type,
     const std::uint16_t index) const noexcept
 {
+    if (!resource_has_bindable_index(type, index)) {
+        return nullptr;
+    }
     const auto found = std::find_if(
         entries_.begin(),
         entries_.end(),
@@ -507,7 +525,9 @@ ResourceListParseResult ResourceListParser::parse(
             ResourceListErrorCode::resource_count_limit_exceeded,
             body_start_bit,
             std::nullopt,
-            "Resource-list entry count exceeds the configured project bound");
+            "Resource-list entry count exceeds the configured project bound: count=" +
+                std::to_string(resource_count) + " limit=" +
+                std::to_string(limits_.maximum_resource_count));
     }
 
     std::vector<ResourceEntry> entries;
@@ -637,12 +657,19 @@ ResourceListParseResult ResourceListParser::parse(
                 return entry.type() == type &&
                        entry.index().value() == index;
             });
-        if (duplicate != entries.end()) {
+        if (duplicate != entries.end() &&
+            resource_has_bindable_index(
+                *type, static_cast<std::uint16_t>(index_read.value))) {
             return failure(
                 ResourceListErrorCode::duplicate_resource_identity,
                 index_start_bit,
                 entry_index,
-                "Resource-list repeats the confirmed (type,index) identity key");
+                "Resource-list repeats (type,index): type=" +
+                    std::to_string(type_read.value) + " index=" +
+                    std::to_string(index_read.value) + " first_ordinal=" +
+                    std::to_string(static_cast<std::size_t>(
+                        duplicate - entries.begin())) + " repeated_ordinal=" +
+                    std::to_string(entry_index));
         }
 
         std::uint64_t candidate_size_code_sum = 0U;
@@ -680,9 +707,92 @@ ResourceListParseResult ResourceListParser::parse(
         total_size_code_sum = candidate_size_code_sum;
     }
 
-    // Stock terminates the list with 1..8 zero bits. An already byte-aligned
-    // entry sequence still consumes a full zero byte.
-    const auto mandatory_padding_width = 8U - (reader.bit_offset() & 7U);
+    // SV_SendConsistencyList / CL_ParseConsistencyInfo: an explicit enabled
+    // bit precedes ordered full-list ordinals. A small delta uses five bits;
+    // the absolute form uses ten bits (not the resource index's twelve).
+    // The no-request form remains wire-identical to the old zero-fill fixture.
+    const auto consistency_start_bit = reader.bit_offset();
+    const auto consistency_enabled = reader.read_bits(1U);
+    if (!consistency_enabled) {
+        return failure(
+            ResourceListErrorCode::truncated_file_consistency,
+            consistency_start_bit,
+            std::nullopt,
+            "Resource-list file-consistency enabled bit is truncated");
+    }
+    std::vector<std::uint16_t> consistency_ordinals;
+    if (consistency_enabled.value != 0U) {
+        consistency_ordinals.reserve(resource_count);
+        std::uint32_t last_ordinal = 0U;
+        for (;;) {
+            const auto request_start_bit = reader.bit_offset();
+            const auto more = reader.read_bits(1U);
+            if (!more) {
+                return failure(
+                    ResourceListErrorCode::truncated_file_consistency,
+                    request_start_bit,
+                    std::nullopt,
+                    "Resource-list file-consistency terminator is truncated: requests=" +
+                        std::to_string(consistency_ordinals.size()));
+            }
+            if (more.value == 0U) {
+                break;
+            }
+            if (consistency_ordinals.size() >= resource_count) {
+                return failure(
+                    ResourceListErrorCode::file_consistency_request_limit_exceeded,
+                    request_start_bit,
+                    std::nullopt,
+                    "Resource-list file-consistency request count exceeds resource count: requests=" +
+                        std::to_string(consistency_ordinals.size()) + " count=" +
+                        std::to_string(resource_count));
+            }
+            const auto is_delta = reader.read_bits(1U);
+            if (!is_delta) {
+                return failure(
+                    ResourceListErrorCode::truncated_file_consistency,
+                    reader.bit_offset(),
+                    std::nullopt,
+                    "Resource-list file-consistency ordinal mode is truncated");
+            }
+            const auto ordinal_start_bit = reader.bit_offset();
+            const auto encoded_ordinal = reader.read_bits(
+                is_delta.value != 0U ? 5U : 10U);
+            if (!encoded_ordinal) {
+                return failure(
+                    ResourceListErrorCode::truncated_file_consistency,
+                    ordinal_start_bit,
+                    std::nullopt,
+                    "Resource-list file-consistency ordinal is truncated: delta=" +
+                        std::to_string(is_delta.value));
+            }
+            const auto ordinal = is_delta.value != 0U
+                ? last_ordinal + encoded_ordinal.value
+                : encoded_ordinal.value;
+            if (ordinal >= resource_count) {
+                return failure(
+                    ResourceListErrorCode::invalid_file_consistency_ordinal,
+                    ordinal_start_bit,
+                    std::nullopt,
+                    "Resource-list file-consistency ordinal is outside the list: ordinal=" +
+                        std::to_string(ordinal) + " count=" +
+                        std::to_string(resource_count));
+            }
+            if (!consistency_ordinals.empty() && ordinal <= last_ordinal) {
+                return failure(
+                    ResourceListErrorCode::unordered_file_consistency_ordinal,
+                    ordinal_start_bit,
+                    std::nullopt,
+                    "Resource-list file-consistency ordinal repeats or moves backwards: previous=" +
+                        std::to_string(last_ordinal) + " ordinal=" +
+                        std::to_string(ordinal));
+            }
+            consistency_ordinals.push_back(static_cast<std::uint16_t>(ordinal));
+            last_ordinal = ordinal;
+        }
+    }
+
+    const auto mandatory_padding_width = (8U - (reader.bit_offset() & 7U)) & 7U;
     const auto padding_start_bit = reader.bit_offset();
     const auto padding = reader.read_bits(mandatory_padding_width);
     if (!padding) {
@@ -690,14 +800,19 @@ ResourceListParseResult ResourceListParser::parse(
             ResourceListErrorCode::truncated_padding,
             padding_start_bit,
             std::nullopt,
-            "Resource-list mandatory terminal zero fill is truncated");
+            "Resource-list post-consistency byte-alignment padding is truncated");
     }
     if (padding.value != 0U) {
         return failure(
             ResourceListErrorCode::nonzero_padding,
             padding_start_bit,
             std::nullopt,
-            "Resource-list mandatory terminal fill contains a non-zero bit");
+            "Resource-list terminal has non-zero data: count=" +
+                std::to_string(resource_count) + " start_bit=" +
+                std::to_string(padding_start_bit) + " width=" +
+                std::to_string(mandatory_padding_width) + " value=" +
+                std::to_string(padding.value) + " remaining_bits=" +
+                std::to_string(reader.remaining_bits()));
     }
     if (!reader.byte_aligned()) {
         return failure(
@@ -731,6 +846,8 @@ ResourceListParseResult ResourceListParser::parse(
             ResourceTypeSummary{type_counts},
             total_size_code_sum,
             total_name_bytes,
+            consistency_enabled.value != 0U,
+            std::move(consistency_ordinals),
             opcode_byte_offset,
             selected_bit_length,
             bits_consumed,

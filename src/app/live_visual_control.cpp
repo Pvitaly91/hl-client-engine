@@ -263,13 +263,17 @@ LiveVisualCameraUpdate LiveVisualCameraController::update(
   client::RenderCameraState camera;
   if(camera_intent.horizontal_field_of_view_degrees) {
     const auto degrees=*camera_intent.horizontal_field_of_view_degrees;
+    const auto reference_aspect=camera_intent.field_of_view_reference_aspect_ratio.value_or(viewport_aspect);
     if(!std::isfinite(degrees) || degrees<1.0 || degrees>179.0 ||
-        !std::isfinite(viewport_aspect) || viewport_aspect<=0.0) {
+        !std::isfinite(viewport_aspect) || viewport_aspect<=0.0 ||
+        !std::isfinite(reference_aspect) ||
+        (camera_intent.field_of_view_reference_aspect_ratio &&
+         (reference_aspect<0.25 || reference_aspect>8.0))) {
       result.status=LiveVisualViewStatus::invalid_local_angles;return result;
     }
     constexpr double radians=0.01745329251994329577;
     camera.vertical_field_of_view_radians=static_cast<float>(
-        2.0*std::atan(std::tan(degrees*radians*0.5)/viewport_aspect));
+        2.0*std::atan(std::tan(degrees*radians*0.5)/reference_aspect));
   }
   camera.position = eye;
   camera.target = {eye.x + forward->x, eye.y + forward->y,

@@ -303,6 +303,7 @@ std::string_view to_string(const SessionCloseReason reason) noexcept
     case SessionCloseReason::startup_cancel: return "startup_cancel";
     case SessionCloseReason::fatal_failure: return "fatal_failure";
     case SessionCloseReason::runner_termination: return "runner_termination";
+    case SessionCloseReason::console_disconnect: return "console_disconnect";
     }
     return "invalid";
 }
@@ -689,7 +690,7 @@ std::optional<SessionReceiptSnapshot> decode_session_receipt(const std::string_v
             SessionCloseReason::not_observed, SessionCloseReason::window_close,
             SessionCloseReason::duration_limit, SessionCloseReason::server_disconnect,
             SessionCloseReason::startup_cancel, SessionCloseReason::fatal_failure,
-            SessionCloseReason::runner_termination}) ||
+            SessionCloseReason::runner_termination,SessionCloseReason::console_disconnect}) ||
         !enum_value(*outcome, snapshot.close.outcome, std::array{
             SessionCloseOutcome::not_requested, SessionCloseOutcome::pending,
             SessionCloseOutcome::cancel_without_protocol_disconnect,

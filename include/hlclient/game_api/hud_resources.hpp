@@ -14,6 +14,7 @@ namespace hlclient::game_api {
 inline constexpr std::size_t kMaximumHudResourceDescriptors = 15U;
 inline constexpr std::size_t kMaximumHudResourceEntries = 512U;
 inline constexpr std::size_t kMaximumHudResourceDependencies = 256U;
+inline constexpr std::uint32_t kMaximumHudSpriteFrames = 64U;
 
 enum class HudResourceStatus : std::uint8_t {
     not_yet_resolved, ready, absent_by_asset_contract, missing_file,
@@ -48,9 +49,21 @@ struct HudManifestCountCompatibility final {
     friend bool operator==(const HudManifestCountCompatibility&,
                            const HudManifestCountCompatibility&) = default;
 };
+// A game-owned profile can explicitly request a complete frame omitted from its
+// descriptor. This never grants native-path access or relaxes manifest parsing.
+struct HudSpriteRequest final {
+    std::string role;
+    std::uint32_t resolution{};
+    std::string sprite_name; // Safe virtual sprites/<basename>.spr, never native.
+    std::uint32_t frame{}; // Flattened imported frame index, bounded below 64.
+    friend bool operator==(const HudSpriteRequest&, const HudSpriteRequest&) = default;
+};
 struct HudManifestRequest final {
     std::string name; // Safe virtual sprites/<descriptor>.txt, never native.
     std::optional<HudManifestCountCompatibility> count_compatibility;
+    // Published only when the base manifest is valid and ready. These entries
+    // share all entry/dependency/byte budgets with the parsed manifest records.
+    std::vector<HudSpriteRequest> supplemental_sprites;
     friend bool operator==(const HudManifestRequest&, const HudManifestRequest&) = default;
 };
 struct HudResourceEntry final {

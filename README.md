@@ -1,8 +1,9 @@
 # hl-client-engine
 
-For the complete accumulated H2 source checkpoint, clone branch
-`codex/stock-runtime-campaign-5e48b7c1` (not historical `main`) and run
+For the current working client source, clone branch `main` and run
 `pwsh -NoProfile -File .\scripts\build_source.ps1`.
+The `codex/stock-runtime-campaign-5e48b7c1` branch retains the development
+history that led to this mainline.
 See [clean source recovery and external game prerequisites](docs/BUILDING.md).
 No Steam account, game assets or private capture is needed to build/offline-test.
 

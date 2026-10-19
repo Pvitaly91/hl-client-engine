@@ -829,17 +829,35 @@ BrushSceneMovementCollision::BrushSceneMovementCollision(
     : scene_{std::move(scene)}
 {
     boxes_valid_=boxes.size()<=kMaximumServerEntityCollisionBoxes;
-    if (!boxes_valid_) return;
-    for (const auto& box:boxes) {
-        const auto valid_axis=[](float low,float high) {
-            return std::isfinite(low) && std::isfinite(high) && low<=high &&
-                std::abs(low)<=1'000'000.F && std::abs(high)<=1'000'000.F && high-low<=8192.F;
-        };
-        if (!box.entity || !valid_axis(box.bounds.minimum.x,box.bounds.maximum.x) ||
-            !valid_axis(box.bounds.minimum.y,box.bounds.maximum.y) ||
-            !valid_axis(box.bounds.minimum.z,box.bounds.maximum.z)) boxes_valid_=false;
+    if (boxes_valid_) {
+        for (const auto& box:boxes) {
+            const auto valid_axis=[](float low,float high) {
+                return std::isfinite(low) && std::isfinite(high) && low<=high &&
+                    std::abs(low)<=1'000'000.F && std::abs(high)<=1'000'000.F && high-low<=8192.F;
+            };
+            if (!box.entity || !valid_axis(box.bounds.minimum.x,box.bounds.maximum.x) ||
+                !valid_axis(box.bounds.minimum.y,box.bounds.maximum.y) ||
+                !valid_axis(box.bounds.minimum.z,box.bounds.maximum.z)) boxes_valid_=false;
+        }
     }
     if (boxes_valid_) boxes_.assign(boxes.begin(),boxes.end());
+    scene_error_=synthetic_scene_error(scene_);
+    if (!boxes_valid_ || scene_error_) return;
+    const auto package=world_package();
+    if (!package || !scene_) return;
+    const auto& source=package->identity();
+    const auto fingerprint=collision_world_fingerprint(*package);
+    auto signature=scene_identity_signature(*scene_);
+    if (!boxes_.empty()) {
+        StableIdentityHash box_hash;box_hash.mix(signature);
+        for (const auto& box:boxes_) {
+            box_hash.mix(box.entity);box_hash.mix(box.bounds);
+        }
+        signature=box_hash.finish().primary;
+    }
+    session_identity_=LocalMovementCollisionSessionIdentity{
+        profile(),fingerprint.primary,fingerprint.secondary,
+        source.source_revision,signature};
 }
 
 LocalMovementCollisionProfile BrushSceneMovementCollision::profile()
@@ -854,31 +872,14 @@ LocalMovementCollisionProfile BrushSceneMovementCollision::profile()
 
 bool BrushSceneMovementCollision::valid() const noexcept
 {
-    return boxes_valid_ && !synthetic_scene_error(scene_).has_value();
+    return scene_ && boxes_valid_ && !scene_error_ &&
+        session_identity_.has_value();
 }
 
 std::optional<LocalMovementCollisionSessionIdentity>
 BrushSceneMovementCollision::session_identity() const noexcept
 {
-    const auto package = world_package();
-    if (!valid() || !package || !scene_) {
-        return std::nullopt;
-    }
-    const auto& source = package->identity();
-    const auto fingerprint = collision_world_fingerprint(*package);
-    auto signature=scene_identity_signature(*scene_);
-    if (!boxes_.empty()) {
-        StableIdentityHash box_hash; box_hash.mix(signature);
-        for(const auto& box:boxes_) { box_hash.mix(box.entity); box_hash.mix(box.bounds); }
-        signature=box_hash.finish().primary;
-    }
-    return LocalMovementCollisionSessionIdentity{
-        profile(),
-        fingerprint.primary,
-        fingerprint.secondary,
-        source.source_revision,
-        signature,
-    };
+    return valid() ? session_identity_ : std::nullopt;
 }
 
 const std::shared_ptr<const brush_collision::BrushCollisionScene>&
@@ -901,8 +902,12 @@ BrushSceneMovementCollision::point_contents(
     core_collision::CollisionQueryScratch& scratch,
     const LocalMovementCollisionQueryConfig& config) const
 {
-    if (const auto error = synthetic_scene_error(scene_)) {
-        return failure<LocalMovementPointContents>(*error);
+    if (!scene_) {
+        return failure<LocalMovementPointContents>(
+            LocalMovementCollisionErrorCode::invalid_collision_source);
+    }
+    if (scene_error_) {
+        return failure<LocalMovementPointContents>(*scene_error_);
     }
     // Explicit solid brushes (synthetic or committed reference) are trace
     // participants, not inferred liquid contents providers.
@@ -972,8 +977,12 @@ LocalMovementTraceQueryResult BrushSceneMovementCollision::trace_shape(
         return failure<LocalMovementTrace>(
             LocalMovementCollisionErrorCode::invalid_hull);
     }
-    if (const auto error = synthetic_scene_error(scene_)) {
-        return failure<LocalMovementTrace>(*error);
+    if (!scene_) {
+        return failure<LocalMovementTrace>(
+            LocalMovementCollisionErrorCode::invalid_collision_source);
+    }
+    if (scene_error_) {
+        return failure<LocalMovementTrace>(*scene_error_);
     }
 
     brush_collision::BrushCollisionSceneQuery query{scene_};

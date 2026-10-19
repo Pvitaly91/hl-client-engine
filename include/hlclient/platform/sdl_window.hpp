@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -91,6 +92,9 @@ struct VideoWindowState {
     int default_framebuffer_samples{}, default_framebuffer_sample_buffers{};
     bool default_framebuffer_samples_observed{};
     bool vsync{};
+    // OS/driver reports, not measured scanout or VRR capability.
+    std::optional<double> display_refresh_hz;
+    std::optional<int> actual_swap_interval;
     bool safe_window_recovery{};
     std::string recovery_reason;
 };
@@ -136,13 +140,26 @@ public:
     // Default false preserves ordinary release-capture/close behavior. Focus
     // loss and hard event-limit recovery always keep their fail-safe release.
     void set_escape_input_owned(bool owned) noexcept;
+    void set_input_diagnostic_clocks(bool enabled) noexcept;
+
+    // The owning overlay activates SDL Unicode delivery on the window/context
+    // thread. Clipboard strings are bounded; no system font or OS shell is used.
+    [[nodiscard]] bool set_text_input_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool text_input_enabled() const noexcept;
+    [[nodiscard]] std::string clipboard_text(std::size_t maximum_bytes = 8192U) const;
+    [[nodiscard]] bool set_clipboard_text(std::string_view text) const;
 
     [[nodiscard]] RelativeMouseCaptureResult request_relative_mouse_capture(bool enabled);
     [[nodiscard]] input::InputFocusState focus_state() const noexcept;
     [[nodiscard]] input::InputCaptureState capture_state() const noexcept;
     [[nodiscard]] PixelExtent pixel_extent() const;
     [[nodiscard]] bool vsync_enabled() const noexcept;
+    // Fresh owner-thread query for startup/final receipts and callers which
+    // modify SDL directly. The render loop uses the event-invalidated cache.
     [[nodiscard]] VideoWindowState video_state() const;
+    [[nodiscard]] const VideoWindowState& cached_video_state() const;
+    [[nodiscard]] std::uint64_t video_state_revision() const noexcept;
+    [[nodiscard]] std::uint64_t video_state_refresh_count() const noexcept;
     void swap_buffers();
 
 private:

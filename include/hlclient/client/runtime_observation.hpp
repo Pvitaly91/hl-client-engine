@@ -123,6 +123,7 @@ struct RuntimePacketEntityObservation final {
     std::optional<std::int32_t> skin;
     std::optional<std::uint32_t> render_mode;
     std::optional<std::uint32_t> render_effect, render_amount;
+    std::array<std::optional<std::uint32_t>,3U> render_color;
     std::optional<std::uint32_t> effects;
     // Optional negotiated owner reference; diagnostic only, never gameplay authority.
     std::optional<std::uint32_t> owner_entity_reference;

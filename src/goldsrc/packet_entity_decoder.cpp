@@ -1385,7 +1385,7 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
                                               : "snapshot history insertion failed",
                                PacketEntityRecoveryStatus::none, current, opcode);
             }
-            auto published = history_builder->publish();
+            auto published = std::move(*history_builder).publish();
             if (!published) {
                 return failure(PacketEntityDecodeErrorCode::history_publish_failed,
                                published.error ? published.error->context

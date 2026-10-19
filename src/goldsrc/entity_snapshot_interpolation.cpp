@@ -1433,6 +1433,9 @@ RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime
 
 void RuntimeOrdinarySnapshotPresentation::reset() noexcept {
     history_.clear(); lifetimes_.clear();
+    arrival_intervals_={}; arrival_interval_count_=arrival_interval_next_=0U;
+    arrival_record_ordinal_.reset();arrival_application_seconds_.reset();arrival_server_seconds_.reset();
+    maximum_render_gap_since_arrival_=0.0;
     application_anchor_.reset(); server_anchor_.reset(); last_application_.reset(); cadence_delay_.reset();
 }
 
@@ -1493,11 +1496,18 @@ RuntimeEntityInterpolationResult RuntimeOrdinarySnapshotPresentation::sample(
         auto history=history_;
         auto lifetimes=lifetimes_;
         auto app_anchor=application_anchor_, server_anchor=server_anchor_, cadence=cadence_delay_;
+        auto arrival_intervals=arrival_intervals_;
+        auto arrival_count=arrival_interval_count_,arrival_next=arrival_interval_next_;
+        auto arrival_record=arrival_record_ordinal_;
+        auto arrival_application=arrival_application_seconds_,arrival_server=arrival_server_seconds_;
+        auto maximum_render_gap=maximum_render_gap_since_arrival_;
         const double latest_seconds=*latest.server_time_seconds;
         const auto gap_limit=options.limits.maximum_snapshot_gap_seconds;
         bool clock_reset=!app_anchor || !server_anchor;
         // A backwards render clock holds the last sample; it cannot replay or rewind.
         const double app=last_application_ ? std::max(application_seconds,*last_application_) : application_seconds;
+        const double render_gap=last_application_ ? app-*last_application_ : 0.0;
+        maximum_render_gap=std::max(maximum_render_gap,render_gap);
         const double pair_gap=history.size()>1U ? latest_seconds-*history[history.size()-2U]->server_time_seconds : 0.0;
         const bool source_gap=pair_gap>gap_limit;
         clock_reset=clock_reset || source_gap || (last_application_ && app-*last_application_>gap_limit);
@@ -1508,11 +1518,63 @@ RuntimeEntityInterpolationResult RuntimeOrdinarySnapshotPresentation::sample(
         if (clock_reset) {
             app_anchor=app;server_anchor=latest_seconds;
             if (application_anchor_) lifetimes.clear();
-            if (source_gap) {history={history.back()};cadence.reset();}
+            if (source_gap) history={history.back()};
+            cadence.reset();arrival_intervals={};arrival_count=arrival_next=0U;
+            arrival_record=latest.entity_metadata.source->record_ordinal;
+            arrival_application=app;arrival_server=latest_seconds;
+            maximum_render_gap=0.0;
+        } else {
+            const auto latest_record=latest.entity_metadata.source->record_ordinal;
+            if(!arrival_record || !arrival_application || !arrival_server || latest_record<*arrival_record ||
+                latest_seconds<*arrival_server) {
+                arrival_intervals={};arrival_count=arrival_next=0U;
+                arrival_record=latest_record;arrival_application=app;arrival_server=latest_seconds;
+                maximum_render_gap=0.0;
+            } else if(latest_record>*arrival_record) {
+                const double interval=app-*arrival_application;
+                if(std::isfinite(interval) && interval>0.0 && interval<=gap_limit) {
+                    // The observation state does not carry its transport
+                    // receipt time. Remove the largest render hiatus from the
+                    // first-presentation interval so a stalled renderer cannot
+                    // masquerade as network jitter. This is deliberately only
+                    // a conservative inferred presentation-arrival interval.
+                    const double inferred_interval=std::max(0.0,interval-maximum_render_gap);
+                    // Retain zero too: every accepted newer observation must
+                    // age an old jitter sample out of the fixed recent window.
+                    arrival_intervals[arrival_next]=inferred_interval;
+                    arrival_next=(arrival_next+1U)%arrival_intervals.size();
+                    arrival_count=std::min(arrival_count+1U,arrival_intervals.size());
+                }
+                arrival_record=latest_record;arrival_application=app;arrival_server=latest_seconds;
+                maximum_render_gap=0.0;
+            }
         }
-        if (!cadence && pair_gap>0.0 && !source_gap) cadence=std::min(selected_delay,pair_gap);
-        // One observed cadence, rather than a full100ms spawn delay. The actual
-        // retained time span is also a bound when RX cadence exceeds sixteen slots.
+        // The original one-shot cadence could remain at an early fast interval
+        // while later 16 Hz observations arrived 40--80 ms apart. Once its
+        // reserve was exhausted, no-extrapolation correctly held the newest
+        // pose but exposed each following authoritative step. Use only the
+        // bounded retained server intervals and inferred presentation-arrival
+        // intervals; maxima are selected, never accumulated. A small release
+        // rate avoids a forward jump when old jitter leaves the fixed window.
+        double requested_delay{};
+        for(std::size_t i=1U;i<history.size();++i) {
+            const double interval=*history[i]->server_time_seconds-*history[i-1U]->server_time_seconds;
+            if(std::isfinite(interval) && interval>0.0 && interval<=gap_limit)
+                requested_delay=std::max(requested_delay,interval);
+        }
+        for(std::size_t i=0U;i<arrival_count;++i)
+            requested_delay=std::max(requested_delay,arrival_intervals[i]);
+        requested_delay=std::min(selected_delay,requested_delay);
+        if(requested_delay>0.0) {
+            if(!cadence || requested_delay>=*cadence)cadence=requested_delay;
+            else {
+                constexpr double release_rate=.25;
+                const double elapsed=last_application_ ? app-*last_application_ : 0.0;
+                cadence=std::max(requested_delay,*cadence-std::max(0.0,elapsed)*release_rate);
+            }
+        } else cadence.reset();
+        // The actual retained span remains a hard bound at startup or after a
+        // reset. A larger selected reserve never creates an unobserved pose.
         const double delay=std::min({selected_delay,cadence.value_or(0.0),
             latest_seconds-*history.front()->server_time_seconds});
         const double mapped=*server_anchor+(app-*app_anchor);
@@ -1638,6 +1700,10 @@ RuntimeEntityInterpolationResult RuntimeOrdinarySnapshotPresentation::sample(
                     return fail(EntityInterpolationErrorCode::position_limit_exceeded);
         result.state=std::move(sampled);
         history_=std::move(history);lifetimes_=std::move(lifetimes);
+        arrival_intervals_=arrival_intervals;arrival_interval_count_=arrival_count;
+        arrival_interval_next_=arrival_next;arrival_record_ordinal_=arrival_record;
+        arrival_application_seconds_=arrival_application;arrival_server_seconds_=arrival_server;
+        maximum_render_gap_since_arrival_=maximum_render_gap;
         application_anchor_=app_anchor;server_anchor_=server_anchor;cadence_delay_=cadence;last_application_=app;
         return result;
     } catch (const std::bad_alloc&) {return fail(EntityInterpolationErrorCode::unable_to_retain_result);}
@@ -1745,12 +1811,25 @@ RuntimePlayerSnapshotPresentationResult RuntimePlayerSnapshotPresentation::sampl
             delay=std::min(wanted,delay.value_or(0.0)+.25*(app-*last_application_));
         }
         const double mapped=*server_anchor+app-*app_anchor;
+        const double requested=mapped-delay.value_or(0.0);
+        const double oldest_seconds=*history.front()->server_time_seconds;
         // Match the existing endpoint snapping tolerance below: cancellation
         // noise at an exact endpoint is not missing history coverage.
-        if(*history.front()->server_time_seconds-(mapped-delay.value_or(0.0))>1e-9)
+        const bool oldest_underflow=oldest_seconds-requested>1e-9;
+        if(oldest_underflow)
             clock_reasons|=bit(Clock::oldest_underflow);
-        if(mapped-delay.value_or(0.0)-latest_seconds>1e-9)clock_reasons|=bit(Clock::newest_underflow);
-        double target=std::clamp(mapped-delay.value_or(0.0),*history.front()->server_time_seconds,latest_seconds);
+        if(requested-latest_seconds>1e-9)clock_reasons|=bit(Clock::newest_underflow);
+        double target=std::clamp(requested,oldest_seconds,latest_seconds);
+        if(!reset_clock && oldest_underflow) {
+            // The bounded history has already forced this sample forward.
+            // Carry that exact lower-clamp displacement into the local clock
+            // anchor; otherwise every later eviction pins the sample to a new
+            // packet boundary while render frames between packets stand still.
+            // This is not an arrival-time restart, a larger delay, a new actor
+            // lifetime or extrapolation. The reason above records this repair;
+            // subsequent samples advance from the corrected clock phase.
+            *server_anchor+=target-requested;
+        }
         if(!reset_clock && last_target_)target=std::max(target,std::min(*last_target_,latest_seconds));
         // Cancelling large application/server clock offsets can leave a sample
         // infinitesimally before an exact endpoint. Preserve discrete endpoint

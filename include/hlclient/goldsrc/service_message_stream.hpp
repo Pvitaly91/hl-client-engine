@@ -34,23 +34,50 @@ struct ServiceMessageLimits {
     const ServiceMessageLimits& limits) noexcept;
 
 enum class ServiceMessageOpcode : std::uint8_t {
-    // Neutral names intentionally describe only the stock-confirmed wire
-    // layout needed by this milestone.
+    no_operation = 1U,
     text_control = 8U,
+    command_text = 9U,
     complex_signon_boundary = 11U,
+    director = 51U,
+    cvar_query = 57U,
+    cvar_query_with_id = 58U,
 };
 
 enum class ServiceMessageKind {
     text_control,
+    no_operation,
+    ignored_command_text,
+    ignored_cvar_query,
+    ignored_director,
 };
 
 struct ServiceTextControl {
     std::string text;
 };
 
+// Only framing metadata is retained. Remote commands never enter the console,
+// command dispatcher, filesystem, cvar system, or process launcher.
+struct ServiceIgnoredCommandText {
+    std::size_t string_length{0U};
+};
+
+struct ServiceIgnoredCvarQuery {
+    std::size_t string_length{0U};
+    std::optional<std::int32_t> request_id;
+};
+
+// Only the explicit envelope's body length is retained. Director commands,
+// camera changes, text, and other payload contents are never dispatched here.
+struct ServiceIgnoredDirector {
+    std::size_t body_size{0U}; // excludes the uint8 length and opcode bytes
+};
+
 using ServiceMessageBody = std::variant<
     std::monostate,
-    ServiceTextControl>;
+    ServiceTextControl,
+    ServiceIgnoredCommandText,
+    ServiceIgnoredCvarQuery,
+    ServiceIgnoredDirector>;
 
 struct DecodedServiceMessage {
     ServiceMessageOpcode opcode{ServiceMessageOpcode::text_control};
@@ -128,6 +155,7 @@ enum class ServiceMessageErrorCode {
     invalid_service_value,
     boundary_body_missing,
     size_overflow,
+    truncated_control_body,
 };
 
 struct ServiceMessageError {
@@ -147,9 +175,9 @@ struct ServiceMessageDecodeResult {
     }
 };
 
-// Opcode values 54 and 14 are intentionally not assigned third-party semantic
-// names. Differential stock captures confirm only their exact local layouts
-// and order at this M2.4.2 boundary.
+// GoldSrc extra-info is a bounded NUL string followed by one flag byte. Its
+// fallback name and flag are metadata only; no local paths or cvars are changed.
+// The following delta-description body remains owned by its separate decoder.
 inline constexpr std::uint8_t kPreResourceSimpleControlOpcode = 54U;
 inline constexpr std::uint8_t kPreResourceComplexBoundaryOpcode = 14U;
 
@@ -355,7 +383,7 @@ public:
     [[nodiscard]] ServiceMessageDecodeResult decode(OwnedServicePayload payload) const;
 
     // Continues at the exact owning M2.4.1 boundary. It does not repeat
-    // envelope decoding or opcode-8 parsing, never scans for an opcode, and
+    // envelope decoding or initial-message parsing, never scans for an opcode, and
     // leaves the first complex post-control message body untouched.
     [[nodiscard]] PreResourceServiceDecodeResult continue_to_pre_resource(
         const OwnedServicePayload& payload,
@@ -436,10 +464,20 @@ private:
     const ServiceMessageOpcode opcode) noexcept
 {
     switch (opcode) {
+    case ServiceMessageOpcode::no_operation:
+        return "no_operation";
     case ServiceMessageOpcode::text_control:
         return "text_control";
+    case ServiceMessageOpcode::command_text:
+        return "command_text";
     case ServiceMessageOpcode::complex_signon_boundary:
         return "complex_signon_boundary";
+    case ServiceMessageOpcode::director:
+        return "director";
+    case ServiceMessageOpcode::cvar_query:
+        return "cvar_query";
+    case ServiceMessageOpcode::cvar_query_with_id:
+        return "cvar_query_with_id";
     }
     return "unknown";
 }
@@ -472,6 +510,8 @@ private:
         return "boundary_body_missing";
     case ServiceMessageErrorCode::size_overflow:
         return "size_overflow";
+    case ServiceMessageErrorCode::truncated_control_body:
+        return "truncated_control_body";
     }
     return "unknown";
 }

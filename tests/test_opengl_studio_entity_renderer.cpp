@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cmath>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -229,6 +230,72 @@ studio_surface_package(const assets::AssetVector3 normal,
         std::move(*result.package));
 }
 
+[[nodiscard]] std::shared_ptr<const entity::EntitySceneRenderPackage>
+studio_blend_package()
+{
+    auto model = std::make_shared<assets::ModelAsset>(*studio_surface_model({-1, 0, 0}, false));
+    auto skeleton = std::make_shared<assets::SkeletalModelAssetData>(*model->skeletal_data);
+    // Only one face: the lighting fixture intentionally draws both windings,
+    // which would independently composite each triangle twice without culling.
+    skeleton->submodels[0].indices.resize(6U);
+    skeleton->submodels[0].meshes[0].index_count = 6U;
+    skeleton->submodels[0].meshes[0].source_triangle_count = 2U;
+    model->skeletal_data = std::move(skeleton);
+    auto built = hlclient::tests::entity_render_fixture::scene_package(
+        hlclient::tests::entity_render_fixture::render_assets(true, false,
+            assets::SpriteTextureFormat::normal, false,
+            assets::SpriteOrientation::view_parallel, model));
+    REQUIRE(built);
+    return std::make_shared<const entity::EntitySceneRenderPackage>(std::move(*built.package));
+}
+
+entity::StudioEntityRenderInstance studio_blend_instance(
+    const std::uint32_t number, const float distance,
+    const entity::StudioBlendMode blend, const float opacity,
+    const std::array<float, 3U> tint = {1, 1, 1})
+{
+    entity::StudioEntityRenderInstance result;
+    result.entity_number = number;
+    result.transform.origin = {distance, 0, 0};
+    result.skin_family_index = 2U; // Source fullbright: exact RGB 200/160/100.
+    result.interpolated_bounds = {{distance - 0.1F, -3, -3}, {distance + 0.1F, 3, 3}};
+    result.blend_mode = blend;
+    result.opacity = opacity;
+    result.tint = tint;
+    return result;
+}
+
+entity::EntityRenderFrameBuildInput studio_blend_input(
+    const entity::EntitySceneRenderPackage& package,
+    const std::span<const entity::StudioEntityRenderInstance> instances)
+{
+    entity::EntityRenderFrameBuildInput input;
+    input.resource_id = 0xB1E0U;
+    input.resource_revision = 1U;
+    input.interpolation = {0.5, 0.0, 1.0, 0.5F, 1U, 2U,
+        entity::EntityRenderInterpolationProfile::synthetic_seconds_v1};
+    input.studio_poses.push_back({package.studio_assets()[0]->source_identity(),
+        {fixture::pose_matrix(), fixture::pose_matrix()}});
+    input.studio_instances.assign(instances.begin(), instances.end());
+    return input;
+}
+
+renderer::RenderScene studio_blend_scene(
+    const std::shared_ptr<const entity::EntitySceneRenderPackage>& package,
+    const std::initializer_list<entity::StudioEntityRenderInstance> instances)
+{
+    auto built = entity::EntityRenderFrameBuilder{}.build(*package,
+        studio_blend_input(*package, {instances.begin(), instances.size()}));
+    INFO((built.error ? built.error->context : std::string{}));
+    REQUIRE(built);
+    auto scene = fixture::render_scene({package,
+        std::make_shared<const entity::EntityRenderFrame>(std::move(*built.frame))});
+    scene.camera.position = {};
+    scene.camera.target = {1, 0, 0};
+    scene.clear_color = {0.1F, 0.2F, 0.3F, 1};
+    return scene;
+}
+
 [[nodiscard]] renderer::RenderScene studio_surface_scene(
     const std::shared_ptr<const entity::EntitySceneRenderPackage>& package,
     const std::uint64_t revision,
@@ -298,7 +365,9 @@ single_studio_frame(
     const std::uint32_t skin_family_index = 0U,
     const visibility::WorldViewFrustum* view_frustum = nullptr,
     const spatial::WorldSpatialPackage* spatial_package = nullptr,
-    const std::optional<std::uint32_t> camera_leaf_index = std::nullopt)
+    const std::optional<std::uint32_t> camera_leaf_index = std::nullopt,
+    const entity::StudioBlendMode blend = entity::StudioBlendMode::opaque,
+    const float opacity = 1.0F)
 {
     REQUIRE(package.studio_assets().size() == 1U);
     entity::EntityRenderFrameBuildInput input;
@@ -327,6 +396,8 @@ single_studio_frame(
     instance.body_value = 0U;
     instance.skin_family_index = skin_family_index;
     instance.interpolated_bounds = bounds;
+    instance.blend_mode = blend;
+    instance.opacity = opacity;
     input.studio_instances.push_back(instance);
     input.view_frustum = view_frustum;
     input.spatial_package = spatial_package;
@@ -819,9 +890,21 @@ TEST_CASE("OpenGL Studio depth testing preserves an occluding world surface",
     const auto world_pixels = fixture::framebuffer();
     CHECK(world_pixels != clear_pixels);
     CHECK(combined_pixels == world_pixels);
+    for (const auto blend : {entity::StudioBlendMode::alpha_blended,
+                            entity::StudioBlendMode::additive}) {
+        entities.frame = single_studio_frame(*entities.package, 2U,
+            {8.0F, 12.0F, -3.0F}, {90.0F, 0.0F, 0.0F}, 2.0F,
+            {{7.5F, 11.9F, -3.5F}, {10.5F, 12.1F, -0.5F}},
+            0U, nullptr, nullptr, std::nullopt, blend, 0.5F);
+        auto translucent_scene = fixture::render_scene(entities);
+        translucent_scene.camera = entity_scene.camera;
+        combined_scene.dynamic_entities = translucent_scene.dynamic_entities;
+        context->renderer().render(combined_scene, {96, 96});
+        CHECK(fixture::framebuffer() == world_pixels);
+    }
     CHECK(context->renderer().statistics().upload_count == 1U);
     CHECK(context->renderer().entity_statistics().studio_asset_upload_count ==
-        1U);
+        2U); // The no-entity world baseline deliberately released the first owner.
     CHECK(glGetError() == GL_NO_ERROR);
     context->release_renderer();
 }
@@ -1185,6 +1268,124 @@ TEST_CASE("Studio normal lighting and material flags produce independent GPU RGB
             check_studio_surface_pixel(studio_surface_pixel(*context, scene), expected(response));
         }
     CHECK(context->renderer().entity_statistics().studio_asset_upload_count == 1U);
+    context->release_renderer();
+}
+
+TEST_CASE("Studio neutral blend metadata is bounded and participates in frame identity",
+    "[renderer][entity-render][studio][translucency][validation]")
+{
+    const auto package = studio_blend_package();
+    auto instance = studio_blend_instance(1U, 4.0F, entity::StudioBlendMode::opaque, 1.0F);
+    const auto baseline = entity::EntityRenderFrameBuilder{}.build(*package,
+        studio_blend_input(*package, std::span{&instance, 1U}));
+    REQUIRE(baseline);
+    const auto original_signature = baseline.frame->frame_signature();
+    for (const auto mode : {entity::StudioBlendMode::alpha_blended, entity::StudioBlendMode::additive}) {
+        instance.blend_mode = mode;
+        const auto built = entity::EntityRenderFrameBuilder{}.build(*package,
+            studio_blend_input(*package, std::span{&instance, 1U}));
+        REQUIRE(built);
+        CHECK(built.frame->frame_signature() != original_signature);
+        CHECK(built.frame->statistics().draw_count == 1U);
+    }
+    instance.blend_mode = entity::StudioBlendMode::opaque;
+    instance.opacity = 0.25F;
+    const auto faded = entity::EntityRenderFrameBuilder{}.build(*package,
+        studio_blend_input(*package, std::span{&instance, 1U}));
+    REQUIRE(faded);
+    CHECK(faded.frame->frame_signature() != original_signature);
+    instance.opacity = 1.0F;
+    instance.tint = {0.5F, 0.25F, 1.0F};
+    const auto tinted = entity::EntityRenderFrameBuilder{}.build(*package,
+        studio_blend_input(*package, std::span{&instance, 1U}));
+    REQUIRE(tinted);
+    CHECK(tinted.frame->frame_signature() != original_signature);
+    for (const auto value : {-0.01F, 1.01F, std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::quiet_NaN()}) {
+        instance.tint = {1, 1, 1};
+        instance.opacity = value;
+        const auto invalid_opacity = entity::EntityRenderFrameBuilder{}.build(*package,
+            studio_blend_input(*package, std::span{&instance, 1U}));
+        CHECK_FALSE(invalid_opacity);
+        REQUIRE(invalid_opacity.error);
+        CHECK(invalid_opacity.error->code == entity::EntityRenderFrameErrorCode::invalid_instance);
+        instance.opacity = 1.0F;
+        instance.tint[1] = value;
+        CHECK_FALSE(entity::EntityRenderFrameBuilder{}.build(*package,
+            studio_blend_input(*package, std::span{&instance, 1U})));
+    }
+    instance.tint = {1, 1, 1};
+    instance.blend_mode = static_cast<entity::StudioBlendMode>(255U);
+    CHECK_FALSE(entity::EntityRenderFrameBuilder{}.build(*package,
+        studio_blend_input(*package, std::span{&instance, 1U})));
+}
+
+TEST_CASE("OpenGL Studio alpha additive tint and zero amount have exact visible contributions",
+    "[renderer][opengl][entity-render][studio][translucency][actual-context]")
+{
+    auto context = fixture::try_context();
+    if (!context || !fixture::capable_context()) SKIP("OpenGL 3.3 Core context unavailable");
+    context->initialize_renderer();
+    const auto package = studio_blend_package();
+    auto scene = studio_blend_scene(package, {});
+    const auto clear = studio_surface_pixel(*context, scene);
+    const std::array<float, 3U> source{200, 160, 100};
+    for (const auto mode : {entity::StudioBlendMode::alpha_blended, entity::StudioBlendMode::additive}) {
+        for (const float amount : {0.0F, 0.25F, 0.5F, 1.0F}) {
+            INFO(static_cast<unsigned>(mode) << " amount=" << amount);
+            scene = studio_blend_scene(package, {studio_blend_instance(1U, 4.0F, mode, amount)});
+            std::array<float, 3U> expected{};
+            for (std::size_t channel = 0U; channel < 3U; ++channel)
+                expected[channel] = std::min(255.0F, source[channel] * amount + clear[channel] *
+                    (mode == entity::StudioBlendMode::additive ? 1.0F : 1.0F - amount));
+            check_studio_surface_pixel(studio_surface_pixel(*context, scene), expected);
+            CHECK(glIsEnabled(GL_BLEND) == GL_FALSE);
+            CHECK(glIsEnabled(GL_DEPTH_TEST) == GL_TRUE);
+            GLboolean depth_write = GL_FALSE;
+            glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_write);
+            CHECK(depth_write == GL_TRUE);
+        }
+    }
+    scene = studio_blend_scene(package, {studio_blend_instance(1U, 4.0F,
+        entity::StudioBlendMode::alpha_blended, 0.5F, {1, 0.25F, 0})});
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene),
+        {100 + clear[0] * 0.5F, 20 + clear[1] * 0.5F, clear[2] * 0.5F});
+    // Normal render mode ignores amount, including the common wire amount0.
+    // This draw also proves the previous tint/alpha/blend uniforms do not leak.
+    scene = studio_blend_scene(package, {studio_blend_instance(1U, 4.0F,
+        entity::StudioBlendMode::opaque, 0.0F)});
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene), source);
+    CHECK(context->renderer().entity_statistics().studio_asset_upload_count == 1U);
+    context->release_renderer();
+}
+
+TEST_CASE("OpenGL Studio translucency sorts by camera depth after opaque geometry",
+    "[renderer][opengl][entity-render][studio][translucency][actual-context]")
+{
+    auto context = fixture::try_context();
+    if (!context || !fixture::capable_context()) SKIP("OpenGL 3.3 Core context unavailable");
+    context->initialize_renderer();
+    const auto package = studio_blend_package();
+    const auto clear = studio_surface_pixel(*context, studio_blend_scene(package, {}));
+    // IDs deliberately put the near layer first; submission/ID order must not
+    // decide alpha composition. A later opaque layer must fill depth first.
+    const auto front = studio_blend_instance(1U, 4.0F,
+        entity::StudioBlendMode::alpha_blended, 0.5F, {1, 0, 0});
+    const auto back = studio_blend_instance(2U, 6.0F,
+        entity::StudioBlendMode::alpha_blended, 0.5F, {0, 1, 0});
+    auto scene = studio_blend_scene(package, {front, back});
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene),
+        {100 + clear[0] * 0.25F, 40 + clear[1] * 0.25F, clear[2] * 0.25F});
+    const auto opaque_back = studio_blend_instance(3U, 8.0F,
+        entity::StudioBlendMode::opaque, 1.0F, {0, 0, 1});
+    scene = studio_blend_scene(package, {front, back, opaque_back});
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene), {100, 40, 25});
+    // Opaque near geometry occludes both translucent layers without disabling
+    // depth testing for alpha/additive entities.
+    const auto opaque_front = studio_blend_instance(4U, 2.0F,
+        entity::StudioBlendMode::opaque, 1.0F);
+    scene = studio_blend_scene(package, {front, back, opaque_front});
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene), {200, 160, 100});
     context->release_renderer();
 }
 

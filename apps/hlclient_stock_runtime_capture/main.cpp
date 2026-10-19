@@ -949,7 +949,7 @@ make_journal_entry(
         "\\name\\FixturePlayer\\topcolor\\30\\esevcmmx\\0\\_gm\\3154"
         "\\_vgui_menus\\0\\rate\\25000";
     auto connect_request = connectionless(
-        "connect 48 7 \"" + protocol + "\" \"" + user + "\"");
+        "connect 48 7 \"" + protocol + "\" \"" + user + "\"\n");
     connect_request.insert(
         connect_request.end(), 213U, std::byte{0xa5U});
     const auto accept_response = nul_terminated_connectionless(

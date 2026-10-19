@@ -184,7 +184,11 @@ struct ReferencePredictionGroundResult final {
 // An exact borrowed reference command may witness a positive post-movement
 // velocity effect at this same boundary. It permits only the ordinary support
 // probe for the still-grounded post-think endpoint, never another impulse or
-// altered canonical velocity. Without that witness the strict policy remains.
+// altered canonical velocity. Native v2 also probes an observed ONGROUND
+// endpoint with upward velocity above the categorization threshold: a server
+// impulse need not have a matching local command effect. Free current-hull
+// occupancy and real walkable support are still required; the next command
+// re-categorizes its unchanged upward velocity normally. Legacy v1 stays strict.
 [[nodiscard]] ReferencePredictionGroundResult derive_reference_prediction_ground(
     const ReferencePredictionSeed& seed,
     const GoldSrcWireUserCmd& boundary_command,

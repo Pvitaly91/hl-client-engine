@@ -1,4 +1,6 @@
 #pragma once
+#include <hlclient/game_api/console_theme.hpp>
+#include <hlclient/game_api/text_messages.hpp>
 #include <hlclient/game_api/hud_input.hpp>
 #include <hlclient/game_api/hud_resources.hpp>
 #include <hlclient/game_api/audio.hpp>
@@ -10,6 +12,7 @@
 #include <hlclient/game_api/movement_policy.hpp>
 #include <hlclient/game_api/movement_audio.hpp>
 #include <hlclient/game_api/presentation.hpp>
+#include <hlclient/game_api/weapon_diagnostics.hpp>
 #include <hlclient/game_api/remote_player.hpp>
 #include <hlclient/game_api/remote_effects.hpp>
 #include <hlclient/game_api/local_visuals.hpp>
@@ -27,7 +30,7 @@ struct GameSessionIdentity final {
     std::optional<std::uint32_t> receiving_entity;
     friend bool operator==(const GameSessionIdentity&, const GameSessionIdentity&) = default;
 };
-enum class GameMessageKind : std::uint8_t { user_message, weapon_animation, player_display };
+enum class GameMessageKind : std::uint8_t { user_message, weapon_animation, player_display, console_text, player_network };
 // Borrowed only for stage_record(). Name/body refer to the exact bounded owning
 // decoded record. Implementations must copy anything retained beyond that call.
 struct GameMessageView final {
@@ -37,6 +40,7 @@ struct GameMessageView final {
     client::RuntimeObservationSource source;
     std::optional<std::uint8_t> registration_id;
     std::optional<PlayerDisplayUpdate> player_display;
+    std::span<const PlayerNetworkUpdate> player_network{};
 };
 enum class GameMessageErrorCode : std::uint8_t {
     invalid_body, invalid_identifier, invalid_token, invalid_value, capacity_exceeded
@@ -77,6 +81,23 @@ struct GameRecordInput final {
 // Existing owning projections are reused; no second copy of delta or network
 // state crosses the seam. The host validates these before atomic publication.
 struct GameRecordState final {
+    // Inert owning one-record display events, delivered only after commit.
+    struct ConsoleText {
+        std::string text;client::RuntimeObservationSource source;
+        enum class Origin : std::uint8_t { server, game_event };
+        Origin origin{Origin::server};
+    };
+    std::vector<ConsoleText> console_text;
+    std::size_t console_text_dropped{};
+    struct DisplayText {std::string text;TextDestination destination;client::RuntimeObservationSource source;};
+    std::vector<DisplayText> display_text;
+    void append_console_text(std::string text,client::RuntimeObservationSource source,
+        ConsoleText::Origin origin=ConsoleText::Origin::server) {
+        if(text.empty())return;
+        std::size_t bytes{};for(const auto& event:console_text)bytes+=event.text.size();
+        if(console_text.size()>=32U || text.size()>4096U-bytes){++console_text_dropped;return;}
+        console_text.push_back({std::move(text),source,origin});
+    }
     struct ScreenShake { double amplitude{},duration_seconds{},frequency_hz{}; client::RuntimeObservationSource source; };
     // Current committed record only; visual application is independently optional.
     std::vector<ScreenShake> screen_shakes;
@@ -114,9 +135,17 @@ struct GameRecordResult final {
 class IGameClientModule {
 public:
     virtual ~IGameClientModule() = default;
+    virtual void set_weapon_diagnostic_observer(WeaponDiagnosticObserver*) noexcept {}
+    [[nodiscard]] virtual std::span<const WeaponDiagnosticCapability> weapon_diagnostic_capabilities() const noexcept { return {}; }
+    [[nodiscard]] virtual WeaponDiagnosticObjectProfile weapon_diagnostic_object_profile(std::string_view) const noexcept {
+        return WeaponDiagnosticObjectProfile::unknown;
+    }
     virtual void reset(GameSessionIdentity) noexcept = 0;
     virtual void teardown() noexcept = 0;
     [[nodiscard]] virtual const GameMovementPolicy& movement_policy() const noexcept = 0;
+    [[nodiscard]] virtual ConsoleVisualTheme console_theme() const noexcept {return {};}
+    [[nodiscard]] virtual std::string_view text_message_preparation() const noexcept {return {};}
+    virtual void bind_text_messages(const TextMessageCatalogue&) {}
     // Only pending press edges contribute these buttons BEFORE history insert.
     // No mutation of submitted/history/replay commands. Default preserves hold.
     [[nodiscard]] virtual gameplay_input::GameplayButtonMask edge_triggered_buttons(

@@ -21,6 +21,10 @@ struct RemoteMovementObservation final {
     std::optional<std::uint64_t> previous_source_ordinal,current_source_ordinal,latest_source_ordinal;
     std::optional<double> previous_server_s,current_server_s,latest_server_s,sample_server_s;
     std::optional<std::uint32_t> selected_main,selected_gait,selected_weapon,raw_main,raw_gait,raw_weapon,raw_effects;
+    std::optional<std::uint32_t> raw_render_mode,raw_render_amount,raw_render_effect;
+    std::optional<double> rendered_opacity;
+    std::optional<std::uint32_t> support_entity,support_model;
+    std::optional<double> support_offset_z;
     std::optional<bool> pose_submitted,visible;
     entity_visual::PlayerPresentationDiagnostics presentation;
 };

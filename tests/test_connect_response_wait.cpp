@@ -189,6 +189,37 @@ TEST_CASE("Connect response wait defaults are bounded and the stage never sends"
     CHECK(maximum_transport.send_count == 0U);
 }
 
+TEST_CASE("A longer configured response wait accepts a delayed reply on its original endpoint",
+          "[goldsrc][connect-response][wait][connect-retry]")
+{
+    const auto endpoint=NetworkAddress::loopback(27'015);
+    const auto epoch=ConnectResponseWaitTimePoint{};
+    FakeDatagramTransport transport;
+    ConnectResponseWaitConfig config;config.timeout=10s;
+    ConnectResponseWaitStage stage{transport,endpoint,config};
+    REQUIRE(stage.start(epoch,transport.local));
+    stage.update(epoch+5s);
+    REQUIRE(stage.state()==ConnectResponseWaitState::waiting);
+    // Independently authored wire ACCEPT: no matching connect serializer,
+    // actual Steam session or packet retransmission is used by this fixture.
+    transport.queue(endpoint,accepted_packet());
+    stage.update(epoch+9s);
+    REQUIRE(stage.state()==ConnectResponseWaitState::accepted);
+    REQUIRE(stage.response());
+    CHECK(std::holds_alternative<ConnectAccepted>(*stage.response()));
+    CHECK(transport.send_count==0);
+    CHECK(transport.local_address_queries==1);
+
+    FakeDatagramTransport strict_transport;
+    ConnectResponseWaitStage strict{strict_transport,endpoint};
+    REQUIRE(strict.start(epoch,strict_transport.local));
+    strict_transport.queue(endpoint,accepted_packet());
+    strict.update(epoch+5s);
+    CHECK(strict.state()==ConnectResponseWaitState::timed_out);
+    CHECK(strict_transport.receive_count==0);
+    CHECK_FALSE(strict_transport.incoming.empty());
+}
+
 TEST_CASE("Connect response wait rejects invalid configuration without polling or sending",
           "[goldsrc][connect-response][wait]")
 {
@@ -545,6 +576,70 @@ TEST_CASE("Exact endpoint ACCEPT and REJECT become distinct terminal outcomes",
         CHECK(stage.state() == ConnectResponseWaitState::rejected);
         CHECK(transport.receive_count == receive_count);
         CHECK(transport.send_count == 0U);
+    }
+}
+
+TEST_CASE("Exact standard password refusal ends the wait as rejection and never as retryable timeout",
+          "[goldsrc][connect-response][wait][connect-retry]")
+{
+    const auto endpoint=NetworkAddress::loopback(27'015);
+    const auto foreign=NetworkAddress::loopback(27'016);
+    const auto epoch=ConnectResponseWaitTimePoint{};
+    std::string body{"8BADPASSWORD"};body.push_back('\0');
+    FakeDatagramTransport transport;
+    transport.queue(foreign,connectionless_packet(body));
+    transport.queue(endpoint,connectionless_packet(body));
+    transport.queue(endpoint,accepted_packet());
+    std::vector<ConnectResponseTraceEvent> events;
+    ConnectResponseWaitStage stage{transport,endpoint,test_config(),
+        [&](const auto& event){events.push_back(event);}};
+    REQUIRE(stage.start(epoch,transport.local));
+    stage.update(epoch+1ms);
+    REQUIRE(stage.state()==ConnectResponseWaitState::rejected);
+    REQUIRE(stage.response());
+    REQUIRE(std::holds_alternative<ConnectRejected>(*stage.response()));
+    CHECK(std::get<ConnectRejected>(*stage.response()).message=="BADPASSWORD");
+    CHECK_FALSE(stage.error());
+    REQUIRE(events.size()==3U);
+    CHECK(events[0].classification==ConnectResponseTraceClassification::wait_started);
+    CHECK(events[1].classification==ConnectResponseTraceClassification::wrong_endpoint_ignored);
+    CHECK(events[2].classification==ConnectResponseTraceClassification::connect_rejected);
+    CHECK(events[2].endpoint==endpoint);
+    CHECK(events[2].datagram_size==17U);
+    CHECK(transport.receive_count==2U);
+    CHECK(transport.send_count==0U);
+    stage.update(epoch+test_config().timeout);
+    CHECK(stage.state()==ConnectResponseWaitState::rejected);
+    CHECK(transport.receive_count==2U);
+    CHECK(transport.incoming.size()==1U);
+    CHECK(events.size()==3U);
+}
+
+TEST_CASE("Malformed password refusal remains a terminal protocol error instead of an ignored packet",
+          "[goldsrc][connect-response][wait][connect-retry]")
+{
+    for(const std::string prefix:{"8BADPASSWORD\n","8badpassword","8BADPASSWORDX"}) {
+        INFO(prefix);
+        const auto endpoint=NetworkAddress::loopback(27'015);
+        const auto epoch=ConnectResponseWaitTimePoint{};
+        auto body=prefix;body.push_back('\0');
+        FakeDatagramTransport transport;
+        transport.queue(endpoint,connectionless_packet(body));
+        std::vector<ConnectResponseTraceEvent> events;
+        ConnectResponseWaitStage stage{transport,endpoint,test_config(),
+            [&](const auto& event){events.push_back(event);}};
+        REQUIRE(stage.start(epoch,transport.local));
+        stage.update(epoch+1ms);
+        REQUIRE(stage.state()==ConnectResponseWaitState::protocol_error);
+        REQUIRE(stage.error());
+        CHECK(stage.error()->code==ConnectResponseWaitErrorCode::malformed_connect_response);
+        CHECK_FALSE(stage.response());
+        REQUIRE(events.size()==2U);
+        CHECK(events.back().classification==ConnectResponseTraceClassification::protocol_failure);
+        stage.update(epoch+test_config().timeout);
+        CHECK(stage.state()==ConnectResponseWaitState::protocol_error);
+        CHECK(transport.receive_count==1U);
+        CHECK(transport.send_count==0U);
     }
 }
 

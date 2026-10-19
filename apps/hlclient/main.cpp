@@ -4,11 +4,20 @@
 #include <hlclient/app/intentional_session_close.hpp>
 #include <hlclient/app/external_session.hpp>
 #include <hlclient/app/external_diagnostics.hpp>
+#include <hlclient/app/external_observation_gate.hpp>
 #include <hlclient/app/application_presentation_settings.hpp>
 #include <hlclient/app/session_receipt.hpp>
 #include <hlclient/app/movement_diagnostics.hpp>
+#include <hlclient/app/multiplayer_presentation_diagnostics.hpp>
+#include <hlclient/core/movement_correction_witness.hpp>
 #include <hlclient/app/session_receipt_commit.hpp>
+#include <hlclient/app/console_application.hpp>
+#include <hlclient/app/console_steam_authentication.hpp>
+#include <hlclient/app/console_lifecycle.hpp>
+#include <hlclient/app/console_screen.hpp>
+#include <hlclient/goldsrc/console_background.hpp>
 #ifdef _WIN32
+#include <hlclient/app/console_session_attempt.hpp>
 #include <hlclient/platform/windows/session_receipt_file.hpp>
 #include <hlclient/platform/windows/external_launcher.hpp>
 #endif
@@ -16,9 +25,11 @@
 #include <hlclient/game_api/game_client_host.hpp>
 #if HLCLIENT_BUILD_GAME_HALFLIFE
 #include <hlclient/games/halflife/client_module.hpp>
+#include <hlclient/games/halflife/console_commands.hpp>
 #endif
 #include <hlclient/app/precache_manifest_exit_policy.hpp>
 #include <hlclient/app/runtime_replay_local_assets.hpp>
+#include <hlclient/app/model_preparation_cache.hpp>
 #include <hlclient/app/world_impact_presentation.hpp>
 #include <hlclient/app/remote_effect_presentation.hpp>
 #include <hlclient/app/temporary_effect_presentation.hpp>
@@ -28,6 +39,7 @@
 #include <hlclient/goldsrc/local_audio.hpp>
 #include <hlclient/app/runtime_replay_scene_source.hpp>
 #include <hlclient/app/steam_authentication_provider.hpp>
+#include <hlclient/app/steam_connection_diagnostics.hpp>
 #include <hlclient/assets/asset_importer_registry.hpp>
 #include <hlclient/assets/asset_manager.hpp>
 #include <hlclient/client/client_scene_source.hpp>
@@ -75,6 +87,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <mutex>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -110,6 +123,22 @@ namespace {
 
 using hlclient::core::LogLevel;
 
+[[nodiscard]] constexpr hlclient::app::MovementGpuPassStatus movement_gpu_status(
+    hlclient::renderer::opengl::OpenGlGpuTimingStatus status) noexcept {
+  using Source=hlclient::renderer::opengl::OpenGlGpuTimingStatus;
+  using Target=hlclient::app::MovementGpuPassStatus;
+  switch(status) {
+  case Source::not_observed:return Target::not_observed;
+  case Source::pending:return Target::pending;
+  case Source::ready:return Target::ready;
+  case Source::unsupported:return Target::unsupported;
+  case Source::disjoint:return Target::disjoint;
+  case Source::invalid:return Target::invalid;
+  case Source::capacity_dropped:return Target::capacity_dropped;
+  }
+  return Target::invalid;
+}
+
 bool external_launch_active{};
 std::string external_last_stage,external_last_reason,external_failure_reason;
 void external_status(std::string_view stage,std::string_view reason="none") {
@@ -136,11 +165,32 @@ bool external_cancel_requested(const hlclient::core::CommandLineOptions& options
 
 struct SessionReceiptFactMailbox final {
   std::atomic<std::uint64_t> facts{};
+  std::mutex authentication_mutex;
+  hlclient::app::SteamConnectionDiagnostics authentication;
+  const std::chrono::steady_clock::time_point authentication_origin{std::chrono::steady_clock::now()};
 };
 std::atomic<std::shared_ptr<SessionReceiptFactMailbox>> session_receipt_mailbox;
 void receipt_fact_observed(hlclient::app::SessionReceiptFact fact) noexcept {
   const auto mailbox=session_receipt_mailbox.load();
   if(mailbox) mailbox->facts.fetch_or(hlclient::app::receipt_fact(fact),std::memory_order_relaxed);
+}
+template<class Event> void receipt_authentication_observed(const Event& event) noexcept {
+  const auto mailbox=session_receipt_mailbox.load();
+  if(!mailbox)return;
+  try {
+    const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now()-mailbox->authentication_origin).count();
+    std::lock_guard lock(mailbox->authentication_mutex);
+    mailbox->authentication.observe(event,elapsed>0 ? static_cast<std::uint64_t>(elapsed) : 0U);
+  } catch(...) {} // Optional observer must never change connection outcome.
+}
+void receipt_authentication_rejected(std::string_view text) noexcept {
+  const auto mailbox=session_receipt_mailbox.load();
+  if(!mailbox)return;
+  try {
+    std::lock_guard lock(mailbox->authentication_mutex);
+    mailbox->authentication.rejection(text);
+  } catch(...) {}
 }
 template<class Callback,class Logger,class Observe>
 Callback receipt_aware_trace(const bool logging,Logger logger,Observe observe) {
@@ -153,10 +203,14 @@ Callback receipt_aware_trace(const bool logging,Logger logger,Observe observe) {
 class ApplicationSessionReceipts final {
 public:
   using Clock=std::chrono::steady_clock;
-  explicit ApplicationSessionReceipts(const hlclient::core::CommandLineOptions& options)
+  explicit ApplicationSessionReceipts(const hlclient::core::CommandLineOptions& options,
+      bool* integrity_failure=nullptr)
       : origin_(Clock::now()),uncaught_(std::uncaught_exceptions()),external_(options.external_server_client),
-        movement_(options.movement_diagnostics) {
+        movement_(options.movement_diagnostics),multiplayer_(movement_),integrity_failure_(integrity_failure) {
+    movement_.set_multiplayer_clock_origin_ns(static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(origin_.time_since_epoch()).count()));
     if(!options.session_receipt_root) return;
+    if(integrity_failure_)*integrity_failure_=true; // Constructor failure is durable-output failure.
 #ifdef _WIN32
     const auto& root=*options.session_receipt_root;
     const auto path=std::filesystem::path{std::u8string_view{
@@ -182,6 +236,7 @@ public:
 #else
     throw std::runtime_error{"Owned session receipts require the Windows reporting backend"};
 #endif
+    if(integrity_failure_)*integrity_failure_=false;
   }
   ~ApplicationSessionReceipts() {
     if(journal_ && !finished_) {
@@ -191,7 +246,25 @@ public:
       close.outcome=std::uncaught_exceptions()>uncaught_ ? hlclient::app::SessionCloseOutcome::fatal_failure : hlclient::app::SessionCloseOutcome::not_requested;
       finish(close);
     }
+    // run() constructs receipts before all provider/session owners. By now
+    // their teardown events have arrived, including Terminate/Shutdown.
+#ifdef _WIN32
+    if(external_ && mailbox_ && journal_ && directory_) {
+      try {
+        std::lock_guard lock(mailbox_->authentication_mutex);
+        if(mailbox_->authentication.observed()) {
+          const auto bytes=mailbox_->authentication.encode(journal_->snapshot()->identity);
+          if(!hlclient::platform::windows::secure_atomic_write_new(*directory_,
+              L"external-authentication.json",std::as_bytes(std::span{bytes.data(),bytes.size()})))
+            hlclient::core::log(LogLevel::warning,"[auth-diagnostics] publication_failed=true");
+        }
+      } catch(...) {
+        try {hlclient::core::log(LogLevel::warning,"[auth-diagnostics] publication_failed=true");}catch(...){}
+      }
+    }
+#endif
     if(mailbox_) session_receipt_mailbox.store({});
+    if(integrity_failure_ && failed_)*integrity_failure_=true;
   }
   ApplicationSessionReceipts(const ApplicationSessionReceipts&)=delete;
   ApplicationSessionReceipts& operator=(const ApplicationSessionReceipts&)=delete;
@@ -208,6 +281,47 @@ public:
     return elapsed>0 ? static_cast<std::uint64_t>(elapsed) : 0U;
   }
   hlclient::app::MovementIncidentRecorder& movement() noexcept {return movement_;}
+  hlclient::app::MultiplayerPresentationDiagnostics& multiplayer() noexcept {return multiplayer_;}
+  hlclient::core::MultiplayerDiagnosticSink* diagnostic_sink() noexcept {
+    return movement_.enabled()?&multiplayer_:nullptr;
+  }
+  void diagnostic_capabilities(const hlclient::game_api::GameClientHost& host) {
+    if(!movement_.enabled() || !diagnostic_capabilities_.empty())return;
+    diagnostic_capabilities_="[";bool first=true;
+    for(const auto& entry:host.weapon_diagnostic_capabilities()) {
+      if(!first)diagnostic_capabilities_+=',';first=false;
+      diagnostic_capabilities_+="{\"weapon_id\":"+std::to_string(entry.weapon_id)+
+          ",\"command\":"+hlclient::core::external_json_string(entry.command.substr(0,64))+",\"modes\":[";
+      for(std::size_t i=0;i<entry.modes.size();++i) {
+        if(i)diagnostic_capabilities_+=',';
+        diagnostic_capabilities_+=std::to_string(static_cast<unsigned>(entry.modes[i]));
+      }
+      diagnostic_capabilities_+="],\"held_primary\":"+std::string{entry.held_primary?"true":"false"}+
+          ",\"persistent_objects\":"+(entry.persistent_objects?"true":"false")+"}";
+    }
+    diagnostic_capabilities_+=']';
+  }
+  void diagnostic(hlclient::core::MultiplayerDiagnosticPayload payload,
+      hlclient::core::MultiplayerDiagnosticProducer producer,
+      std::optional<std::uint64_t> frame={},std::optional<std::uint64_t> input={},
+      std::optional<std::pair<std::uint64_t,std::uint64_t>> source_generation={}) noexcept {
+    if(!movement_.enabled())return;
+    hlclient::core::MultiplayerDiagnosticEvent event;
+    event.identity.producer=producer;
+    event.identity.producer_event_id=++diagnostic_event_ids_[static_cast<std::size_t>(producer)];
+    if(source_generation) {
+      event.identity.network_generation=source_generation->first;
+      event.identity.map_generation=source_generation->second;
+    } else if(const auto identity=snapshot()) {
+      event.identity.network_generation=identity->generation.network_generation;
+      event.identity.map_generation=identity->generation.map_generation;
+    }
+    event.identity.render_frame=frame;event.identity.input_sequence=input;
+    event.local_steady_ns=hlclient::core::multiplayer_diagnostic_now_ns();
+    event.provenance=hlclient::core::MultiplayerProvenance::runtime_observed;
+    event.edge=hlclient::core::MultiplayerEdgeConfidence::exact;
+    event.payload=payload;(void)multiplayer_.observe(event);
+  }
   std::uint64_t movement_stamp(Clock::time_point time) const noexcept {
     const auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(time-origin_).count();
     return elapsed>0 ? static_cast<std::uint64_t>(elapsed) : 0U;
@@ -224,6 +338,7 @@ public:
     if(!normalized || !network || !map) return;
     const hlclient::app::SessionReceiptGeneration next{network,map,*normalized};
     if(journal_->snapshot()->generation==next) return;
+    multiplayer_.invalidate();
     const bool startup=journal_->snapshot()->generation.network_generation==0U;
     if(!startup && mailbox_) mailbox_->facts.store(0U,std::memory_order_relaxed);
     if(!hlclient::app::begin_published_session_receipt_generation(*journal_,next,
@@ -266,7 +381,14 @@ public:
       // Optional diagnostic failure never replaces the gameplay close verdict.
       if(movement_.requested()) {
         try {
-          const auto report=movement_.encode(journal_->snapshot()->identity);
+          auto report=movement_.encode(journal_->snapshot()->identity);
+          if(report && !diagnostic_capabilities_.empty()) {
+            const auto last=report->rfind('}');
+            const auto metadata=",\"game_diagnostic_capabilities\":"+diagnostic_capabilities_+
+                ",\"launch_manifest_reference\":\"launch-manifest.json\",\"process_manifest_reference\":\"process-manifest.json\"";
+            if(last!=report->npos)report->insert(last,metadata.size()<=hlclient::app::MovementIncidentRecorder::publication_metadata_reserve
+                ?metadata:",\"game_diagnostic_capabilities_omitted\":\"publication_metadata_budget_exceeded\"");
+          }
           if(!report || !directory_ || !hlclient::platform::windows::secure_atomic_write_new(*directory_,
               L"external-movement.json",std::as_bytes(std::span{report->data(),report->size()})))
             hlclient::core::log(LogLevel::warning,"[movement-diagnostics] publication_failed=true");
@@ -297,6 +419,9 @@ public:
     publish();
   }
   bool failed() const noexcept {return failed_;}
+  void observe_reporting_scope(bool post_render,double milliseconds,std::uint64_t frame) noexcept {
+    observe_cost(post_render ? render_report_cost_ : receipt_cost_,milliseconds,frame);
+  }
   hlclient::app::ExternalSessionDiagnostics& external_diagnostics() noexcept {return external_diagnostics_;}
   const hlclient::app::SessionReceiptSnapshot* snapshot() const noexcept {
     return journal_ ? journal_->snapshot() : nullptr;
@@ -306,13 +431,19 @@ public:
         hud.hud_automatic_scale,hud.hud_user_scale,hud.hud_effective_scale,
         hud.killfeed_font_pixel_size,hud.killfeed_icon_scale,hud.killfeed_maximum_row_width};
   }
-  void observe_appearance(const hlclient::app::ReplayLocalVisualSummary& summary) {
+  void observe_appearance(const hlclient::app::ReplayLocalVisualSummary& summary,
+      std::uint64_t frame) {
     if(!external_ || appearance_count_>=128U)return;
     for(std::size_t i=0;i<summary.remote_player_count && appearance_count_<128U;++i) {
       const auto& player=summary.remote_players[i];
       // Player slot association only; arbitrary world entities cannot fill the journal.
       if(player.entity==0U || player.entity>appearance_keys_.size())continue;
+      auto& gate=appearance_keys_[player.entity-1U];
+      const auto appearance_key=hlclient::app::external_appearance_key_view(player);
+      if(gate.unchanged(appearance_key))continue;
+      const ReportingScope timed{*this,appearance_cost_,frame};
       const auto& appearance=player.appearance;
+      (void)gate.publish(appearance_key,[&] {
       std::ostringstream row;
       row<<"{\"entity\":"<<player.entity<<",\"modelindex\":"<<player.model_slot
         <<",\"network_generation\":"<<player.network_generation<<",\"map_generation\":"<<player.map_generation
@@ -327,15 +458,16 @@ public:
         <<",\"visual_resource_id\":"<<player.visual_model_resource_id
         <<",\"palette_remapped\":"<<(player.palette_remapped?"true":"false")<<'}';
       const auto bytes=row.str();
-      if(appearance_keys_[player.entity-1U]==bytes)continue;
-      appearance_keys_[player.entity-1U]=bytes;
       if(appearance_count_++)appearance_observations_+=',';
       appearance_observations_+=bytes;
+      return true;
+      });
     }
   }
   void external_render(const hlclient::core::CommandLineOptions& options,
-      const hlclient::platform::VideoWindowState& video,
-      const hlclient::renderer::opengl::OpenGlRenderer& renderer) {
+      const hlclient::platform::SdlWindow& window,
+      const hlclient::renderer::opengl::OpenGlRenderer& renderer,
+      std::uint64_t frame) {
     if(!options.external_server_client) return;
     scene_metrics_=renderer.scene_target_statistics();
     postprocess_extent_=renderer.image_adjustment_statistics().last_extent;
@@ -344,48 +476,63 @@ public:
     // Preserve the last valid observation while a resize replaces our exact
     // owned file; never overwrite a caller-supplied or unrelated file.
     const auto& scene=*scene_metrics_;
+    const MsaaKey msaa_key{scene.requested_samples,scene.actual_samples,scene.fallback_reason};
+    const VideoKey video_key{window.video_state_revision(),scene.requested_samples,
+        scene.actual_samples,scene.maximum_samples,scene.framebuffer_complete,
+        scene.scene_extent,scene.resolve_extent,postprocess_extent_,scene.viewport,
+        scene.fallback_reason,hud_metrics_};
+    const bool observe_video=!video_publication_failed_ && video_observations_<16U && !video_gate_.unchanged(video_key);
+    const bool observe_msaa=!msaa_publication_failed_ &&
+        (!msaa_gate_.unchanged(msaa_key) || msaa_publisher_.retry_pending());
+    if(!observe_video && !observe_msaa)return;
     const auto reason=scene.actual_samples==scene.requested_samples ? std::string_view{"none"} :
         hlclient::renderer::opengl::to_string(scene.fallback_reason);
-    const auto msaa_key=std::to_string(scene.requested_samples)+":"+
-        std::to_string(scene.actual_samples)+":"+std::string{reason};
-    if(!msaa_publication_failed_ && (msaa_key!=last_msaa_key_ || msaa_publisher_.retry_pending())) {
+    if(observe_msaa) {
+      const ReportingScope timed{*this,msaa_cost_,frame};
+      const auto encode_started=Clock::now();
       std::ostringstream report;
       report<<"{\"schema\":\"hlclient.external-msaa.v1\",\"run_id\":"
         <<hlclient::core::external_json_string(options.session_run_id.value_or(""))
         <<",\"requested_samples\":"<<scene.requested_samples<<",\"actual_samples\":"<<scene.actual_samples
         <<",\"fallback_reason\":"<<hlclient::core::external_json_string(reason)<<"}\n";
       const auto bytes=report.str();
+      observe_cost(msaa_encode_cost_,std::chrono::duration<double,std::milli>(Clock::now()-encode_started).count(),frame);
       using Publication=hlclient::platform::windows::ExternalMsaaPublicationResult;
+      const auto publish_started=Clock::now();
       const auto publication=directory_ ? msaa_publisher_.publish(*directory_,bytes,
           options.session_run_id.value_or(""),Clock::now()) : Publication::failed;
+      observe_cost(msaa_publish_cost_,std::chrono::duration<double,std::milli>(Clock::now()-publish_started).count(),frame);
       if(publication==Publication::failed) {
         msaa_publication_failed_=true;
         hlclient::core::log(LogLevel::warning,"[external-render] msaa_receipt_publication_failed=true");
       } else if(publication==Publication::published || publication==Publication::unchanged) {
-        last_msaa_key_=msaa_key;
+        (void)msaa_gate_.publish(msaa_key,[]{return true;});
       }
     }
-    std::ostringstream key;
-    key.imbue(std::locale::classic());
-    key<<msaa_key<<':'<<scene.scene_extent.width<<':'<<scene.scene_extent.height
-      <<':'<<video.window_extent.width<<':'<<video.window_extent.height
-      <<':'<<video.window_x<<':'<<video.window_y<<':'<<video.display_index
-      <<':'<<static_cast<unsigned>(video.actual_mode)<<':'<<video.pixel_density<<':'<<video.display_content_scale
-      <<':'<<hud_metrics_.observed<<':'<<hud_metrics_.tier<<':'<<hud_metrics_.width<<':'<<hud_metrics_.height
-      <<':'<<hud_metrics_.effective<<':'<<hud_metrics_.font;
-    if(key.str()!=last_video_key_ && video_observations_<16U) {
-      last_video_key_=key.str();
-      const auto leaf=L"external-video-observed-"+std::to_wstring(++video_observations_)+L".json";
-      external_video(options,video,false,leaf);
+    if(observe_video) {
+      (void)video_gate_.publish(video_key,[&] {
+        const auto* video=static_cast<const hlclient::platform::VideoWindowState*>(nullptr);
+        {
+          const ReportingScope timed{*this,metadata_cost_,frame};
+          video=&window.cached_video_state();
+          metadata_refreshes_=window.video_state_refresh_count();
+        }
+        const ReportingScope timed{*this,video_cost_,frame};
+        const auto leaf=L"external-video-observed-"+std::to_wstring(video_observations_+1U)+L".json";
+        ++video_observations_;
+        return external_video(options,*video,false,leaf,nullptr,frame);
+      });
     }
 #else
-    (void)video;
+    (void)window;(void)frame;
 #endif
   }
-  void external_video(const hlclient::core::CommandLineOptions& options,
-      const hlclient::platform::VideoWindowState& video,bool final,std::wstring_view observation_leaf={}) {
-    if(!options.external_server_client) return;
+  bool external_video(const hlclient::core::CommandLineOptions& options,
+      const hlclient::platform::VideoWindowState& video,bool final,std::wstring_view observation_leaf={},
+      const hlclient::app::ConsolePacingStatistics* pacing=nullptr,std::uint64_t frame=0U) {
+    if(!options.external_server_client) return true;
 #ifdef _WIN32
+    const auto encode_started=Clock::now();
     std::ostringstream report;
     report.imbue(std::locale::classic());
     const auto boolean=[](bool value){return value?"true":"false";};
@@ -403,6 +550,10 @@ public:
       <<",\"framebuffer_width\":"<<video.framebuffer_extent.width<<",\"framebuffer_height\":"<<video.framebuffer_extent.height
       <<",\"desktop_width\":"<<video.desktop_extent.width<<",\"desktop_height\":"<<video.desktop_extent.height
       <<",\"display_scale\":"<<video.display_scale<<",\"actual_vsync\":"<<boolean(video.vsync)
+      <<",\"actual_display_refresh_hz\":"<<(video.display_refresh_hz?std::to_string(*video.display_refresh_hz):"null")
+      <<",\"actual_swap_interval\":"<<(video.actual_swap_interval?std::to_string(*video.actual_swap_interval):"null")
+      <<",\"display_timing_semantics\":\"os_current_mode_and_driver_swap_policy_not_scanout_measurement\""
+      <<",\"vrr_status\":\"unknown\""
       <<",\"window_x\":"<<video.window_x<<",\"window_y\":"<<video.window_y
       <<",\"display_content_scale\":"<<video.display_content_scale<<",\"window_pixel_density\":"<<video.pixel_density
       <<",\"default_framebuffer_samples_observed\":"<<boolean(video.default_framebuffer_samples_observed)
@@ -413,6 +564,7 @@ public:
       <<",\"msaa_receipt_publications\":"<<msaa_publisher_.statistics().publications
       <<",\"msaa_receipt_retryable_failures\":"<<msaa_publisher_.statistics().retryable_failures
       <<",\"msaa_receipt_publication_failed\":"<<boolean(msaa_publication_failed_)
+      <<",\"video_observation_publication_failed\":"<<boolean(video_publication_failed_)
       <<",\"requested_hud_auto\":"<<boolean(options.hud_scale.automatic)<<",\"requested_hud_scale\":"<<options.hud_scale.scale
       <<",\"safe_window_recovery\":"<<boolean(video.safe_window_recovery)
       <<",\"recovery_reason\":"<<hlclient::core::external_json_string(video.recovery_reason)
@@ -420,6 +572,32 @@ public:
       <<",\"contrast\":"<<options.image.contrast<<",\"volume\":"<<options.audio_volume
       <<",\"scene_observed\":"<<boolean(scene_metrics_.has_value())
       <<",\"hud_observed\":"<<boolean(hud_metrics_.observed);
+    report<<",\"reporting_cost\":{\"scope\":\"this_application_session_inclusive_not_cpu_samples\""
+      <<",\"metadata_refreshes\":"<<metadata_refreshes_;
+    const auto cost=[&](std::string_view name,const ReportingCost& value) {
+      report<<",\""<<name<<"\":{\"observations\":"<<value.count
+        <<",\"total_ms\":"<<value.total_ms<<",\"maximum_ms\":"<<value.maximum_ms
+        <<",\"maximum_frame\":"<<(value.count?std::to_string(value.maximum_frame):"null")
+        <<",\"maximum_network_generation\":"<<value.maximum_network
+        <<",\"maximum_map_generation\":"<<value.maximum_map<<'}';
+    };
+    cost("connection_receipt",receipt_cost_);cost("post_render_report",render_report_cost_);
+    cost("window_metadata",metadata_cost_);cost("msaa_encode_publish",msaa_cost_);
+    cost("video_encode_write",video_cost_);cost("appearance_encode",appearance_cost_);
+    cost("msaa_encode",msaa_encode_cost_);cost("msaa_publish",msaa_publish_cost_);
+    cost("video_encode",video_encode_cost_);cost("video_write",video_write_cost_);
+    report<<'}';
+    if(pacing){
+      report<<",\"software_frame_pacing\":{\"profile_enabled\":"<<boolean(pacing->enabled)
+        <<",\"counter_scope\":\"live_visual_entry_to_final_video_report_not_previous_attempts_or_idle\""
+        <<",\"requested_cap_hz\":"<<pacing->requested_cap_hz
+        <<",\"effective_software_cap_hz\":"<<pacing->effective_software_cap_hz
+        <<",\"cap_policy\":\"zero_unlimited_existing_frame_start_deadline_does_not_change_physics\""
+        <<",\"observations\":"<<pacing->observations<<",\"sleep_calls\":"<<pacing->sleep_calls
+        <<",\"last_wait_us\":"<<(pacing->enabled?std::to_string(pacing->last_wait_us):"null")
+        <<",\"total_wait_us\":"<<(pacing->enabled?std::to_string(pacing->total_wait_us):"null")
+        <<",\"maximum_wait_us\":"<<(pacing->enabled?std::to_string(pacing->maximum_wait_us):"null")<<'}';
+    }
     if(scene_metrics_) {
       const auto& scene=*scene_metrics_;
       report<<",\"actual_msaa_samples\":"<<scene.actual_samples<<",\"maximum_msaa_samples\":"<<scene.maximum_samples
@@ -440,21 +618,51 @@ public:
       <<",\"killfeed_maximum_row_width\":"<<hud_metrics_.row_width;
     report<<"}\n";
     const auto bytes=report.str();
-    if(!directory_ || !hlclient::platform::windows::secure_atomic_write_new(*directory_,
+    // Startup/final immutable receipts remain synchronous; these cost records
+    // describe only completed in-game observational writes, not this final sink.
+    if(frame)observe_cost(video_encode_cost_,std::chrono::duration<double,std::milli>(Clock::now()-encode_started).count(),frame);
+    const auto write_started=Clock::now();
+    const bool written=directory_ && hlclient::platform::windows::secure_atomic_write_new(*directory_,
         observation_leaf.empty() ? (final?L"external-video-final.json":L"external-video-start.json") : observation_leaf,
-        std::as_bytes(std::span{bytes.data(),bytes.size()}))) {
+        std::as_bytes(std::span{bytes.data(),bytes.size()}));
+    if(frame)observe_cost(video_write_cost_,std::chrono::duration<double,std::milli>(Clock::now()-write_started).count(),frame);
+    if(!written) {
       if(!observation_leaf.empty()) {
+        video_publication_failed_=true;
         hlclient::core::log(LogLevel::warning,"[external-render] video_observation_publication_failed=true");
-        return;
+        return false;
       }
       failed_=true;external_status("error","video_receipt_publication_failed");
       throw std::runtime_error{"External video receipt publication failed"};
     }
 #else
-    (void)video;(void)final;(void)observation_leaf;
+    (void)video;(void)final;(void)observation_leaf;(void)pacing;(void)frame;
 #endif
+    return true;
   }
 private:
+  struct ReportingCost {
+    std::uint64_t count{},maximum_frame{},maximum_network{},maximum_map{};
+    double total_ms{},maximum_ms{};
+    void observe(double ms,std::uint64_t frame,std::uint64_t network,std::uint64_t map) noexcept {
+      ++count;total_ms+=ms;
+      if(count==1U || ms>maximum_ms){maximum_ms=ms;maximum_frame=frame;maximum_network=network;maximum_map=map;}
+    }
+  } receipt_cost_,render_report_cost_,metadata_cost_,msaa_cost_,video_cost_,appearance_cost_;
+  ReportingCost msaa_encode_cost_,msaa_publish_cost_,video_encode_cost_,video_write_cost_;
+  void observe_cost(ReportingCost& cost,double ms,std::uint64_t frame) noexcept {
+    const auto* current=snapshot();
+    cost.observe(ms,frame,current?current->generation.network_generation:0U,
+        current?current->generation.map_generation:0U);
+  }
+  struct ReportingScope {
+    ApplicationSessionReceipts& owner;
+    ReportingCost& cost;
+    std::uint64_t frame;
+    Clock::time_point started{Clock::now()};
+    ~ReportingScope(){owner.observe_cost(cost,std::chrono::duration<double,std::milli>(Clock::now()-started).count(),frame);}
+  };
+  std::uint64_t metadata_refreshes_{};
   void publish() noexcept {
 #ifdef _WIN32
     try {
@@ -474,22 +682,40 @@ private:
   std::optional<hlclient::platform::windows::SecureOutputDirectory> directory_;
   hlclient::platform::windows::ExternalMsaaObservationPublisher msaa_publisher_;
 #endif
-  struct HudMetrics {
-    bool observed{};
-    std::uint32_t tier{},width{},height{};
-    float automatic{},user{},effective{},font{},icon{},row_width{};
-  } hud_metrics_;
+  using HudMetrics=hlclient::app::ExternalHudObservationMetrics;
+  HudMetrics hud_metrics_;
+  struct MsaaKey {
+    unsigned requested{},actual{};
+    hlclient::renderer::opengl::OpenGlMsaaFallback fallback{};
+    friend bool operator==(const MsaaKey&,const MsaaKey&)=default;
+  };
+  struct VideoKey {
+    std::uint64_t window_revision{};
+    unsigned requested_samples{},actual_samples{},maximum_samples{};
+    bool framebuffer_complete{};
+    hlclient::renderer::RenderExtent scene{},resolve{},postprocess{};
+    std::array<int,4> viewport{};
+    hlclient::renderer::opengl::OpenGlMsaaFallback fallback{};
+    HudMetrics hud;
+    friend bool operator==(const VideoKey&,const VideoKey&)=default;
+  };
   std::optional<hlclient::renderer::opengl::OpenGlSceneTargetStatistics> scene_metrics_;
   hlclient::renderer::RenderExtent postprocess_extent_{};
-  std::string last_msaa_key_,last_video_key_;
+  hlclient::app::ExternalObservationGate<MsaaKey> msaa_gate_;
+  hlclient::app::ExternalObservationGate<VideoKey> video_gate_;
   std::size_t video_observations_{};
-  bool msaa_publication_failed_{};
-  std::array<std::string,hlclient::game_api::kMaximumRemotePlayers> appearance_keys_;
+  bool msaa_publication_failed_{},video_publication_failed_{};
+  std::array<hlclient::app::ExternalObservationGate<hlclient::app::ExternalAppearanceKey>,
+      hlclient::game_api::kMaximumRemotePlayers> appearance_keys_;
   std::string appearance_observations_;
   std::size_t appearance_count_{};
   bool failed_{},finished_{};
   bool external_{};
   hlclient::app::MovementIncidentRecorder movement_;
+  hlclient::app::MultiplayerPresentationDiagnostics multiplayer_;
+  std::string diagnostic_capabilities_;
+  std::array<std::uint64_t,static_cast<std::size_t>(hlclient::core::MultiplayerDiagnosticProducer::count)> diagnostic_event_ids_{};
+  bool* integrity_failure_{};
   hlclient::app::ExternalSessionDiagnostics external_diagnostics_;
 };
 
@@ -843,6 +1069,8 @@ report_runtime_replay(const hlclient::app::RuntimeReplaySceneSource &source) {
         << " missing_texture_placeholder_bindings=" << local.missing_texture_placeholder_bindings
         << " size_matches=" << local.size_matches
         << " size_unavailable=" << local.size_unavailable
+        << " size_mismatches=" << local.size_mismatches
+        << " world_crc_verified=" << local.world_crc_verified
         << " historical_byte_identity=not_established"
         << " visual_semantic_hash="
         << (observation ? hlclient::client::runtime_observation_visual_hash(
@@ -1169,6 +1397,7 @@ void log_connect_trace(
 
 void log_steam_authentication_trace(
     const hlclient::app::SteamAuthenticationTraceEvent &event) {
+  receipt_authentication_observed(event);
   using AuthStatus=hlclient::app::SteamAuthenticationTraceStatus;
   if(event.status==AuthStatus::operation_started || event.status==AuthStatus::api_initializing ||
      event.status==AuthStatus::api_initialized || event.status==AuthStatus::material_pending ||
@@ -1449,6 +1678,17 @@ void log_initial_signon_trace(
   }
   if (event.transmitted_packet_count != 0U) {
     message += ", tx-count=" + std::to_string(event.transmitted_packet_count);
+  }
+  if (event.service_message_code) {
+    message += ", parser=" + std::string{hlclient::goldsrc::to_string(*event.service_message_code)};
+  }
+  if (event.stage_error_code) {
+    message += ", stage-error=" + std::string{hlclient::goldsrc::to_string(*event.stage_error_code)};
+  }
+  if (event.service_message_code || event.stage_error_code) {
+    if (event.wire_opcode) message += ", failed-opcode=" + std::to_string(*event.wire_opcode);
+    if (event.service_error_byte_offset) message += ", error-offset=" + std::to_string(*event.service_error_byte_offset);
+    if (event.source_sequence) message += ", source-sequence=" + std::to_string(*event.source_sequence);
   }
   hlclient::core::log(LogLevel::info, message);
 }
@@ -1853,6 +2093,8 @@ void log_resource_transition_trace(
                  ? std::string{hlclient::goldsrc::to_string(
                        *metadata.intermediate_parser_error)}
                  : std::string{"unavailable"}) +
+            " parser_error_byte_offset=" +
+            number_or_unavailable(metadata.parser_error_byte_offset) +
             " primary_error=" +
             std::string{metadata.intermediate_parser_error
                             ? "intermediate_message_decode_failed"
@@ -2294,7 +2536,8 @@ void log_live_runtime_trace(
     return;
   case Type::usercmd_packet_submitted:
     hlclient::core::log(LogLevel::info,
-                        "[session-progress] live_usercmd_transmission=active");
+                        "[session-progress] live_usercmd_transmission=active",
+                        hlclient::core::LogChannel::diagnostic);
     return;
   case Type::usercmd_server_sample:
     return;
@@ -4122,6 +4365,30 @@ void log_world_render_package_trace(
   return std::move(*socket);
 }
 
+// Local, endpoint/root-bound opt-in; server packets cannot grant filesystem
+// access. Missing, malformed or unrelated permission records keep asset-only
+// consistency checks. Re-evaluate for every connection, including reconnects.
+[[nodiscard]] bool installation_file_checks_approved(
+    const hlclient::core::CommandLineOptions& options) {
+#ifdef _WIN32
+  if (!options.connect_endpoint || !options.base_directory) return false;
+  try {
+    const auto settings = hlclient::platform::windows::default_external_settings_path();
+    if (!settings) return false;
+    const auto text = hlclient::platform::windows::read_external_text(
+        settings->parent_path() / L"installation-file-checks.json", 4096U);
+    return text && hlclient::core::approved_installation_file_checks(
+        *text, *options.connect_endpoint, *options.base_directory,
+        options.game_directory);
+  } catch (...) {
+    return false;
+  }
+#else
+  static_cast<void>(options);
+  return false;
+#endif
+}
+
 class HandshakeSession final {
 public:
   HandshakeSession(
@@ -4152,7 +4419,10 @@ public:
       const bool net_trace,
       std::shared_ptr<hlclient::game_api::GameClientHost> game_client,
       std::shared_ptr<hlclient::goldsrc::CommittedSoundQueue> sound_events,
-      const bool external_mode=false,const bool movement_diagnostics=false)
+      const bool external_mode=false,const bool movement_diagnostics=false,
+      ApplicationSessionReceipts* diagnostic_receipts=nullptr,
+      const bool approved_installation_checks=false,
+      const hlclient::goldsrc::ConnectResponseWaitConfig response_config={})
       : local_resource_environment_{std::move(local_resource_environment)},
         authentication_provider_{std::move(authentication_provider)},
         network_runtime_{},
@@ -4164,15 +4434,21 @@ public:
             stop_point,
             std::move(prepared_request),
             {},
-            net_trace ? hlclient::goldsrc::
-                            ChallengeTraceCallback{&log_challenge_trace}
-                      : hlclient::goldsrc::ChallengeTraceCallback{},
+            receipt_aware_trace<hlclient::goldsrc::ChallengeTraceCallback>(net_trace,&log_challenge_trace,
+                [](const auto& event) {
+                  using C=hlclient::goldsrc::ChallengeTraceClassification;
+                  if(event.classification==C::request_sent || event.classification==C::challenge_accepted)
+                    receipt_authentication_observed(event);}),
             receipt_aware_trace<hlclient::goldsrc::ConnectRequestTraceCallback>(net_trace,&log_connect_trace,
-                [](const auto& event) {if(event.state==hlclient::goldsrc::ConnectRequestStageState::request_sent)
+                [](const auto& event) {receipt_authentication_observed(event);
+                  if(event.state==hlclient::goldsrc::ConnectRequestStageState::request_sent)
                   receipt_fact_observed(hlclient::app::SessionReceiptFact::connect_sent);}),
-            {},
+            response_config,
             receipt_aware_trace<hlclient::goldsrc::ConnectResponseTraceCallback>(net_trace,&log_connect_response_trace,
-                [](const auto& event) {if(event.classification==hlclient::goldsrc::ConnectResponseTraceClassification::connect_accepted)
+                [](const auto& event) {
+                  if(event.classification!=hlclient::goldsrc::ConnectResponseTraceClassification::receive_would_block)
+                    receipt_authentication_observed(event);
+                  if(event.classification==hlclient::goldsrc::ConnectResponseTraceClassification::connect_accepted)
                   receipt_fact_observed(hlclient::app::SessionReceiptFact::connection_accepted);}),
             std::move(authentication_session),
             {},
@@ -4189,10 +4465,18 @@ public:
               }
               return config;
             }(),
-            net_trace
-                ? hlclient::goldsrc::
-                      InitialSignonTraceCallback{&log_initial_signon_trace}
-                : hlclient::goldsrc::InitialSignonTraceCallback{},
+            receipt_aware_trace<hlclient::goldsrc::InitialSignonTraceCallback>(net_trace,&log_initial_signon_trace,
+                [diagnostic_receipts](const auto& event) {
+                  if(diagnostic_receipts && event.service_message_code)
+                    diagnostic_receipts->external_diagnostics().initial_service_failure(
+                        hlclient::goldsrc::to_string(*event.service_message_code),
+                        event.service_error_byte_offset,event.wire_opcode,event.source_sequence);
+                  else if(diagnostic_receipts && event.stage_error_code==
+                      hlclient::goldsrc::InitialSignonErrorCode::service_event_backpressure)
+                    diagnostic_receipts->external_diagnostics().initial_capacity_failure(
+                        hlclient::goldsrc::to_string(*event.stage_error_code),
+                        event.service_error_byte_offset,event.wire_opcode,event.source_sequence);
+                }),
             {},
             receipt_aware_trace<hlclient::goldsrc::PreResourceSignonTraceCallback>(net_trace,&log_pre_resource_signon_trace,
                 [](const auto& event) {if(event.classification==hlclient::goldsrc::PreResourceSignonTraceClassification::server_info_ready)
@@ -4255,6 +4539,9 @@ public:
             live_runtime_target,
             [&] {
               hlclient::goldsrc::LiveRuntimeStageConfig config;
+              if (approved_installation_checks)
+                config.file_consistency_read_policy = hlclient::goldsrc::
+                    FileConsistencyReadPolicy::approved_installation_files;
               config.game_client = game_client;
               if(external_mode) config.required_game_directory="valve";
               if(live_visual_input_source==hlclient::goldsrc::LiveVisualControlInputSource::keyboard_mouse)
@@ -4264,6 +4551,25 @@ public:
               config.reference_prediction = reference_prediction;
               config.effect_diagnostics = net_trace;
               config.movement_diagnostics = movement_diagnostics;
+              if(movement_diagnostics && diagnostic_receipts) {
+                config.multiplayer_diagnostics=diagnostic_receipts->diagnostic_sink();
+                game_client->set_diagnostic_sink(diagnostic_receipts->diagnostic_sink());
+                diagnostic_receipts->diagnostic_capabilities(*game_client);
+              }
+              if(movement_diagnostics && diagnostic_receipts)
+                config.movement_diagnostic_generations=[diagnostic_receipts] {
+                  const auto identity=diagnostic_receipts->snapshot();
+                  return identity ? std::array{identity->generation.network_generation,identity->generation.map_generation}
+                      : std::array<std::uint64_t,2>{};
+                };
+              if(movement_diagnostics && diagnostic_receipts)
+                game_client->set_diagnostic_generations(config.movement_diagnostic_generations);
+              if(movement_diagnostics && diagnostic_receipts)
+                config.movement_correction_sink=[diagnostic_receipts](const hlclient::core::MovementCorrectionWitness& input) {
+                  auto value=input;
+                  value.observed_us=diagnostic_receipts->movement_stamp_ns(value.observed_ns);
+                  (void)diagnostic_receipts->movement().observe_correction(value);
+                };
               if (live_visual_input_source == hlclient::goldsrc::
                       LiveVisualControlInputSource::scripted_jump_duck_check) {
                 config.usercmd_scenario.durations = {
@@ -4347,6 +4653,10 @@ public:
   }
 
   [[nodiscard]] bool terminal() const noexcept { return handshake_.terminal(); }
+  [[nodiscard]] bool connect_response_timed_out() const noexcept {
+    return handshake_.state() ==
+        hlclient::goldsrc::GoldSrcHandshakeState::connect_response_timed_out;
+  }
   [[nodiscard]] std::string_view handshake_state() const noexcept {
     using State = hlclient::goldsrc::GoldSrcHandshakeState;
     switch (handshake_.state()) {
@@ -4554,10 +4864,17 @@ public:
   [[nodiscard]] bool request_weapon_selection(const std::uint8_t weapon_id) {
     return handshake_.request_weapon_selection(weapon_id);
   }
+  [[nodiscard]] bool request_console_command(const hlclient::goldsrc::ConsoleServerCommandRequest& request) {
+    return handshake_.request_console_command(request);
+  }
 
   [[nodiscard]] std::optional<hlclient::goldsrc::LiveUserCmdCheckState>
   live_usercmd_snapshot() const {
     return handshake_.live_usercmd_snapshot();
+  }
+  [[nodiscard]] std::optional<hlclient::goldsrc::LiveUserCmdReceiptCounters>
+  live_usercmd_receipt_counters() const noexcept {
+    return handshake_.live_usercmd_receipt_counters();
   }
   [[nodiscard]] std::size_t live_use_new_submission_count() const noexcept {
     return handshake_.live_use_new_submission_count();
@@ -4604,6 +4921,11 @@ public:
     if(const auto& response=handshake_.connect_response();response)
       if(const auto* rejected=std::get_if<hlclient::goldsrc::ConnectRejected>(&*response))
         return hlclient::app::external_rejection_category(rejected->message);
+    return std::nullopt;
+  }
+  [[nodiscard]] std::optional<std::string_view> server_rejection_text() const noexcept {
+    if(const auto& response=handshake_.connect_response();response)
+      if(const auto* rejected=std::get_if<hlclient::goldsrc::ConnectRejected>(&*response))return rejected->message;
     return std::nullopt;
   }
   [[nodiscard]] bool external_early_failure(hlclient::app::ExternalSessionDiagnostics& diagnostic) const {
@@ -4666,7 +4988,8 @@ throw_authentication_error(const hlclient::auth::AuthenticationError &error) {
 
 [[nodiscard]] RuntimeConnectPreparation prepare_runtime_connect_request(
     const hlclient::core::CommandLineOptions &options,
-    const hlclient::network::NetworkAddress &remote_endpoint) {
+    const hlclient::network::NetworkAddress &remote_endpoint,
+    hlclient::app::ConsoleApplication* console = nullptr) {
   if (options.stop_after == hlclient::core::ConnectionStopPoint::challenge) {
     return {};
   }
@@ -4686,8 +5009,10 @@ throw_authentication_error(const hlclient::auth::AuthenticationError &error) {
     return RuntimeConnectPreparation{
         std::nullopt,
         std::nullopt,
-        std::make_unique<hlclient::app::SteamAuthenticationProvider>(
-            std::move(config)),
+        console ? hlclient::app::make_console_steam_authentication_provider(
+            std::move(config),[console]{console->pump_idle();})
+            : std::unique_ptr<hlclient::auth::IAuthenticationProvider>{
+                std::make_unique<hlclient::app::SteamAuthenticationProvider>(std::move(config))},
         std::move(settings),
         hlclient::goldsrc::steam_legacy_connect_profile(),
     };
@@ -5062,7 +5387,9 @@ int run_live_visual_control(
     const hlclient::core::CommandLineOptions &options,
     const std::shared_ptr<hlclient::game_api::GameClientHost>& game_client,
     const std::shared_ptr<hlclient::goldsrc::CommittedSoundQueue>& sound_events,
-    ApplicationSessionReceipts& receipts) {
+    ApplicationSessionReceipts& receipts,
+    hlclient::app::ConsoleApplication* console = nullptr,
+    bool* integrity_failure = nullptr) {
   using Clock = std::chrono::steady_clock;
   using InputMode = hlclient::core::LiveInputMode;
   const bool keyboard = options.live_input == InputMode::keyboard_mouse;
@@ -5086,15 +5413,26 @@ int run_live_visual_control(
   const auto live_button_mask = game_client->movement_policy().live_buttons;
   const auto live_held_button_mask = game_client->movement_policy().held_buttons;
 
-  [[maybe_unused]] hlclient::platform::SdlRuntime sdl_runtime;
-  hlclient::platform::SdlWindow window{hlclient::platform::SdlWindowConfig{
+  // Scripted proofs retain their existing single-session ownership. Normal
+  // keyboard play uses the application window/context across every attempt.
+  std::unique_ptr<hlclient::platform::SdlRuntime> owned_runtime;
+  std::unique_ptr<hlclient::platform::SdlWindow> owned_window;
+  std::unique_ptr<hlclient::renderer::opengl::OpenGlRenderer> owned_renderer;
+  if(!console) {
+    owned_runtime=std::make_unique<hlclient::platform::SdlRuntime>();
+    owned_window=std::make_unique<hlclient::platform::SdlWindow>(hlclient::platform::SdlWindowConfig{
       std::string{hlclient::core::kApplicationName}+
           " - "+options.player_name, options.video.width, options.video.height, false,
-          options.video.display_index,options.video.mode,options.video.vsync,options.video.msaa_samples}};
-  receipts.external_video(options,window.video_state(),false);
-  hlclient::renderer::opengl::OpenGlRenderer renderer;
+          options.video.display_index,options.video.mode,options.video.vsync,options.video.msaa_samples});
+    owned_renderer=std::make_unique<hlclient::renderer::opengl::OpenGlRenderer>();
+  }
+  auto& window=console ? console->window() : *owned_window;
+  auto& renderer=console ? console->renderer() : *owned_renderer;
+  if(console)console->reset_pacing_statistics();
+  const auto initial_pacing=console?std::optional{console->pacing_statistics()}:std::optional<hlclient::app::ConsolePacingStatistics>{};
+  receipts.external_video(options,window.video_state(),false,{},initial_pacing?&*initial_pacing:nullptr);
   hlclient::input::InputStateTracker input_tracker;
-  hlclient::audio::Playback audio_output{keyboard && options.audio_volume>0};
+  hlclient::audio::Playback audio_output{keyboard && (console || options.audio_volume>0)};
   hlclient::goldsrc::ServerAudio server_audio{audio_output};
   hlclient::goldsrc::LocalAudio local_audio{audio_output};
   hlclient::goldsrc::TemporaryAudio temporary_audio{audio_output};
@@ -5144,7 +5482,16 @@ int run_live_visual_control(
 
   std::optional<std::future<hlclient::app::ReplayLocalAssetsCreateResult>>
       asset_future;
+  auto loading_work=std::make_shared<hlclient::app::LoadingWork>(console ? console->generation() : 0U);
+  // Detach all closures before their session references expire, including
+  // exception paths. Cancellation is signalled before future destruction.
+  struct ConsoleAttemptGuard {
+    hlclient::app::ConsoleApplication* application;
+    std::shared_ptr<hlclient::app::LoadingWork> work;
+    ~ConsoleAttemptGuard(){work->cancelled.store(true);if(application)application->set_session_actions({});}
+  } console_attempt_guard{console,loading_work};
   std::unique_ptr<hlclient::app::RuntimeReplayLocalAssets> local_assets;
+  hlclient::app::ModelPreparationCache model_preparation_cache;
   const auto presentation_model = [&](const hlclient::client::RuntimeClientObservationState& state) {
     return local_assets && state.receiving_client && state.receiving_client->viewmodel_index
         ? local_assets->presentation_model(state.generation, *state.receiving_client->viewmodel_index)
@@ -5153,7 +5500,10 @@ int run_live_visual_control(
   const auto prepare_presentation_variants = [&](const hlclient::client::RuntimeClientObservationState& state) {
     if(!local_assets) return;
     const auto names=game_client->local_model_preparation();
+    const auto reset_serial=game_client->reset_serial();
+    if(model_preparation_cache.matches(local_assets.get(),state.generation,reset_serial,names)) return;
     std::vector<hlclient::game_api::LocalWeaponModelMetadata> variants;
+    variants.reserve(names.size());
     for(const auto name:names) {
       for(const auto& [index,resource]:local_assets->summary().model_names) if(resource==name) {
         if(auto metadata=local_assets->presentation_model(state.generation,index)) variants.push_back(std::move(*metadata));
@@ -5161,6 +5511,11 @@ int run_live_visual_control(
       }
     }
     if(!game_client->bind_model_variants(variants)) throw std::runtime_error{"Invalid module model metadata variants"};
+    // Asset bindings are immutable within this owner. Do not memoize partial
+    // preparation: missing metadata must still be retried after a reset.
+    if(variants.size()==names.size())
+      (void)model_preparation_cache.remember(local_assets.get(),state.generation,reset_serial,names);
+    else model_preparation_cache.invalidate();
   };
   std::optional<hlclient::client::RuntimeObservationSource> last_entity_source;
   std::uint64_t last_projected_publication = 0U;
@@ -5171,6 +5526,7 @@ int run_live_visual_control(
   bool renderer_resources_presented = false;
   bool control_activated = false;
   bool window_closed = false;
+  bool console_disconnected = false;
   bool external_cancelled = false;
   bool external_gameplay_committed = false;
   bool external_server_reported = false;
@@ -5479,6 +5835,47 @@ int run_live_visual_control(
   };
 
   const auto session_started = Clock::now();
+  if(console) {
+    const auto select=[&](std::uint8_t id) {
+      const auto& current=scene_source.world_state().runtime_observation();
+      if(!current || !control_activated || !game_client->inventory_selection(*current,id))return false;
+      const auto now=Clock::now();
+      const bool queued=(!last_weapon_request_at || now-*last_weapon_request_at>=
+          std::chrono::milliseconds{game_client->movement_policy().inventory_repeat_milliseconds}) &&
+          session.request_weapon_selection(id);
+      game_client->hud_selection_result(id,queued,std::chrono::duration<double>{now-session_started}.count());
+      if(queued) {
+        pending_weapon_selection=id;
+        model_index_before_selection=current->receiving_client ? current->receiving_client->viewmodel_index : std::nullopt;
+        last_weapon_request_at=now;++weapon_selection_queued;
+      }
+      return queued;
+    };
+    const auto menu=[&,select](hlclient::game_api::HudMenuInput request) {
+      const auto& current=scene_source.world_state().runtime_observation();
+      if(!current || !control_activated)return false;
+      request.seconds=std::chrono::duration<double>{Clock::now()-session_started}.count();
+      const auto result=game_client->hud_menu_input(*current,request);
+      return result.selection ? select(*result.selection) : result.menu_open;
+    };
+    hlclient::app::ConsoleSessionActions actions;
+    actions.select_slot=[menu](unsigned slot){hlclient::game_api::HudMenuInput m;m.group_digit=static_cast<std::uint8_t>(slot);return menu(m);};
+    actions.cycle_inventory=[menu](int direction){hlclient::game_api::HudMenuInput m;m.cycle_direction=direction;return menu(m);};
+    actions.last_inventory=[menu]{hlclient::game_api::HudMenuInput m;m.last_weapon_pressed=true;return menu(m);};
+    actions.select_weapon=[&,select](std::string_view name){
+      const auto& current=scene_source.world_state().runtime_observation();if(!current)return false;
+      for(const auto& weapon:current->weapon_hud.catalogue)if(weapon.command_name==name)return select(weapon.id);
+      return false;
+    };
+    actions.request=[&](std::string_view name,std::string_view argument) {
+      using Kind=hlclient::goldsrc::ConsoleServerCommandKind;
+      std::optional<Kind> kind;
+      if(name=="say")kind=Kind::say;else if(name=="say_team")kind=Kind::say_team;
+      else if(name=="status")kind=Kind::status;else if(name=="kill")kind=Kind::kill;else if(name=="drop")kind=Kind::drop;
+      return kind && control_activated && session.request_console_command({*kind,std::string{argument}});
+    };
+    console->set_session_actions(std::move(actions));
+  }
   std::cout << "live_visual_startup phase=prepared handshake="
             << session.handshake_state() << std::endl;
   game_client->set_movement_audio_time_origin(
@@ -5489,16 +5886,27 @@ int run_live_visual_control(
   auto previous_time = session_started;
   auto previous_session_update = session_started;
   const bool movement_diagnostics_enabled=receipts.movement().enabled();
+  window.set_input_diagnostic_clocks(movement_diagnostics_enabled);
+  receipts.multiplayer().invalidate();receipts.multiplayer().set_world_query(nullptr);
   std::optional<Clock::time_point> movement_previous_frame,movement_fallback_started;
+  struct DiagnosticGpuOwner {std::uint64_t frame{},network{},map{};};
+  std::array<DiagnosticGpuOwner,8> diagnostic_gpu_owners{};
+  std::uint64_t movement_previous_limiter_wait_us{},movement_previous_yield_wait_us{};
+  bool movement_previous_waits_known{};
   const auto movement_elapsed_ms=[](Clock::time_point begin,Clock::time_point end) {
     return std::chrono::duration<double,std::milli>{end-begin}.count();
   };
   bool running = true;
   while (running) {
     hlclient::app::MovementFrameRecord movement_frame;
+    hlclient::app::MovementFrameContext movement_context;
+    std::optional<hlclient::app::MovementVelocityStopRecord> movement_velocity_stop;
     const auto movement_frame_started=movement_diagnostics_enabled ? Clock::now() : Clock::time_point{};
     if(movement_diagnostics_enabled) {
       movement_frame.frame_number=successful_presentations+1U;
+      movement_frame.previous_iteration_waits_known=movement_previous_waits_known;
+      movement_frame.limiter_wait_us=movement_previous_limiter_wait_us;
+      movement_frame.yield_wait_us=movement_previous_yield_wait_us;
     }
     if(external_cancel_requested(options)) {
       external_cancelled=true;
@@ -5509,7 +5917,7 @@ int run_live_visual_control(
     // Resolve overlay input before applying the ordinary Escape fallback.
     // A group key followed by Escape in the same pump must not release or
     // close the window before its menu intent is considered.
-    window.set_escape_input_owned(keyboard && control_activated);
+    window.set_escape_input_owned(console || (keyboard && control_activated));
     if (!focus_seeded) {
       input_tracker.apply_event(
           keyboard && window.focus_state() ==
@@ -5518,6 +5926,7 @@ int run_live_visual_control(
               : hlclient::input::InputEvent::focus_lost());
       focus_seeded = true;
     }
+    if(console)console->begin_frame(&input_tracker);
     hlclient::platform::PlatformEvent event{hlclient::platform::WindowEvent{}};
     while (window.poll_event(event)) {
       if (const auto *window_event =
@@ -5526,6 +5935,7 @@ int run_live_visual_control(
             hlclient::platform::WindowEventType::quit_requested) {
           running = false;
           window_closed = true;
+          if(console)console->request_quit();
         } else if (window_event->type == hlclient::platform::WindowEventType::
                                              input_capture_recovery_failed) {
           throw std::runtime_error{"SDL input capture recovery failed"};
@@ -5537,7 +5947,31 @@ int run_live_visual_control(
         const auto &input_event = std::get<hlclient::input::InputEvent>(event);
         if (input_event.type() == hlclient::input::InputEventType::focus_lost)
           ++focus_loss_count;
-        input_tracker.apply_event(input_event);
+        const bool console_owned=console && console->route_event(input_event,input_tracker);
+        if(!console_owned)
+          input_tracker.apply_event(input_event);
+        if(movement_diagnostics_enabled) {
+          hlclient::core::MultiplayerInputPayload input;
+          input.event_type=static_cast<std::uint32_t>(input_event.type());
+          // Never retain text or typed key identities while an overlay owns it.
+          if(!console_owned && (input_event.type()==hlclient::input::InputEventType::key_pressed ||
+              input_event.type()==hlclient::input::InputEventType::key_released))
+            input.key=1U+static_cast<std::uint32_t>(input_event.key());
+          if(input_event.type()==hlclient::input::InputEventType::mouse_button_pressed ||
+              input_event.type()==hlclient::input::InputEventType::mouse_button_released)
+            input.mouse_button=1U+static_cast<std::uint32_t>(input_event.mouse_button());
+          input.delta_x=static_cast<float>(input_event.relative_mouse_delta().x);
+          input.delta_y=static_cast<float>(input_event.relative_mouse_delta().y);
+          input.wheel=static_cast<float>(input_event.wheel_delta().vertical);
+          input.repeat=input_event.repeated();input.console_owned=console_owned;
+          input.gameplay_routed=!console_owned;
+          input.focused=window.focus_state()==hlclient::input::InputFocusState::focused;
+          input.captured=window.capture_state()==hlclient::input::InputCaptureState::captured;
+          if(input_event.sdl_timestamp_ns())input.sdl_timestamp_ns=input_event.sdl_timestamp_ns();
+          if(input_event.dequeue_steady_ns())input.dequeue_steady_ns=input_event.dequeue_steady_ns();
+          receipts.diagnostic(input,hlclient::core::MultiplayerDiagnosticProducer::input,
+              movement_frame.frame_number,input_tracker.published_frame_count()+1U);
+        }
       }
     }
     if (keyboard && window.focus_state() ==
@@ -5550,7 +5984,13 @@ int run_live_visual_control(
         ++capture_releases;
     }
     const auto snapshot = input_tracker.publish_snapshot();
+    if(movement_diagnostics_enabled)movement_frame.input_sample_us=receipts.movement_stamp(Clock::now());
     input_tracker.end_frame();
+    if(console && console->session_stop_requested()) {
+      window_closed=console->shutdown_requested();
+      console_disconnected=!window_closed;
+      running=false;
+    }
     const bool movement_manual_marker=movement_diagnostics_enabled &&
         snapshot.focus_state()==hlclient::input::InputFocusState::focused &&
         snapshot.key_pressed(hlclient::input::PhysicalKey::f8);
@@ -5621,12 +6061,14 @@ int run_live_visual_control(
             std::chrono::seconds{static_cast<std::chrono::seconds::rep>(
                 *options.live_session_seconds)}) {
       timed_session_complete = true;
+      if(console)console->request_quit();
       break;
     }
     const auto elapsed = now - previous_time;
     const double input_seconds = std::clamp(
         std::chrono::duration<double>{elapsed}.count(), 0.001, 0.25);
     auto mouse_look=game_client->movement_policy().mouse_look;
+    if(console)mouse_look.sensitivity_scale*=console->sensitivity_scale();
     if (const auto& current=scene_source.world_state().runtime_observation(); current)
       mouse_look.sensitivity_scale*=game_client->camera(*current,0.0).mouse_sensitivity_scale;
     auto built_intent =
@@ -5695,7 +6137,7 @@ int run_live_visual_control(
       nonzero_side_intent_frames += intent.side_axis() != 0.0F;
     }
 
-    if (keyboard && assets_installed &&
+    if (keyboard && (!console || !console->console_active()) && assets_installed &&
         test_health_gate.ready() &&
         (session.live_visual_input_ready() || control_activated) &&
         intent.capture_mouse_requested()) {
@@ -5709,7 +6151,7 @@ int run_live_visual_control(
     if(keyboard && control_activated && intent.release_mouse_requested() &&
         !hud_input_result.cancel_consumed && !snapshot.captured()) {
       // Preserve the old SDL uncaptured Escape close path after UI refusal.
-      running=false;window_closed=true;break;
+      running=false;window_closed=true;if(console)console->request_quit();break;
     }
     if (keyboard && intent.release_mouse_requested() && !hud_input_result.cancel_consumed) {
       const auto released = window.request_relative_mouse_capture(false);
@@ -5746,6 +6188,15 @@ int run_live_visual_control(
                   hlclient::gameplay_input::GameplayButton::attack_primary) : 0U};
       if(capture_released_after_ui)hlclient::goldsrc::release_live_visual_input_capture(
           input,game_client->movement_policy().capture_life_scoped_buttons);
+      if(movement_diagnostics_enabled) {
+        input.input_sample_ns=hlclient::core::multiplayer_diagnostic_now_ns();
+        if(local_assets)input.effective_interpolation_seconds=local_assets->effective_remote_interpolation_delay_seconds();
+        hlclient::core::MultiplayerInputPayload routed;
+        routed.event_type=0x10000U; // normalized gameplay snapshot, not an SDL event
+        routed.focused=intent.focused();routed.captured=intent.captured();
+        routed.hud_consumed=hud_input_result.consume_primary;routed.gameplay_routed=true;
+        receipts.diagnostic(routed,hlclient::core::MultiplayerDiagnosticProducer::input,movement_frame.frame_number,intent.input_sequence());
+      } else if(local_assets)input.effective_interpolation_seconds=local_assets->effective_remote_interpolation_delay_seconds();
       return session.submit_live_visual_input(input,timestamp);
     };
     if (control_activated && keyboard && !submit_keyboard_input(now))
@@ -5768,8 +6219,26 @@ int run_live_visual_control(
             presentation_model(*before));
       game_client->observe(*before, presentation_seconds);
     }
+    if(movement_diagnostics_enabled) {
+      movement_context.focused=snapshot.focused();
+      movement_context.captured=window.capture_state()==hlclient::input::InputCaptureState::captured;
+      movement_context.control_active=control_activated;
+      if(const auto& observation=scene_source.world_state().runtime_observation();observation) {
+        movement_context.life_epoch=observation->lifecycle.life_epoch;
+        if(observation->lifecycle.state==hlclient::client::LocalPlayerLifeState::alive)movement_context.alive=true;
+        else if(observation->lifecycle.dead())movement_context.alive=false;
+      }
+      receipts.movement().set_update_context(movement_context);
+    }
     const auto movement_network_started=movement_diagnostics_enabled ? Clock::now() : Clock::time_point{};
     session.update(now);
+    if(console && !asset_job_started && !control_activated) {
+      using Stage=hlclient::app::LoadingStage;
+      const auto phase=session.handshake_state();
+      console->set_stage(phase=="waiting_for_authentication" ? Stage::authenticating
+          : phase=="waiting_for_challenge" || phase=="waiting_for_connect_response" ? Stage::connecting
+          : phase.find("resource")!=std::string_view::npos ? Stage::resources : Stage::signon);
+    }
     if(movement_diagnostics_enabled) {
       const auto movement_network_completed=Clock::now();
       movement_frame.network_poll_begin_us=receipts.movement_stamp(movement_network_started);
@@ -5779,6 +6248,9 @@ int run_live_visual_control(
       movement_frame.network_ms=metrics.network_driver_ms;
       movement_frame.parse_commit_ms=metrics.network_parse_commit_ms;
       movement_frame.prediction_ms=metrics.prediction_command_ms+metrics.prediction_replay_ms;
+      movement_frame.prediction_work=metrics.prediction_work;
+      movement_frame.prediction_work->command_ms=metrics.prediction_command_ms;
+      movement_frame.prediction_work->replay_ms=metrics.prediction_replay_ms;
       movement_frame.collision_ms=metrics.collision_scene_ms;
       movement_frame.replay_duration_ms=metrics.replayed_simulation_ms;
       movement_frame.queue_depth=static_cast<std::uint32_t>(metrics.driver_queue_before);
@@ -5825,17 +6297,23 @@ int run_live_visual_control(
       const auto movement_receipt_completed=Clock::now();
       movement_frame.receipt_observed_us=receipts.movement_stamp(movement_receipt_completed);
       movement_frame.report_ms=movement_elapsed_ms(movement_receipt_started,movement_receipt_completed);
+      receipts.observe_reporting_scope(false,*movement_frame.report_ms,successful_presentations+1U);
     }
     if(receipts.failed()) throw std::runtime_error{"Session receipt commit/publication failed"};
     if(options.external_server_client && session.terminal()) {
       auto& diagnostic=receipts.external_diagnostics();
       if(const auto& error=session.live_runtime_error();error) {
         diagnostic.reason=hlclient::goldsrc::to_string(error->code);
-        if(error->runtime_decoder_error)diagnostic.protocol_code=hlclient::goldsrc::to_string(*error->runtime_decoder_error);
-        else if(error->control_code)diagnostic.protocol_code=hlclient::goldsrc::to_string(*error->control_code);
-        else if(error->response_code)diagnostic.protocol_code=hlclient::goldsrc::to_string(*error->response_code);
-        else if(error->driver_code)diagnostic.protocol_code=hlclient::goldsrc::to_string(*error->driver_code);
-        if(error->response_code) {
+        // A facade's generic response failure must not erase a more precise
+        // parser failure already observed through the always-on trace.
+        const bool initial_service_failure=diagnostic.failure_phase=="initial_signon";
+        if(!initial_service_failure) {
+          if(error->runtime_decoder_error)diagnostic.protocol_code=hlclient::goldsrc::to_string(*error->runtime_decoder_error);
+          else if(error->control_code)diagnostic.protocol_code=hlclient::goldsrc::to_string(*error->control_code);
+          else if(error->response_code)diagnostic.protocol_code=hlclient::goldsrc::to_string(*error->response_code);
+          else if(error->driver_code)diagnostic.protocol_code=hlclient::goldsrc::to_string(*error->driver_code);
+        }
+        if(error->response_code && !initial_service_failure) {
           diagnostic.failure_phase="resource_response";
           using ResponseCode=hlclient::goldsrc::ResourceClientResponseStageErrorCode;
           switch(*error->response_code) {
@@ -5924,9 +6402,14 @@ int run_live_visual_control(
           default:diagnostic.failure_category="protocol";break;
           }
         }
-        diagnostic.wire_opcode=error->wire_opcode;
-        diagnostic.source_sequence=error->runtime_source_sequence;
-        diagnostic.record_ordinal=error->runtime_record_ordinal;
+        if(error->wire_opcode)diagnostic.wire_opcode=error->wire_opcode;
+        if(error->runtime_source_sequence)diagnostic.source_sequence=error->runtime_source_sequence;
+        if(error->runtime_record_ordinal)diagnostic.record_ordinal=error->runtime_record_ordinal;
+        if(error->runtime_failure && error->runtime_failure->control_error) {
+          const auto& control=*error->runtime_failure->control_error;
+          diagnostic.runtime_control_failure(hlclient::goldsrc::to_string(control.code),
+              control.cursor ? std::optional<std::size_t>{control.cursor->byte_offset()} : std::nullopt);
+        }
         // Startup/service failures may precede the runtime record decoder.
         // Retain only its decoder-established opcode and numeric source
         // identity, never a raw payload byte or arbitrary server text.
@@ -5950,12 +6433,23 @@ int run_live_visual_control(
           retained.response_acknowledged=payload->response_acknowledged;
         }
         if(const auto& transition=error->transition_failure_metadata;transition) {
-          if(!diagnostic.wire_opcode)diagnostic.wire_opcode=transition->actual_opcode;
-          if(!diagnostic.source_sequence)diagnostic.source_sequence=transition->source_sequence;
+          if(transition->parser_error || transition->intermediate_parser_error) {
+            diagnostic.resource_transition_failure(
+                transition->parser_error ? hlclient::goldsrc::to_string(*transition->parser_error) :
+                    hlclient::goldsrc::to_string(*transition->intermediate_parser_error),
+                transition->parser_error_byte_offset.value_or(transition->cursor_byte_offset),
+                transition->actual_opcode,transition->source_sequence);
+          } else {
+            if(!diagnostic.wire_opcode)diagnostic.wire_opcode=transition->actual_opcode;
+            if(!diagnostic.source_sequence)diagnostic.source_sequence=transition->source_sequence;
+          }
         }
       } else if(session.external_early_failure(diagnostic)) {
         // Typed startup failure survived independently of rolling/raw stdout.
-      } else if(const auto rejection=session.external_rejection_reason()) diagnostic.reason=*rejection;
+      } else if(const auto rejection=session.external_rejection_reason()) {
+        diagnostic.reason=*rejection;
+        if(const auto text=session.server_rejection_text())receipt_authentication_rejected(*text);
+      }
       else if(const auto auth=session.authentication_error_code()) diagnostic.reason=hlclient::app::live_authentication_failure_reason(*auth);
       else diagnostic.reason=session.handshake_state();
       external_status("error",diagnostic.reason);
@@ -6066,6 +6560,7 @@ int run_live_visual_control(
     if (keyboard && !intent.focused())
       game_client->cancel_uncommitted();
     if(local_assets) {
+      receipts.multiplayer().set_world_query(local_assets.get());
       local_assets->placement_observation(scene_source.world_state().runtime_observation());
       game_client->prepare_presentation(*local_assets,presentation_seconds);
     }
@@ -6119,16 +6614,32 @@ int run_live_visual_control(
       std::vector<std::string> effect_sprite_dependencies;
       for(const auto name:game_client->effect_sprite_preparation())
         effect_sprite_dependencies.emplace_back(name);
+      const auto impact_profile=game_client->local_impact_assets();
+      const auto crowbar_profile=game_client->local_crowbar_impact_assets();
+      const auto decal_requests=game_client->surface_decal_preparation();
+      std::vector<hlclient::game_api::DecalAssetRequest> decals{decal_requests.begin(),decal_requests.end()};
+      if(console)console->set_work(loading_work);
       asset_future.emplace(std::async(
           std::launch::async,
           [resources = std::move(resources),
            server_info = std::move(server_info), basedir, game,effect_palette_dependency,
-           effect_sprite_dependencies=std::move(effect_sprite_dependencies),sky_name]() {
-            return hlclient::app::RuntimeReplayLocalAssets::create(
+           effect_sprite_dependencies=std::move(effect_sprite_dependencies),sky_name,
+           impact_profile,crowbar_profile,decals=std::move(decals),loading_work]() {
+            auto created=hlclient::app::RuntimeReplayLocalAssets::create(
                 resources, server_info, basedir, game,
                 hlclient::app::ReplayLocalCameraPolicy::
                     external_live_receiving_client,effect_palette_dependency,
-                    effect_sprite_dependencies,sky_name);
+                    effect_sprite_dependencies,sky_name,loading_work,
+                    hlclient::app::ReplayLocalResourcePolicy::live_standard_hl);
+            if(created.projection && loading_work->progress(hlclient::app::LoadingStage::textures)) {
+              if(impact_profile)(void)created.projection->prepare_impact_decal(*impact_profile);
+              if(!loading_work->cancelled.load() && crowbar_profile)
+                (void)created.projection->prepare_impact_decal(crowbar_profile->decal,1U);
+              if(!loading_work->cancelled.load())
+                (void)created.projection->prepare_surface_decals(decals);
+              (void)loading_work->progress(hlclient::app::LoadingStage::scene);
+            }
+            return created;
           }));
       asset_job_started = true;
       asset_preparation_started_at = Clock::now();
@@ -6138,9 +6649,14 @@ int run_live_visual_control(
             std::future_status::ready) {
       auto created = asset_future->get();
       if (!created.projection) {
+        std::string_view failure_reason="missing_or_invalid_map_resources";
+        if(created.error && created.error->context.starts_with("map_crc_mismatch:"))
+          failure_reason="map_crc_mismatch";
+        else if(created.error && created.error->context.starts_with("map_crc_invalid_bsp:"))
+          failure_reason="map_crc_invalid_bsp";
         if(options.external_server_client) {
           auto& diagnostic=receipts.external_diagnostics();
-          diagnostic.reason="missing_or_invalid_map_resources";
+          diagnostic.reason=failure_reason;
           for(const auto& issue:created.resource_issues)
             diagnostic.resource(issue.virtual_name,issue.reason,issue.resource_index,issue.resource_type);
           diagnostic.omitted+=created.resource_issues_omitted;
@@ -6152,14 +6668,23 @@ int run_live_visual_control(
               if(hlclient::app::external_diagnostic_token(candidate))status=candidate;
             }
           }
-          if(created.resource_issues.empty())diagnostic.resource(diagnostic.map,status,0,0);
+          if(failure_reason!="missing_or_invalid_map_resources")
+            diagnostic.resource(diagnostic.map,failure_reason,0,2);
+          else if(created.resource_issues.empty())diagnostic.resource(diagnostic.map,status,0,0);
         }
-        external_status("error","missing_or_invalid_map_resources");
+        external_status("error",failure_reason);
         throw std::runtime_error{
             created.error ? created.error->context
                           : "Live local asset preparation returned no projection"};
       }
       local_assets = std::move(created.projection);
+      model_preparation_cache.invalidate();
+      std::cout << "[local-resource-validation] policy=live_standard_hl"
+          << " size_matches=" << local_assets->summary().size_matches
+          << " size_unavailable=" << local_assets->summary().size_unavailable
+          << " size_mismatches=" << local_assets->summary().size_mismatches
+          << " world_crc_verified=" << local_assets->summary().world_crc_verified
+          << '\n' << std::flush;
       std::cout<<"[skybox] status="<<hlclient::goldsrc::to_string(local_assets->skybox_status())
           <<" ready="<<static_cast<bool>(local_assets->skybox())<<'\n';
       const auto& muzzle_resources=local_assets->muzzle_sprite_statistics();
@@ -6179,18 +6704,13 @@ int run_live_visual_control(
           <<" missing_texture_placeholders="<<local_assets->summary().missing_texture_placeholder_bindings<<'\n'<<std::flush;
       }
       hud_assets=std::make_unique<hlclient::goldsrc::ApprovedHudAssets>(
-          local_assets->sound_resources(),game_client->hud_resource_preparation());
+          local_assets->sound_resources(),game_client->hud_resource_preparation(),game_client->text_message_preparation());
       if (local_assets->summary().missing_texture_placeholder_bindings != 0U) {
         hlclient::core::log(LogLevel::warning,
             "[texture] missing_texture_placeholder bindings=" +
             std::to_string(local_assets->summary().missing_texture_placeholder_bindings) +
             "; project-generated checkerboard; source textures remain incomplete");
       }
-      if (const auto profile=game_client->local_impact_assets())
-        (void)local_assets->prepare_impact_decal(*profile);
-      if (const auto profile=game_client->local_crowbar_impact_assets())
-        (void)local_assets->prepare_impact_decal(profile->decal,1U);
-      (void)local_assets->prepare_surface_decals(game_client->surface_decal_preparation());
       if (keyboard) {
         sound_assets=std::make_unique<hlclient::goldsrc::ApprovedSoundAssets>(local_assets->sound_resources());
         for(const auto& reference:game_client->movement_sound_preparation())
@@ -6222,6 +6742,8 @@ int run_live_visual_control(
     if(prepared_hud_assets && hud_binding_reset_serial!=game_client->reset_serial()) {
       if(!game_client->bind_hud_resources(prepared_hud_assets->resources))
         throw std::runtime_error{"Approved HUD metadata violated its bounded contract"};
+      if(!game_client->bind_text_messages(prepared_hud_assets->text_messages))
+        throw std::runtime_error{"Approved text message metadata violated its bounded contract"};
       hud_binding_reset_serial=game_client->reset_serial();
       if(options.net_trace)std::cout<<"[hud] preparation=complete descriptors="
           <<prepared_hud_assets->resources.descriptors.size()<<" ready="<<prepared_hud_assets->ready_entries
@@ -6264,13 +6786,14 @@ int run_live_visual_control(
             observation->entity_metadata.source &&
             (!last_entity_source ||
              *last_entity_source != *observation->entity_metadata.source)) {
-          const auto projected = local_assets->project_entities(
-              *observation, scene_source.mutable_world_state());
+          // Retain every authoritative lifetime/history boundary here. The
+          // camera-selected presentation below builds the only render frame.
+          const auto projected = local_assets->observe_entities(*observation);
           if (!projected) {
             ++visual_failures;
             throw std::runtime_error{
                 projected.error ? projected.error->context
-                                : "Live entity projection failed"};
+                                : "Live entity observation failed"};
           }
           last_entity_source = *observation->entity_metadata.source;
         } else {
@@ -6285,6 +6808,74 @@ int run_live_visual_control(
           ? session.live_reference_prediction_snapshot(now)
           : hlclient::goldsrc::LiveReferencePredictionSnapshot{};
       if(movement_diagnostics_enabled) {
+        using Owner=hlclient::app::MovementCaptureOwnerState;
+        // Only a real producer snapshot with an established receipt generation
+        // can establish delivery coverage; a synthetic prediction-Off default
+        // must remain not_observed instead of implying complete delivery.
+        if(options.reference_prediction)
+          if(const auto identity=receipts.snapshot();identity && identity->generation.network_generation && identity->generation.map_generation)
+            receipts.movement().observe_correction_delivery(identity->generation.network_generation,identity->generation.map_generation,
+                prediction.correction_events_published,prediction.correction_sink_failures);
+        switch(prediction.state) {
+        case hlclient::goldsrc::LiveReferencePredictionState::off:movement_context.prediction_owner_state=Owner::unknown;break;
+        case hlclient::goldsrc::LiveReferencePredictionState::waiting_for_seed:movement_context.prediction_owner_state=Owner::waiting;break;
+        case hlclient::goldsrc::LiveReferencePredictionState::active:movement_context.prediction_owner_state=Owner::active;break;
+        case hlclient::goldsrc::LiveReferencePredictionState::suspended:movement_context.prediction_owner_state=Owner::suspended;break;
+        case hlclient::goldsrc::LiveReferencePredictionState::failed:movement_context.prediction_owner_state=Owner::failed;break;
+        }
+        if(prediction.velocity_stop) {
+          const auto& captured=*prediction.velocity_stop;
+          const auto& stop=captured.transition;
+          auto& value=movement_velocity_stop.emplace();
+          const auto numeric=[](const auto& v){return std::array<float,3>{v.x,v.y,v.z};};
+          const auto plane=[&](const auto& p){return hlclient::app::MovementStopPlane{
+              numeric(p.normal),p.distance,p.source_plane_index};};
+          value.capture_ordinal=captured.capture_ordinal;
+          value.network_generation=captured.network_generation;value.map_generation=captured.map_generation;
+          value.life_epoch=captured.life_epoch;value.life_deaths=captured.life_deaths;
+          value.observed_us=receipts.movement_stamp_ns(captured.observed_ns);
+          if(captured.command_sample_ns && *captured.command_sample_ns>=0)
+            value.command_sample_us=receipts.movement_stamp_ns(static_cast<std::uint64_t>(*captured.command_sample_ns));
+          value.prediction_epoch=captured.prediction_epoch;
+          value.source_record_identity=captured.source_record_identity;value.source_sequence=captured.source_sequence;
+          value.source_server_time_s=captured.source_server_time;value.source_freshness=captured.source_freshness;
+          value.scene_record_identity=captured.scene_record_identity;value.scene_revision=captured.scene_revision;
+          value.scene_server_time_s=captured.scene_server_time;value.source_matches_scene=captured.source_matches_scene;
+          value.history_anchor_command=captured.history_anchor_command;value.history_latest_command=captured.history_latest_command;
+          value.predecessor_decision=captured.predecessor_decision;value.replay=captured.replay;
+          value.command_sequence=stop.command_sequence;value.command_msec=stop.command_msec;
+          if(captured.command) {
+            value.command_known=true;value.command_buttons=captured.command->buttons;
+            value.command_angle_turns=captured.command->angle_turns;
+            value.command_movement={captured.command->forward,captured.command->side,captured.command->up};
+          }
+          if(stop.collision_identity) {
+            value.query_world_revision=stop.collision_identity->collision_world_revision;
+            value.query_scene_signature=stop.collision_identity->scene_signature;
+          }
+          value.simulation_start_ns=stop.simulation_start_ns;value.simulation_end_ns=stop.simulation_end_ns;
+          value.phase=static_cast<std::uint8_t>(stop.phase);value.reason=static_cast<std::uint8_t>(stop.reason);
+          value.candidate=static_cast<std::uint8_t>(stop.candidate);value.hull=static_cast<std::uint8_t>(stop.hull);
+          value.before_origin=numeric(stop.before_origin);value.after_origin=numeric(stop.after_origin);
+          value.before_velocity=numeric(stop.before_velocity);value.after_velocity=numeric(stop.after_velocity);
+          value.query_start=numeric(stop.query_start);value.query_end=numeric(stop.query_end);
+          value.trace_end=numeric(stop.trace.end_position);value.trace_fraction=stop.trace.fraction;
+          value.startsolid=stop.trace.start_solid;value.allsolid=stop.trace.all_solid;
+          value.in_open=stop.trace.in_open;value.in_liquid=stop.trace.in_liquid;
+          value.collision_profile=static_cast<std::uint8_t>(stop.trace.collision_profile);
+          value.start_contents=stop.trace.start_contents.source_goldsrc_code;
+          value.end_contents=stop.trace.end_contents.source_goldsrc_code;
+          if(stop.trace.blocking_contents)value.blocking_contents=stop.trace.blocking_contents->source_goldsrc_code;
+          if(stop.trace.hit) {
+            value.hit_kind=static_cast<std::uint8_t>(stop.trace.hit->kind);
+            value.hit_entity=stop.trace.hit->source_entity_index;value.hit_model=stop.trace.hit->source_model_index;
+            value.hit_instance=stop.trace.hit->stable_instance_ordinal;
+          }
+          if(stop.trace.collision_plane)value.hit_plane=plane(*stop.trace.collision_plane);
+          value.clip_plane_count=stop.clip_plane_count;
+          for(std::size_t i=0;i<std::min(value.clip_planes.size(),static_cast<std::size_t>(stop.clip_plane_count));++i)
+            value.clip_planes[i]=plane(stop.clip_planes[i]);
+        }
         const auto vector=[](const hlclient::assets::AssetVector3& v) {
           return hlclient::app::MovementDiagnosticVector3{v.x,v.y,v.z};
         };
@@ -6309,6 +6900,15 @@ int run_live_visual_control(
         movement_frame.set_presentation_reason(prediction.presentation_reason);
         movement_frame.set_collision_query_purpose(prediction.collision_query_purpose);
         movement_frame.anchor_command=prediction.anchor_command;
+        movement_frame.candidate_anchor_command=prediction.candidate_anchor_command;
+        movement_frame.set_recovery_wait_reason(prediction.recovery_wait_reason);
+        if(prediction.life_wait_started_ns && *prediction.life_wait_started_ns>=0) {
+          movement_frame.life_wait_started_us=receipts.movement_stamp_ns(
+              static_cast<std::uint64_t>(*prediction.life_wait_started_ns));
+          // The owner freezes this duration on the first successful seed.
+          // Do not recompute it from frame time or include the dead interval.
+          movement_frame.life_wait_duration_ms=prediction.life_wait_duration_ms;
+        }
         if(prediction.last_anchor_status)movement_frame.anchor_status=static_cast<std::uint8_t>(*prediction.last_anchor_status);
         movement_frame.authoritative_source_record_identity=prediction.canonical_source_record_identity;
         movement_frame.authoritative_source_sequence=prediction.canonical_source_sequence;
@@ -6598,7 +7198,7 @@ int run_live_visual_control(
       receipts.generation(1U,static_cast<std::uint64_t>(session.live_server_info()->server_count())+1U,
           session.live_server_info()->map_file_path());
       receipts.receiving_entity(static_cast<std::uint8_t>(session.live_server_info()->client_slot()+1U));
-      const auto commands=session.live_usercmd_snapshot();
+      const auto commands=session.live_usercmd_receipt_counters();
       hlclient::app::SessionReceiptCounters counters;
       if(commands) {
         counters.new_usercmd_count=commands->new_command_submission_count;
@@ -6669,11 +7269,17 @@ int run_live_visual_control(
         }
       }
     }
+    const auto entity_prediction_snapshot=session.live_reference_prediction_snapshot(now);
+    const auto& entity_brush_presentation=entity_prediction_snapshot.presented_brush_scene;
     if (local_assets && assets_installed && session.live_server_info()) {
       const auto movement_studio_started=movement_diagnostics_enabled ? Clock::now() : Clock::time_point{};
+      if(movement_diagnostics_enabled) {
+        const auto diagnostic_identity=receipts.snapshot();
+        local_assets->set_diagnostic_sink(receipts.diagnostic_sink(),diagnostic_identity?diagnostic_identity->generation.map_generation:0U);
+      }
       const auto presented=local_assets->present_entities(*game_client,presentation_seconds,
           static_cast<std::uint32_t>(session.live_server_info()->client_slot())+1U,
-          scene_source.mutable_world_state(),extent,movement_diagnostics_enabled);
+          scene_source.mutable_world_state(),extent,movement_diagnostics_enabled,entity_brush_presentation);
       if (!presented) throw std::runtime_error{presented.error ? presented.error->context :
           "Remote player presentation failed"};
       if(movement_diagnostics_enabled)movement_frame.studio_ms=movement_elapsed_ms(movement_studio_started,Clock::now());
@@ -6693,7 +7299,7 @@ int run_live_visual_control(
           }
         }
       }
-      receipts.observe_appearance(local_assets->summary());
+      receipts.observe_appearance(local_assets->summary(),successful_presentations+1U);
       if(options.net_trace && remote_visual_trace_budget) {
         const auto& summary=local_assets->summary();
         for(std::size_t i=0;i<summary.remote_player_count && remote_visual_trace_budget;++i) {
@@ -6795,6 +7401,9 @@ int run_live_visual_control(
         std::array<hlclient::game_api::ScriptedEventBinding,1024> event_bindings{};
         std::size_t event_binding_count{};
         for(const auto& resource:session.live_resource_list()->entries()) {
+          // Non-bindable decal metadata must not alias the game effect palette.
+          if(!hlclient::goldsrc::resource_has_bindable_index(
+              resource.type(),resource.index().value())) continue;
           if(resource.type()==hlclient::goldsrc::ResourceType::model ||
               resource.type()==hlclient::goldsrc::ResourceType::sound ||
               resource.type()==hlclient::goldsrc::ResourceType::decal) {
@@ -7019,11 +7628,10 @@ int run_live_visual_control(
     }
     if (options.reference_prediction && render_scene.static_world &&
         render_scene.static_world->runtime_brushes) {
-      const auto prediction = session.live_reference_prediction_snapshot(now);
-      if (prediction.presented_brush_scene) {
+      if (entity_brush_presentation) {
         const auto sampled = hlclient::app::present_runtime_brushes(
-            *render_scene.static_world->runtime_brushes, *prediction.presented_brush_scene,
-            prediction.generation);
+            *render_scene.static_world->runtime_brushes, *entity_brush_presentation,
+            entity_prediction_snapshot.generation);
         if (sampled) render_scene.static_world->runtime_brushes = sampled;
       }
     }
@@ -7154,12 +7762,34 @@ int run_live_visual_control(
             }
           } else {++visual_resource_missing; ++light_attachment_missing;}
         }
-        game_client->set_hud_context({static_cast<std::uint32_t>(extent.width),
+        hlclient::game_api::HudPresentationContext hud_context{static_cast<std::uint32_t>(extent.width),
             static_cast<std::uint32_t>(extent.height), keyboard && intent.focused() &&
             hlclient::gameplay_input::gameplay_button_is_set(intent.held_buttons(),
                 hlclient::gameplay_input::GameplayButton::scoreboard),
             options.hud_draw,options.crosshair,options.hud_fastswitch,options.hud_diagnostics,
-            options.hud_scale.automatic,options.hud_scale.scale});
+            options.hud_scale.automatic,options.hud_scale.scale};
+        if(hud_observation->receiving_client &&
+            hud_observation->receiving_client->origin.complete() && visual_forward_length>.0001F) {
+          const auto& origin=hud_observation->receiving_client->origin;
+          hlclient::game_api::HudViewContext view;
+          view.player_origin={*origin.x,*origin.y,*origin.z};
+          if(last_prediction_frame_active && last_prediction_presented_origin) {
+            const auto& presented=*last_prediction_presented_origin;
+            view.player_origin={presented.x,presented.y,presented.z};
+          }
+          view.forward={visual_context.forward.x,visual_context.forward.y,visual_context.forward.z};
+          // Camera up includes its visual roll; cross(forward,up) is GoldSrc
+          // right (+X forward, -Y right at zero yaw), including pitched views.
+          const auto f=visual_context.forward, up=render_scene.camera.up;
+          const hlclient::assets::AssetVector3 right{
+              f.y*up.z-f.z*up.y,f.z*up.x-f.x*up.z,f.x*up.y-f.y*up.x};
+          const double right_length=std::sqrt(right.x*right.x+right.y*right.y+right.z*right.z);
+          if(right_length>.0001) {
+            view.right={right.x/right_length,right.y/right_length,right.z/right_length};
+            hud_context.view=view;
+          }
+        }
+        game_client->set_hud_context(hud_context);
         const auto hud = game_client->hud(*hud_observation, presentation_seconds);
         receipts.observe_hud(hud);
         inventory_notifications = hud.inventory_notifications_received;
@@ -7364,19 +7994,45 @@ int run_live_visual_control(
     world_impacts.append_impact_glows(render_scene);
     if(local_assets)local_assets->append_beam_lights(render_scene);
     render_scene.screen_effects=game_client->screen_effects(visual_now_seconds);
+    const bool scene_ready_for_presentation=assets_installed && session.live_visual_input_ready() &&
+        last_view_status==hlclient::app::LiveVisualViewStatus::ready;
+    if(console)console->compose(render_scene,scene_ready_for_presentation);
     const auto movement_render_started=movement_diagnostics_enabled ? Clock::now() : Clock::time_point{};
+    if(movement_diagnostics_enabled)movement_frame.render_submit_us=receipts.movement_stamp(movement_render_started);
     if(movement_diagnostics_enabled) {
+      hlclient::core::MultiplayerPresentationPayload submitted;
+      submitted.phase=hlclient::core::MultiplayerPresentationPhase::submit;
+      submitted.sample_seconds=presentation_seconds;
+      submitted.origin=std::array{render_scene.camera.position.x,render_scene.camera.position.y,render_scene.camera.position.z};
+      receipts.diagnostic(submitted,hlclient::core::MultiplayerDiagnosticProducer::renderer,movement_frame.frame_number);
       movement_frame.cpu_update_ms=movement_elapsed_ms(movement_frame_started,movement_render_started);
       movement_frame.presentation_use_us=receipts.movement_stamp(movement_render_started);
       movement_frame.presented_eye=hlclient::app::MovementDiagnosticVector3{
           render_scene.camera.position.x,render_scene.camera.position.y,render_scene.camera.position.z};
       renderer.render_with_gpu_timing(render_scene,extent,movement_frame.frame_number);
+      if(renderer.gpu_timing_statistics().last_submission_status==
+          hlclient::renderer::opengl::OpenGlGpuTimingStatus::pending) {
+        // Mirror only the existing eight pending queries' numeric ownership.
+        // A result never borrows whichever map/frame happens to be current at poll.
+        if(renderer.gpu_timing_statistics().pending==1U)diagnostic_gpu_owners={};
+        if(const auto at=std::ranges::find(diagnostic_gpu_owners,0U,&DiagnosticGpuOwner::frame);
+            at!=diagnostic_gpu_owners.end()) {
+          const auto identity=receipts.snapshot();
+          *at={movement_frame.frame_number,identity?identity->generation.network_generation:0U,
+              identity?identity->generation.map_generation:0U};
+        }
+      }
+      movement_frame.gpu_passes.status=movement_gpu_status(
+          renderer.gpu_timing_statistics().last_submission_status);
       movement_frame.render_ms=movement_elapsed_ms(movement_render_started,Clock::now());
     } else renderer.render(render_scene, extent);
     const auto movement_render_report_started=movement_diagnostics_enabled ? Clock::now() : Clock::time_point{};
-    if(options.external_server_client)receipts.external_render(options,window.video_state(),renderer);
-    if(movement_diagnostics_enabled)movement_frame.report_ms=movement_frame.report_ms.value_or(0.0)+
-        movement_elapsed_ms(movement_render_report_started,Clock::now());
+    if(options.external_server_client)receipts.external_render(options,window,renderer,successful_presentations+1U);
+    if(movement_diagnostics_enabled) {
+      const auto report_ms=movement_elapsed_ms(movement_render_report_started,Clock::now());
+      movement_frame.report_ms=movement_frame.report_ms.value_or(0.0)+report_ms;
+      receipts.observe_reporting_scope(true,report_ms,successful_presentations+1U);
+    }
     if(submitted_blood_batch)++blood_draw_batches;
     if(submitted_large_yellow_batch)++large_yellow_blood_draw_batches;
     if (const auto& live = scene_source.world_state().runtime_observation();
@@ -7464,6 +8120,7 @@ int run_live_visual_control(
         render_completed_at - *last_framebuffer_observed_at >=
             framebuffer_observation_interval;
     if (!options.external_server_client &&
+        (!console || (scene_ready_for_presentation && !console->console_active())) &&
         (!keyboard && !weapon_check && !fire_reload_check && !damage_respawn_check ||
          !input_activated_at) && assets_installed &&
         camera_controller.camera_revision() != 0U &&
@@ -7510,13 +8167,27 @@ int run_live_visual_control(
                 << std::flush;
     }
     const auto swap_started_at = Clock::now();
+    if(movement_diagnostics_enabled) {
+      hlclient::core::MultiplayerPresentationPayload p;p.phase=hlclient::core::MultiplayerPresentationPhase::swap_begin;
+      receipts.diagnostic(p,hlclient::core::MultiplayerDiagnosticProducer::renderer,movement_frame.frame_number);
+    }
     window.swap_buffers();
     const auto swap_completed_at = Clock::now();
     ++successful_presentations;
     if(movement_diagnostics_enabled) {
-      movement_frame.monotonic_us=receipts.movement_stamp(swap_completed_at);
       if(movement_previous_frame)movement_frame.frame_interval_ms=movement_elapsed_ms(*movement_previous_frame,swap_completed_at);
       movement_previous_frame=swap_completed_at;
+      const auto completed_identity=receipts.snapshot();
+      receipts.multiplayer().completed_frame(render_scene,movement_frame.frame_number,
+          completed_identity?completed_identity->generation.network_generation:0U,completed_identity?completed_identity->generation.map_generation:0U,
+          static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(swap_completed_at.time_since_epoch()).count()),extent.width,extent.height);
+      hlclient::core::MultiplayerPresentationPayload p;p.phase=hlclient::core::MultiplayerPresentationPhase::swap_end;
+      p.origin=std::array{render_scene.camera.position.x,render_scene.camera.position.y,render_scene.camera.position.z};
+      p.present_ms=movement_elapsed_ms(swap_started_at,swap_completed_at);p.cpu_ms=movement_frame.cpu_update_ms;
+      p.frame_ms=movement_frame.frame_interval_ms;
+      p.viewport_width=extent.width;p.viewport_height=extent.height;p.framebuffer_width=extent.width;p.framebuffer_height=extent.height;
+      receipts.diagnostic(p,hlclient::core::MultiplayerDiagnosticProducer::renderer,movement_frame.frame_number);
+      movement_frame.monotonic_us=receipts.movement_stamp(swap_completed_at);
       if(const auto identity=receipts.snapshot();identity) {
         movement_frame.network_generation=identity->generation.network_generation;
         movement_frame.map_generation=identity->generation.map_generation;
@@ -7532,7 +8203,6 @@ int run_live_visual_control(
         }
       }
       movement_frame.present_ms=movement_elapsed_ms(swap_started_at,swap_completed_at);
-      hlclient::app::MovementFrameContext movement_context;
       movement_context.focused=snapshot.focused();
       movement_context.captured=window.capture_state()==hlclient::input::InputCaptureState::captured;
       movement_context.control_active=control_activated;
@@ -7542,16 +8212,36 @@ int run_live_visual_control(
         if(life.state==hlclient::client::LocalPlayerLifeState::alive)movement_context.alive=true;
         else if(life.dead())movement_context.alive=false;
       }
-      if(receipts.movement().observe(movement_frame,movement_context) && local_assets && assets_installed) {
-        if(const auto remote=local_assets->remote_movement_observations();remote)
-          (void)receipts.movement().observe_remote(movement_frame,*remote);
+      if(receipts.movement().observe(movement_frame,movement_context)) {
+        if(movement_velocity_stop)(void)receipts.movement().observe_velocity_stop(movement_frame,*movement_velocity_stop);
+        if(local_assets && assets_installed)
+          if(const auto remote=local_assets->remote_movement_observations();remote)
+            (void)receipts.movement().observe_remote(movement_frame,*remote);
       }
       if(movement_manual_marker)(void)receipts.movement().mark(hlclient::app::MovementIncidentTrigger::manual,
           receipts.movement_stamp(swap_completed_at));
       // Poll a bounded eight-query pool. Pending results stay absent, not zero.
       for(std::size_t movement_query=0;movement_query<8U;++movement_query) {
         const auto timing=renderer.poll_gpu_timing();if(!timing)break;
-        (void)receipts.movement().observe_gpu(timing->frame_number,timing->elapsed_ms);
+        if(const auto owner=std::ranges::find(diagnostic_gpu_owners,timing->frame_number,&DiagnosticGpuOwner::frame);
+            owner!=diagnostic_gpu_owners.end()) {
+          hlclient::core::MultiplayerPresentationPayload gpu_event;
+          gpu_event.phase=hlclient::core::MultiplayerPresentationPhase::gpu_result;
+          // unsupported here means optional per-pass timestamps unavailable;
+          // poll_gpu_timing still returned a completed total-time query.
+          if((timing->status==hlclient::renderer::opengl::OpenGlGpuTimingStatus::ready ||
+              timing->status==hlclient::renderer::opengl::OpenGlGpuTimingStatus::unsupported) &&
+              std::isfinite(timing->elapsed_ms) && timing->elapsed_ms>=0.0)
+            gpu_event.gpu_ms=timing->elapsed_ms;
+          receipts.diagnostic(gpu_event,hlclient::core::MultiplayerDiagnosticProducer::renderer,
+              owner->frame,{},std::pair{owner->network,owner->map});
+          *owner={};
+        }
+        if(std::isfinite(timing->elapsed_ms))
+          (void)receipts.movement().observe_gpu(timing->frame_number,timing->elapsed_ms);
+        (void)receipts.movement().observe_gpu_passes(timing->frame_number,
+            {timing->pass_elapsed_ms,timing->valid_pass_mask,
+             movement_gpu_status(timing->status)});
       }
     }
     if (control_activated) {
@@ -7604,6 +8294,7 @@ int run_live_visual_control(
             "Live visual production handoff rejected its selected input"};
       }
       control_activated = true;
+      if(console)console->in_game();
       input_activated_at = activation_now;
       activation_canonical_revision =
           scene_source.world_state().runtime_publication_revision();
@@ -7621,12 +8312,31 @@ int run_live_visual_control(
             frame_completed_at - now));
     previous_time = frame_completed_at;
 
+    if(console)console->pace();
+    if(movement_diagnostics_enabled){
+      movement_previous_limiter_wait_us=console?console->pacing_statistics().last_wait_us:0U;
+      movement_previous_yield_wait_us=0U;
+    }
     if (session.terminal())
       running = false;
-    else
+    else {
+      const auto yield_started=movement_diagnostics_enabled?Clock::now():Clock::time_point{};
       std::this_thread::yield();
+      if(movement_diagnostics_enabled)movement_previous_yield_wait_us=static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-yield_started).count());
+    }
+    if(movement_diagnostics_enabled)movement_previous_waits_known=true;
   }
 
+  loading_work->cancelled.store(true);
+  if(console)console->begin_disconnect();
+  if(asset_future && asset_future->valid()) {
+    while(asset_future->wait_for(std::chrono::milliseconds{0})!=std::future_status::ready) {
+      if(console)console->pump_idle();
+      else std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    (void)asset_future->get(); // Cancelled generation is never installed.
+  }
   const auto released = window.request_relative_mouse_capture(false);
   if (!released)
     throw std::runtime_error{"Final live visual mouse release failed"};
@@ -7640,16 +8350,17 @@ int run_live_visual_control(
   const auto close_intent_stamp=receipts.stamp();
   external_status("disconnecting");
   game_client->cancel_uncommitted();
-  if (window_closed || timed_session_complete)
+  if (window_closed || timed_session_complete || console_disconnected)
     hlclient::app::finish_intentional_session_close(session,[]{return Clock::now();},
-        []{std::this_thread::sleep_for(std::chrono::milliseconds{20});});
+        [console]{if(console)console->pump_idle();std::this_thread::sleep_for(std::chrono::milliseconds{20});});
   else if (!session.terminal()) session.cancel(Clock::now());
   const auto close_summary=session.graceful_close_snapshot();
   const auto socket_close_error=session.close_transport();
   const auto socket_closed_stamp=socket_close_error ?
       std::optional<hlclient::app::SessionReceiptStamp>{} : std::optional{receipts.stamp()};
   // Report I/O must never interrupt the bounded network goodbye/native close.
-  receipts.external_video(options,window.video_state(),true);
+  const auto final_pacing=console?std::optional{console->pacing_statistics()}:std::optional<hlclient::app::ConsolePacingStatistics>{};
+  receipts.external_video(options,window.video_state(),true,{},final_pacing?&*final_pacing:nullptr);
 
   // Expensive same-scene readbacks run only after the scripted command source
   // has stopped. The live 20 ms scheduler never sees verification GPU stalls.
@@ -7774,9 +8485,9 @@ int run_live_visual_control(
            : camera_translation);
   const bool success = test_health_gate.ready() && visual_success && network_success &&
                        (options.reference_prediction
-                            ? keyboard ? (window_closed || timed_session_complete)
+                            ? keyboard ? (window_closed || timed_session_complete || console_disconnected)
                                        : session.live_runtime_result().has_value()
-                            : keyboard ? (window_closed || timed_session_complete)
+                            : keyboard ? (window_closed || timed_session_complete || console_disconnected)
                                        : scripted_success);
   const auto final_prediction = before_close_prediction;
   const bool prediction_success = options.reference_prediction && success &&
@@ -7819,7 +8530,7 @@ int run_live_visual_control(
           ? "crouch_walk_prediction_context_blocked"
       : "jump_duck_prediction_implemented_live_pending";
   const bool handshake_failed = session.terminal() && !window_closed &&
-      !timed_session_complete && !session.live_runtime_result();
+      !timed_session_complete && !console_disconnected && !session.live_runtime_result();
   const auto primary_error = [&]() -> std::string_view {
     if (session.live_runtime_error())
       return hlclient::goldsrc::to_string(session.live_runtime_error()->code);
@@ -7851,6 +8562,17 @@ int run_live_visual_control(
       return hlclient::goldsrc::to_string(usercmd->speed_outcome);
     return "live_scripted_motion_incomplete";
   }();
+
+  if(console && (handshake_failed || session.live_runtime_error())) {
+    if(const auto reason=session.server_rejection_text())
+      hlclient::core::log_server_text("Connection rejected: "+std::string{*reason},LogLevel::error);
+    else if(const auto& failure=session.live_runtime_error();failure) {
+      if(failure->code!=hlclient::goldsrc::LiveRuntimeStageErrorCode::server_disconnected)
+        hlclient::core::log(LogLevel::error,"Client session failed: "+std::string{primary_error}+
+            ". "+failure->context);
+    } else hlclient::core::log(LogLevel::error,"Local connection failed: "+std::string{primary_error}+
+        ". See the session report for details.");
+  }
 
   const auto print_vector = [](const auto &value) {
     return std::to_string(value.x) + "," + std::to_string(value.y) + "," +
@@ -8464,7 +9186,7 @@ int run_live_visual_control(
   const auto close_reason=session.live_runtime_error() &&
       session.live_runtime_error()->code==hlclient::goldsrc::LiveRuntimeStageErrorCode::server_disconnected
       ? CloseReason::server_disconnect : session.live_runtime_error() || handshake_failed
-      ? CloseReason::fatal_failure : options.external_server_client &&
+      ? CloseReason::fatal_failure : console_disconnected ? CloseReason::console_disconnect : options.external_server_client &&
         (external_cancelled || window_closed) && !external_gameplay_committed ? CloseReason::startup_cancel
       : window_closed ? CloseReason::window_close
       : timed_session_complete ? CloseReason::duration_limit : CloseReason::startup_cancel;
@@ -8474,6 +9196,7 @@ int run_live_visual_control(
   receipts.finish(final_close);
   const bool close_failed=socket_close_error || receipts.failed() ||
       hlclient::app::session_close_failed(final_close);
+  if(integrity_failure && (socket_close_error || receipts.failed()))*integrity_failure=true;
   std::cout << "[session-close] reason=" << hlclient::app::to_string(close_reason)
       << " outcome=" << hlclient::goldsrc::to_string(close_summary.outcome)
       << " sent=" << close_summary.successful_send_count
@@ -9339,6 +10062,10 @@ int run_live_visual_control(
       external_status("completed","startup_cancel");
       return 0;
     }
+    if(healthy_close && close_reason==CloseReason::console_disconnect) {
+      external_status("completed","console_disconnect");
+      return 0;
+    }
     const auto& diagnostic_reason=receipts.external_diagnostics().reason;
     external_status("error",hlclient::app::external_terminal_failure_reason(
         diagnostic_reason!="none" ? std::string_view{diagnostic_reason} : primary_error,
@@ -9346,6 +10073,7 @@ int run_live_visual_control(
     return 2;
   }
   if(close_failed) return 2;
+  if(console_disconnected && !session.live_runtime_error())return 0;
   return presentation_check ? (live_presentation_verified ? 0 : 2)
       : fire_reload_check ? (live_fire_reload_verified ? 0 : 2)
       : (keyboard ? application_outcome.exit_code == 0
@@ -9522,10 +10250,14 @@ int run_evidence_pending_usercmd_stop(HandshakeSession &session) {
   return 2;
 }
 
-int run(const hlclient::core::CommandLineOptions &options) {
+int run(const hlclient::core::CommandLineOptions &options,
+        hlclient::app::ConsoleApplication* console = nullptr,
+        bool* integrity_failure = nullptr,
+        hlclient::app::ConsoleAttemptRetry* connection_retry = nullptr) {
+  if(connection_retry)*connection_retry=hlclient::app::ConsoleAttemptRetry::none;
   // Construct before session/provider owners; it outlives their teardown and
   // records milestones before rolling stdout can evict them.
-  ApplicationSessionReceipts receipts{options};
+  ApplicationSessionReceipts receipts{options,integrity_failure};
   const auto startup_failure=[&](std::string_view reason,std::string_view code="not_observed") {
     if(options.external_server_client) {
       receipts.external_diagnostics().reason=reason;
@@ -9533,6 +10265,23 @@ int run(const hlclient::core::CommandLineOptions &options) {
       external_status("error",reason);
     }
   };
+  const auto console_startup_cancelled=[&]() {
+    if(!console || (!console->session_stop_requested() && !external_cancel_requested(options)))return false;
+    hlclient::app::SessionCloseReceipt close;
+    close.reason=console->shutdown_requested() || external_cancel_requested(options)
+        ? hlclient::app::SessionCloseReason::startup_cancel : hlclient::app::SessionCloseReason::console_disconnect;
+    close.outcome=hlclient::app::SessionCloseOutcome::cancel_without_protocol_disconnect;
+    receipts.finish(close);
+    return true;
+  };
+  if(console) {
+    console->pump_idle();
+    if(console_startup_cancelled())return receipts.failed()?2:0;
+    if(!options.base_directory) {
+      hlclient::core::log(LogLevel::error,"Connection requires a configured local resource root. Select it in the launcher first.");
+      startup_failure("asset_root_not_configured");return 2;
+    }
+  }
   if(external_cancel_requested(options)) {
     hlclient::app::SessionCloseReceipt close;
     close.reason=hlclient::app::SessionCloseReason::startup_cancel;
@@ -9750,8 +10499,13 @@ int run(const hlclient::core::CommandLineOptions &options) {
     }
 
     scene_source.mutable_world_state().set_connection_requested(true);
-    if (hlclient::core::requires_local_resource_consistency_preparation(
-            options)) {
+    const bool prepare_custom_resource =
+        hlclient::core::requires_local_resource_consistency_preparation(options);
+    const bool prepare_file_consistency = options.base_directory &&
+        (options.stop_after == hlclient::core::ConnectionStopPoint::live_runtime_state ||
+         options.stop_after == hlclient::core::ConnectionStopPoint::live_usercmd_check ||
+         options.stop_after == hlclient::core::ConnectionStopPoint::live_visual_control);
+    if (prepare_custom_resource || prepare_file_consistency) {
       const auto base_directory = path_from_utf8(*options.base_directory);
       auto roots = hlclient::local_resources::LocalResourceSearchRoots::create(
           base_directory, options.game_directory);
@@ -9793,9 +10547,20 @@ int run(const hlclient::core::CommandLineOptions &options) {
           const hlclient::local_resources::LocalResourceEnvironment>{
           std::move(environment.environment)};
       const auto root_count = local_resource_environment->root_count();
-      auto provider = hlclient::resource_consistency::
-          PreparedLocalResourceConsistencyProvider::prepare(
-              *local_resource_environment);
+      hlclient::core::log(LogLevel::info,
+                          "[local-resource] roots validated: count=" +
+                              std::to_string(root_count));
+      if (prepare_custom_resource) {
+      auto provider = [&] {
+        if(!console)return hlclient::resource_consistency::PreparedLocalResourceConsistencyProvider::prepare(*local_resource_environment);
+        console->set_stage(hlclient::app::LoadingStage::resources);
+        auto preparation=std::async(std::launch::async,[environment=local_resource_environment] {
+          return hlclient::resource_consistency::PreparedLocalResourceConsistencyProvider::prepare(*environment);
+        });
+        while(preparation.wait_for(std::chrono::milliseconds{0})!=std::future_status::ready)console->pump_idle();
+        return preparation.get();
+      }();
+      if(console_startup_cancelled())return receipts.failed()?2:0;
       if (!provider) {
         const auto code = provider.error
                               ? hlclient::resource_consistency::to_string(
@@ -9810,9 +10575,6 @@ int run(const hlclient::core::CommandLineOptions &options) {
       }
 
       resource_consistency_provider = std::move(provider.provider);
-      hlclient::core::log(LogLevel::info,
-                          "[local-resource] roots validated: count=" +
-                              std::to_string(root_count));
       hlclient::core::log(
           LogLevel::info,
           "[local-resource] consistency material ready: byte-count=" +
@@ -9820,16 +10582,19 @@ int run(const hlclient::core::CommandLineOptions &options) {
               ", opaque-bytes=" +
               std::to_string(
                   resource_consistency_provider->opaque_byte_count()));
+      }
     }
 
     auto preparation = [&] {
-      try {return prepare_runtime_connect_request(options,*address);}
+      if(console) {console->set_stage(hlclient::app::LoadingStage::authenticating);console->pump_idle();}
+      try {return prepare_runtime_connect_request(options,*address,console);}
       catch(...) {
         startup_failure(options.authentication_provider==hlclient::core::AuthenticationProviderKind::steam ?
             "steam_authentication_prepare_failed":"authentication_prepare_failed");
         throw;
       }
     }();
+    if(console_startup_cancelled())return receipts.failed()?2:0;
     external_status("connecting");
     hlclient::goldsrc::HandshakeStopPoint stop_point =
         hlclient::goldsrc::HandshakeStopPoint::challenge;
@@ -9979,7 +10744,14 @@ int run(const hlclient::core::CommandLineOptions &options) {
                         scripted_side_check
             : hlclient::goldsrc::LiveVisualControlInputSource::scripted_check,
         options.reference_prediction,
-        options.net_trace, game_client, sound_events, options.external_server_client,options.movement_diagnostics);
+        options.net_trace, game_client, sound_events, options.external_server_client,options.movement_diagnostics,&receipts,
+        installation_file_checks_approved(options),
+        [&] {
+          hlclient::goldsrc::ConnectResponseWaitConfig response_config;
+          if(console)response_config.timeout=hlclient::app::console_connect_response_wait(
+              options,response_config.timeout);
+          return response_config;
+        }());
   }
 
   if (options.stop_after ==
@@ -10085,7 +10857,10 @@ int run(const hlclient::core::CommandLineOptions &options) {
   if (options.stop_after ==
           hlclient::core::ConnectionStopPoint::live_visual_control &&
       challenge_session) {
-    return run_live_visual_control(scene_source, *challenge_session, options, game_client, sound_events,receipts);
+    const auto result=run_live_visual_control(scene_source, *challenge_session, options, game_client, sound_events,receipts,console,integrity_failure);
+    if(connection_retry && result!=0 && challenge_session->connect_response_timed_out())
+      *connection_retry=hlclient::app::ConsoleAttemptRetry::connect_response_timeout;
+    return result;
   }
   if (options.renderer == hlclient::core::RendererBackend::null) {
     return run_null_renderer(scene_source, frame_limit,
@@ -10093,6 +10868,87 @@ int run(const hlclient::core::CommandLineOptions &options) {
   }
   return run_opengl_renderer(scene_source, frame_limit,
                              challenge_session.get());
+}
+
+int run_console_application(hlclient::core::CommandLineOptions options) {
+  const bool start_idle=options.open_client;
+  // Existing offline test hook isolates bounded idle verification from user
+  // configuration. Ordinary launches never require or use this test policy.
+  const bool offline_idle_smoke=start_idle && smoke_test_frame_limit().has_value();
+  if(start_idle && !options.external_server_client) {
+#ifdef _WIN32
+    // Standalone idle startup may reuse the user's launcher resource choices,
+    // but never invents a default resource root or silently starts connecting.
+    if(!offline_idle_smoke)if(const auto path=hlclient::platform::windows::default_external_settings_path())
+      if(const auto text=hlclient::platform::windows::read_external_text(*path,hlclient::core::kExternalLaunchMaximumBytes))
+        if(const auto config=hlclient::core::decode_external_launch_configuration(*text);config) {
+          const auto explicit_base=options.base_directory;
+          const auto explicit_runtime=options.steam_api_runtime;
+          options.external_server_client=true;
+          (void)hlclient::app::apply_external_launch_configuration(*config.configuration,options);
+          options.external_server_client=false;
+          if(explicit_base)options.base_directory=explicit_base;
+          if(explicit_runtime)options.steam_api_runtime=explicit_runtime;
+        }
+#endif
+    options.connect_endpoint.reset();
+    options.stop_after=hlclient::core::ConnectionStopPoint::live_visual_control;
+    options.live_input=hlclient::core::LiveInputMode::keyboard_mouse;
+    options.reference_prediction=true;options.live_session_unlimited=true;
+    options.authentication_provider=hlclient::core::AuthenticationProviderKind::steam;
+  }
+  hlclient::game_api::ConsoleVisualTheme theme;
+  hlclient::app::ConsoleGameRegistration registration;
+#if HLCLIENT_BUILD_GAME_HALFLIFE
+  auto theme_module=hlclient::games::halflife::make_half_life_client_module(options.mute_glock_fire_sound);
+  theme=theme_module->console_theme();
+  registration=&hlclient::games::halflife::register_console_commands;
+#endif
+  auto background=hlclient::app::make_console_theme_background(theme);
+  std::optional<std::future<hlclient::goldsrc::PreparedConsoleBackground>> background_future;
+  std::stop_source background_stop;
+  hlclient::app::ConsoleApplication console{std::move(options),
+      [&,theme](unsigned width,unsigned height,double fraction,bool full) {
+        if(background_future && background_future->valid() &&
+            background_future->wait_for(std::chrono::milliseconds{0})==std::future_status::ready) {
+          auto prepared=background_future->get();
+          if(prepared.image)background=std::move(prepared.image);
+          hlclient::core::log(LogLevel::info,std::string{"console_background="}+std::string{hlclient::goldsrc::to_string(prepared.status)});
+        }
+        return hlclient::app::build_console_theme(theme,width,height,fraction,full,background);
+      },std::move(registration),false,!smoke_test_frame_limit().has_value()};
+  // A visible fallback frame precedes filesystem work, authentication and map
+  // parsing. The approved original background replaces it asynchronously.
+  console.present_idle();
+  hlclient::core::log(LogLevel::info,std::string{"[console-application] first_idle_frame_presented=true start_idle="}+(start_idle?"true":"false"));
+  if(start_idle)external_status("idle","console_ready");
+  if(!offline_idle_smoke && console.options().base_directory && !theme.background_resource.empty()) {
+    const auto base=path_from_utf8(*console.options().base_directory);
+    const auto game=console.options().game_directory;
+    const std::string resource{theme.background_resource};
+    background_future.emplace(std::async(std::launch::async,[base,game,resource,token=background_stop.get_token()] {
+      return hlclient::goldsrc::prepare_console_background(base,game,resource,token);
+    }));
+  }
+  const auto result=hlclient::app::run_console_lifecycle(console,start_idle,
+      [](auto& current,auto& application) {
+        external_failure_reason.clear();external_last_reason.clear();external_last_stage.clear();
+        bool integrity_failure{};
+        auto connection_retry=hlclient::app::ConsoleAttemptRetry::none;
+        int code{};
+        try {code=run(current,&application,&integrity_failure,&connection_retry);}
+        catch(const std::exception& error) {
+          hlclient::core::log(LogLevel::error,error.what());
+          return hlclient::app::ConsoleAttemptOutcome{1,error.what(),integrity_failure};
+        }
+        return hlclient::app::ConsoleAttemptOutcome{code,external_failure_reason.empty()
+            ? code ? "Session ended before gameplay was ready; see console diagnostics." : "session_complete"
+            : external_failure_reason,integrity_failure,connection_retry};
+      },[&]{return external_cancel_requested(console.options());},smoke_test_frame_limit(),
+      [](const auto& outcome){external_status(outcome.code ? "recoverable_error" : "idle",
+          outcome.code ? "session_failed" : "console_ready");});
+  background_stop.request_stop();
+  return result;
 }
 
 int application_main(const int argument_count,
@@ -10155,7 +11011,14 @@ int application_main(const int argument_count,
       external_status("error","external_launcher_platform_unavailable");return 2;
 #endif
     }
-    const auto result=run(options);
+    const bool console_path=options.open_client ||
+        (options.renderer==hlclient::core::RendererBackend::opengl &&
+         options.stop_after==hlclient::core::ConnectionStopPoint::live_visual_control &&
+         options.live_input==hlclient::core::LiveInputMode::keyboard_mouse);
+    const auto result=console_path ? run_console_application(options) : run(options);
+    // The console/window and every session owner have now been destroyed.
+    // This marker is application shutdown only, never gameplay acceptance.
+    if(console_path && result==0)external_status("completed","application_closed");
     if(options.external_server_client && result!=0 && external_failure_reason.empty())
       external_status("error","client_startup_failed");
     return result;

@@ -326,3 +326,136 @@ TEST_CASE("E32 actor diagnostic clock underflow ignores exact endpoint cancellat
     CHECK((underflow.players[0].diagnostics.clock_reasons&static_cast<std::uint32_t>(v::PlayerClockReason::newest_underflow))!=0);
     CHECK(*underflow.presentation.state->packet_entities[0].origin.x==20);
 }
+
+TEST_CASE("Repeated oldest-window eviction cannot pin a remote player clock to packet arrivals",
+    "[f990-oldest-underflow][e32-remote-buffer][entity-interpolation][core-only]") {
+    namespace v=hlclient::entity_visual;
+    constexpr std::array rates{30U,60U,100U,144U,240U};
+    constexpr std::array jitter{0.55,1.45,0.8,1.2,1.0,0.65,1.35};
+    constexpr auto oldest_bit=static_cast<std::uint32_t>(v::PlayerClockReason::oldest_underflow);
+    constexpr auto reset_bits=static_cast<std::uint32_t>(v::PlayerClockReason::mapped_time_drift)|
+        static_cast<std::uint32_t>(v::PlayerClockReason::application_gap)|
+        static_cast<std::uint32_t>(v::PlayerClockReason::snapshot_gap);
+    for(const auto rate:rates)for(const bool jittered:{false,true}) {
+        CAPTURE(rate,jittered);
+        g::RuntimePlayerSnapshotPresentation owner;
+        owner.observe(observation(1.0,0.0,1));
+        auto current=observation(1.02,6.4,2);owner.observe(current);
+        auto previous=sample(owner,*current,100.0);
+        double elapsed=0.0,previous_target=previous.presentation.sample_seconds;
+        double maximum_step_ratio=0.0;
+        std::size_t frame=0,next_packet=1,checked=0,holds=0,underflows=0,legacy_pins=0;
+        while(elapsed<4.0) {
+            const double dt=(jittered ? jitter[frame%jitter.size()] : 1.0)/rate;
+            elapsed+=dt;++frame;
+            while(static_cast<double>(next_packet)/60.0<=elapsed+1e-12) {
+                const double arrival=static_cast<double>(next_packet)/60.0;
+                // A legal bounded source/local clock phase change, not a
+                // teleport or packet loss: all source gaps remain <21 ms.
+                // The immutable actor still follows exactly 320 units/s in
+                // source time. Once established, the +180 ms phase persists.
+                const double phase=.18*std::clamp(arrival-.5,0.0,1.0);
+                const double seconds=1.02+arrival+phase;
+                current=observation(seconds,320.0*(seconds-1.0),next_packet+2U);
+                owner.observe(current);++next_packet;
+            }
+            const auto immutable=*current;
+            const auto value=sample(owner,*current,100.0+elapsed);
+            REQUIRE(value.players.size()==1U);
+            const auto target=value.presentation.sample_seconds;
+            CHECK(target>=previous_target-1e-9);
+            CHECK(target<=*current->server_time_seconds);
+            CHECK(*value.presentation.state->packet_entities[0].origin.x==
+                Catch::Approx(320.0*(target-1.0)).margin(1e-6));
+            CHECK(*current==immutable);
+            CHECK(owner.history_size()<=g::RuntimePlayerSnapshotPresentation::maximum_history);
+            if(elapsed>2.5) {
+                ++checked;
+                const auto& diagnostics=value.players[0].diagnostics;
+                underflows+=(diagnostics.clock_reasons&oldest_bit)!=0U;
+                holds+=target-previous_target<1e-9;
+                maximum_step_ratio=std::max(maximum_step_ratio,(target-previous_target)/dt);
+                CHECK((diagnostics.clock_reasons&reset_bits)==0U);
+                CHECK(diagnostics.new_boundary_reasons==0U);
+                CHECK_FALSE(value.players[0].discontinuity);
+                REQUIRE(owner.effective_delay_seconds());
+                CHECK(*owner.effective_delay_seconds()==Catch::Approx(.1).margin(1e-9));
+                // Independent negative control: the former immutable anchor
+                // requests a time older than the actual bounded history.
+                const double old_requested=1.02+elapsed-.1;
+                legacy_pins+=old_requested<*owner.observations().front()->server_time_seconds-1e-9;
+            }
+            previous_target=target;
+        }
+        REQUIRE(checked>30U);
+        CHECK(legacy_pins>checked/2U);
+        CHECK(holds==0U);
+        CHECK(underflows<checked/4U+1U);
+        CHECK(maximum_step_ratio<=1.5+1e-7);
+    }
+}
+
+TEST_CASE("Oldest clock repair preserves actor boundaries without changing an unaffected peer clock",
+    "[f990-oldest-underflow][e32-remote-buffer][entity-interpolation][core-only][negative]") {
+    namespace v=hlclient::entity_visual;
+    constexpr std::array<std::uint32_t,2> selected{2,3};
+    constexpr auto oldest_bit=static_cast<std::uint32_t>(v::PlayerClockReason::oldest_underflow);
+    constexpr std::array expected_reasons{v::PlayerContinuityReason::removal,v::PlayerContinuityReason::model_changed,
+        v::PlayerContinuityReason::nointerp_effect,v::PlayerContinuityReason::teleport_distance,
+        v::PlayerContinuityReason::game_boundary,v::PlayerContinuityReason::explicit_discontinuity};
+    const auto pair=[](double seconds,std::size_t ordinal) {
+        return altered(observation(seconds,320.0*(seconds-1.0),ordinal),[](auto& state) {
+            auto peer=state.packet_entities.front();peer.entity_number=3;peer.origin.y=1000.0;
+            state.packet_entities.push_back(peer);
+        });
+    };
+    for(std::size_t mode=0;mode<expected_reasons.size();++mode) {
+        CAPTURE(mode);g::RuntimePlayerSnapshotPresentation owner,control;
+        owner.observe(pair(1.0,1));control.observe(pair(1.0,1));
+        auto current=pair(1.02,2);owner.observe(current);control.observe(current);
+        REQUIRE(owner.sample(*current,100.0,options(),.1,selected));
+        REQUIRE(control.sample(*current,100.0,options(),.1,selected));
+        for(std::size_t packet=1;packet<=180;++packet) {
+            const double elapsed=static_cast<double>(packet)/60.0;
+            current=pair(1.02+elapsed+.18*std::clamp(elapsed-.5,0.0,1.0),packet+2U);
+            owner.observe(current);control.observe(current);
+            REQUIRE(owner.sample(*current,100.0+elapsed,options(),.1,selected));
+            REQUIRE(control.sample(*current,100.0+elapsed,options(),.1,selected));
+        }
+        const auto original=pair(4.22,183);
+        const auto changed=altered(original,[&](auto& state) {
+            if(mode==0)state.packet_entities.erase(state.packet_entities.begin());
+            if(mode==1)state.packet_entities.front().model_index=8;
+            if(mode==2)state.packet_entities.front().effects=32;
+            if(mode==3)*state.packet_entities.front().origin.x+=256.0;
+        });
+        auto policy=options();if(mode==5)policy.discontinuous_entities=players;
+        const std::array boundary{g::RuntimePlayerContinuityBoundary{2,183}};
+        owner.observe(changed);control.observe(original);
+        const auto actual=owner.sample(*changed,103.02,policy,.1,selected,
+            mode==4 ? std::span<const g::RuntimePlayerContinuityBoundary>{boundary} : std::span<const g::RuntimePlayerContinuityBoundary>{});
+        const auto expected=control.sample(*original,103.02,options(),.1,selected);
+        REQUIRE(actual);REQUIRE(expected);
+        CHECK(actual.presentation.sample_seconds==expected.presentation.sample_seconds);
+        CHECK(actual.presentation.state->packet_entities.back()==expected.presentation.state->packet_entities.back());
+        CHECK(owner.effective_delay_seconds()==control.effective_delay_seconds());
+        CHECK(actual.players.back().diagnostics.clock_reasons==expected.players.back().diagnostics.clock_reasons);
+        CHECK((actual.players.back().diagnostics.clock_reasons&oldest_bit)==0U);
+        if(mode==0) {
+            CHECK(actual.presentation.state->packet_entities.size()==1U);
+            const auto reentry=pair(4.24,184);owner.observe(reentry);control.observe(reentry);
+            const auto returned=owner.sample(*reentry,103.04,options(),.1,selected);
+            const auto peer_control=control.sample(*reentry,103.04,options(),.1,selected);
+            REQUIRE(returned);REQUIRE(peer_control);REQUIRE(returned.players.size()==2U);
+            CHECK(returned.players.front().diagnostics.floor_record_ordinal==184U);
+            CHECK(returned.presentation.state->packet_entities.front().origin==reentry->packet_entities.front().origin);
+            CHECK(returned.presentation.state->packet_entities.back()==peer_control.presentation.state->packet_entities.back());
+            CHECK(returned.presentation.sample_seconds==peer_control.presentation.sample_seconds);
+        } else {
+            REQUIRE(actual.players.size()==2U);
+            CHECK(actual.players.front().discontinuity);
+            CHECK((actual.players.front().diagnostics.floor_reasons&static_cast<std::uint32_t>(expected_reasons[mode]))!=0U);
+            CHECK(actual.presentation.state->packet_entities.front().origin==changed->packet_entities.front().origin);
+        }
+    }
+}

@@ -16,6 +16,10 @@ inline constexpr std::size_t kResourceTransitionControlMessageSize =
     1U + kResourceTransitionControlBodySize;
 inline constexpr std::uint8_t kPostResourceTransitionControlBoundaryOpcode =
     43U;
+inline constexpr std::uint8_t kResourceLocationOpcode = 56U;
+// ReHLDS emits the optional svc_resourcelocation string only below 129
+// non-NUL bytes. Its contents are consumed, never retained or acted on here.
+inline constexpr std::size_t kMaximumResourceLocationStringBytes = 128U;
 
 // These are project safety bounds, not claims about stock engine maxima.
 inline constexpr std::size_t kDefaultMaximumTransitionControlSize =
@@ -141,6 +145,8 @@ enum class ResourceTransitionControlErrorCode {
     wrong_next_boundary_opcode,
     truncated_next_boundary_body,
     size_overflow,
+    truncated_resource_location,
+    resource_location_too_long,
 };
 
 struct ResourceTransitionControlError {
@@ -154,7 +160,8 @@ struct ResourceTransitionControlParseResult {
     std::optional<ResourceTransitionControlState> state;
     std::optional<Opcode43Boundary> boundary;
     std::optional<ResourceTransitionControlError> error;
-    // Includes opcode 45 and its exact eight-byte body. Opcode 43 and every
+    // Includes opcode 45 and its exact eight-byte body, plus the optional
+    // opcode-56 NUL-terminated resource-location message. Opcode 43 and every
     // following byte are unconsumed. Both values are zero on failure.
     std::size_t bytes_consumed{0U};
     std::size_t next_byte_offset{0U};
@@ -208,6 +215,10 @@ private:
         return "truncated_next_boundary_body";
     case ResourceTransitionControlErrorCode::size_overflow:
         return "size_overflow";
+    case ResourceTransitionControlErrorCode::truncated_resource_location:
+        return "truncated_resource_location";
+    case ResourceTransitionControlErrorCode::resource_location_too_long:
+        return "resource_location_too_long";
     }
     return "unknown";
 }

@@ -11,6 +11,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -402,6 +403,145 @@ TEST_CASE("Published snapshot history is an immutable owning copy",
     CHECK(copied.snapshots().data() != second.state->snapshots().data());
     CHECK(copied.find_exact(goldsrc::EntitySnapshotReference::synthetic(2U)) !=
           nullptr);
+}
+
+TEST_CASE("CPU history preflight preserves publications and exact values through repeated eviction",
+          "[cpu-frame-1b7][history-preflight][goldsrc][entity][snapshot][history][ownership]")
+{
+    auto data=make_history_fixture();
+    const auto one=make_full(data.baselines,1);
+    auto limits=goldsrc::EntitySnapshotLimits{};
+    limits.maximum_snapshot_history=3;
+    limits.maximum_snapshot_total_value_bytes=one.statistics().accounted_value_bytes*3;
+    auto builder=history_builder(limits);
+    std::vector<goldsrc::EntitySnapshotHistoryState> publications;
+    publications.reserve(24);
+    for(std::uint32_t ordinal=1;ordinal<=24;++ordinal) {
+        const auto incoming=ordinal%2==0 ? make_delta(data.baselines,data.changed,
+            *publications.back().find_exact(goldsrc::EntitySnapshotReference::synthetic(ordinal-1)),
+            ordinal-1,ordinal) : make_full(data.baselines,ordinal);
+        REQUIRE(builder.insert(incoming));
+        // Insertion must never consume a caller-owned input, even though the
+        // builder's own retained transactional snapshots can move internally.
+        CHECK(incoming.reference().value()==ordinal);
+        REQUIRE(incoming.entities().size()==1);
+        CHECK(std::get<std::uint32_t>(incoming.entities().front().object().find_exact("neutral_value")->value())==
+              (ordinal%2==0 ? 2U : 1U));
+        auto published=builder.publish();REQUIRE(published);REQUIRE(published.state);
+        publications.push_back(std::move(*published.state));
+        for(std::uint32_t accepted=1;accepted<=ordinal;++accepted) {
+            const auto& history=publications[accepted-1];
+            const auto count=accepted<3 ? accepted : 3U;
+            CHECK(history.snapshot_count()==count);
+            CHECK(history.accounted_value_bytes()==one.statistics().accounted_value_bytes*count);
+            CHECK(history.oldest_reference()->value()==accepted-count+1);
+            CHECK(history.newest_reference()->value()==accepted);
+            CHECK(history.required_base_references().empty());
+            if(accepted>3) {REQUIRE(history.evicted_through());CHECK(history.evicted_through()->value()==accepted-3);}
+            else CHECK_FALSE(history.evicted_through());
+            for(const auto& snapshot:history.snapshots()) {
+                const auto reference=snapshot.reference().value();
+                CHECK(snapshot.server_time().raw_value()==reference);
+                CHECK(snapshot.kind()==(reference%2==0 ? goldsrc::EntitySnapshotKind::delta : goldsrc::EntitySnapshotKind::full));
+                if(reference%2==0) {REQUIRE(snapshot.base_reference());CHECK(snapshot.base_reference()->value()==reference-1);}
+                else CHECK_FALSE(snapshot.base_reference());
+                REQUIRE(snapshot.entities().size()==1);
+                CHECK(std::get<std::uint32_t>(snapshot.entities().front().object().find_exact("neutral_value")->value())==
+                      (reference%2==0 ? 2U : 1U));
+            }
+        }
+    }
+}
+
+TEST_CASE("CPU history preflight rejects aliased duplicate and bounded failures before consuming state",
+          "[cpu-frame-1b7][history-preflight][goldsrc][entity][snapshot][history][transaction]")
+{
+    for(const bool required_base:{false,true}) {
+        CAPTURE(required_base);
+        auto data=make_history_fixture();
+        const auto one=make_full(data.baselines,1),two=make_full(data.baselines,2),three=make_full(data.baselines,3);
+        auto limits=goldsrc::EntitySnapshotLimits{};
+        limits.maximum_snapshot_history=required_base ? 2U : 3U;
+        limits.maximum_snapshot_total_value_bytes=one.statistics().accounted_value_bytes*2;
+        auto original=history_builder(limits);REQUIRE(original.insert(one));REQUIRE(original.insert(two));
+        const auto prior=original.publish();REQUIRE(prior);REQUIRE(prior.state);
+        goldsrc::EntitySnapshotHistoryBuilder staged{*prior.state,limits};
+        const auto first=goldsrc::EntitySnapshotReference::synthetic(1);
+        if(required_base)REQUIRE(staged.retain_required_base(first));
+        const auto* borrowed=prior.state->find_exact(first);REQUIRE(borrowed);
+        const auto duplicate=staged.insert(*borrowed);REQUIRE_FALSE(duplicate);REQUIRE(duplicate.error);
+        CHECK(duplicate.error->code==goldsrc::EntitySnapshotHistoryErrorCode::duplicate_snapshot);
+        const auto nine=make_full(data.baselines,9);
+        const auto missing=make_delta(data.baselines,data.changed,nine,9,10);
+        const auto rejected_delta=staged.insert(missing);REQUIRE_FALSE(rejected_delta);REQUIRE(rejected_delta.error);
+        CHECK(rejected_delta.error->code==goldsrc::EntitySnapshotHistoryErrorCode::future_base_reference);
+        const auto rejected=staged.insert(three);REQUIRE_FALSE(rejected);REQUIRE(rejected.error);
+        CHECK(rejected.error->code==(required_base ? goldsrc::EntitySnapshotHistoryErrorCode::required_base_retention_limit :
+            goldsrc::EntitySnapshotHistoryErrorCode::history_limit_exceeded));
+        const auto preserved=staged.publish();REQUIRE(preserved);REQUIRE(preserved.state);
+        for(const auto* history:{&*prior.state,&*preserved.state}) {
+            CHECK(history->snapshot_count()==2);
+            CHECK(history->oldest_reference()->value()==1);CHECK(history->newest_reference()->value()==2);
+            CHECK(history->accounted_value_bytes()==one.statistics().accounted_value_bytes*2);
+            CHECK_FALSE(history->evicted_through());
+            for(const auto& snapshot:history->snapshots()) {
+                REQUIRE(snapshot.entities().size()==1);
+                CHECK(std::get<std::uint32_t>(snapshot.entities().front().object().find_exact("neutral_value")->value())==1);
+            }
+        }
+        CHECK(preserved.state->required_base_references().size()==(required_base ? 1U : 0U));
+        CHECK(prior.state->required_base_references().empty());
+        if(required_base) {
+            REQUIRE(staged.release_required_base(first));REQUIRE(staged.insert(three));
+            const auto recovered=staged.publish();REQUIRE(recovered);REQUIRE(recovered.state);
+            CHECK(recovered.state->snapshot_count()==2);CHECK(recovered.state->oldest_reference()->value()==2);
+            CHECK(recovered.state->newest_reference()->value()==3);
+        } else {
+            auto consumed=std::move(staged).publish();REQUIRE(consumed);REQUIRE(consumed.state);
+            REQUIRE(staged.insert(three));CHECK(staged.candidate_snapshot_count()==1);
+        }
+        CHECK(prior.state->snapshot_count()==2);CHECK(borrowed->reference().value()==1);
+        REQUIRE(borrowed->entities().size()==1);
+    }
+}
+
+TEST_CASE("B080 consuming disposable history preserves owning state and clears its source",
+          "[b080-history-transfer][goldsrc][entity][snapshot][history][ownership]")
+{
+    auto data=make_history_fixture();auto limits=goldsrc::EntitySnapshotLimits{};
+    limits.maximum_snapshot_history=2;
+    auto builder=history_builder(limits);
+    for(const auto ordinal:{1U,2U,3U})REQUIRE(builder.insert(make_full(data.baselines,ordinal)));
+    REQUIRE(builder.retain_required_base(goldsrc::EntitySnapshotReference::synthetic(2)));
+    const auto copied=builder.publish();REQUIRE(copied);REQUIRE(copied.state);
+    auto consumed=std::move(builder).publish();REQUIRE(consumed);REQUIRE(consumed.state);
+    const auto& expected=*copied.state;const auto& actual=*consumed.state;
+    CHECK(actual.snapshot_count()==expected.snapshot_count());
+    CHECK(actual.accounted_value_bytes()==expected.accounted_value_bytes());
+    CHECK(actual.oldest_reference()==expected.oldest_reference());CHECK(actual.newest_reference()==expected.newest_reference());
+    CHECK(actual.evicted_through()==expected.evicted_through());CHECK(actual.source_generation()==expected.source_generation());
+    CHECK(actual.compatibility_profile()==expected.compatibility_profile());
+    REQUIRE(actual.required_base_references().size()==1);
+    CHECK(actual.required_base_references().front()==expected.required_base_references().front());
+    REQUIRE(actual.snapshots().size()==2);
+    for(std::size_t index=0;index<actual.snapshots().size();++index) {
+        const auto& a=actual.snapshots()[index];const auto& b=expected.snapshots()[index];
+        CHECK(a.reference()==b.reference());CHECK(a.server_time().raw_value()==b.server_time().raw_value());
+        CHECK(a.kind()==b.kind());CHECK(a.base_reference()==b.base_reference());
+        REQUIRE(a.entities().size()==1);REQUIRE(b.entities().size()==1);
+        CHECK(a.entities().front().entity_number()==b.entities().front().entity_number());
+        CHECK(a.entities().front().shares_object_with(b.entities().front()));
+        CHECK(a.entities().front().object().find_exact("neutral_value")->value()==
+              b.entities().front().object().find_exact("neutral_value")->value());
+    }
+    // Red before the consuming overload: std::move formerly selected const
+    // publication and left every owning snapshot/vector in the discarded owner.
+    CHECK(builder.candidate_snapshot_count()==0);
+    const auto empty=builder.publish();REQUIRE(empty);REQUIRE(empty.state);
+    CHECK(empty.state->snapshot_count()==0);CHECK(empty.state->accounted_value_bytes()==0);
+    CHECK(empty.state->required_base_references().empty());CHECK_FALSE(empty.state->evicted_through());
+    REQUIRE(builder.insert(make_full(data.baselines,4)));
+    CHECK(actual.snapshot_count()==2);CHECK(actual.newest_reference()->value()==3);
 }
 
 static_assert(

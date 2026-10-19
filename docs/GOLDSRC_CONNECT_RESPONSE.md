@@ -106,6 +106,18 @@ The parser returns an owning `ConnectRejected { std::string message; }`. A
 rejection is a valid protocol result and a distinct terminal state, but the
 application reports it as an unsuccessful connection attempt.
 
+### Standard password refusal (2026-10-19)
+
+The separate standard password-rejection class is accepted only as the exact
+17-byte datagram `FF FF FF FF 38 BADPASSWORD NUL` (spaces here separate the
+notation, not wire bytes). There is no LF. ReHLDS
+[`SV_RejectConnectionForPassword`](https://github.com/rehlds/ReHLDS/blob/0124d56c3d888d922eb045775f71c6682ad1226f/rehlds/engine/sv_main.cpp#L1734)
+writes this fixed marker with `MSG_WriteString` (`strlen + 1`). It becomes the
+existing owning `ConnectRejected{"BADPASSWORD"}` and ends the wait immediately,
+so a password refusal is not mistaken for a silent timeout eligible for retry.
+Truncation, changed marker, LF/CR, embedded NUL or trailing data remain protocol
+failures. Unrelated class handling and exact endpoint policy are unchanged.
+
 ## Parser and presentation bounds
 
 All datagrams are untrusted. `parse_connect_response` applies these project
@@ -139,6 +151,13 @@ endpoint.
 The default wait deadline is 5 seconds. Configuration is capped at 30 seconds,
 64 received datagrams per update, and the 1,024-byte response bound. Polling is
 nonblocking and driven by injected `steady_clock` time:
+
+The normal unlimited keyboard/mouse Steam console composition uses a 10-second
+response wait and may start at most three fresh application attempts after a
+typed silent connect-response timeout. Each attempt still uses this one-shot
+stage; explicit M2.2 probes and finite/scripted sessions keep their configured
+deadline and do not automatically retry. See the 2026-10-19 follow-up in
+[Steam connection diagnosis](STEAM_PUBLIC_SERVER_DIAGNOSTICS.md).
 
 ```text
 idle -> waiting -> accepted

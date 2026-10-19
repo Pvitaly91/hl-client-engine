@@ -5,6 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -225,6 +226,163 @@ TEST_CASE("Validated root anchors reject rename and replacement races",
     CHECK(::MoveFileExW(renamed_root.c_str(), root.c_str(), 0U));
     CHECK(::MoveFileExW(base.c_str(), renamed_base.c_str(), 0U));
     CHECK(::MoveFileExW(renamed_base.c_str(), base.c_str(), 0U));
+}
+
+TEST_CASE("Installation checks use exact game or pinned base without widening resource search",
+          "[local-resource][roots][installation-check][security]")
+{
+    ScopedLocalResourceTestRoot temporary;
+    temporary.create_game("mymod");
+    temporary.write("", "engine.dll", "base");
+    temporary.write("mymod", "config.cfg", "game");
+    temporary.write("valve", "fallback.cfg", "fallback");
+    temporary.write("mymod", "nested/settings.cfg", "nested");
+    auto roots = local::LocalResourceSearchRoots::create(temporary.path(), "mymod");
+    REQUIRE(roots);
+    auto created = local::LocalResourceResolver::create(std::move(*roots.roots));
+    REQUIRE(created);
+    auto& resolver = *created.resolver;
+    REQUIRE(resolver.root_count() == 2U);
+    for (const std::string_view name : {"../engine.dll", "..\\engine.dll"}) {
+        auto result = resolver.resolve_installation_check(name);
+        REQUIRE(result);
+        CHECK(result.file->root_id().value() == local::kMaximumLocalResourceSearchRoots);
+        std::array<std::byte, 4U> bytes{};
+        const auto read = result.file->read_next(bytes);
+        REQUIRE(read);
+        REQUIRE(read.bytes_read == 4U);
+        CHECK(bytes == std::array{std::byte{'b'}, std::byte{'a'}, std::byte{'s'}, std::byte{'e'}});
+    }
+    auto config = resolver.resolve_installation_check("config.cfg");
+    REQUIRE(config);
+    CHECK(config.file->root_id().value() == 0U);
+    CHECK(config.file->file_size() == 4U);
+    CHECK(resolver.resolve_installation_check("nested\\settings.cfg"));
+    CHECK(resolver.resolve_installation_check("fallback.cfg").code ==
+          local::LocalResourceResolutionCode::not_found);
+    CHECK(resolver.resolve_installation_check("../missing.dll").code ==
+          local::LocalResourceResolutionCode::not_found);
+    CHECK(resolver.resolve_installation_check("missing.cfg").code ==
+          local::LocalResourceResolutionCode::not_found);
+    CHECK(resolver.root_count() == 2U);
+    CHECK(resolver.resolve("fallback.cfg")); // Ordinary Valve fallback unchanged.
+    CHECK(resolver.resolve("engine.dll").code == local::LocalResourceResolutionCode::not_found);
+    CHECK(resolver.resolve("../engine.dll").code == local::LocalResourceResolutionCode::unsafe_name);
+}
+
+TEST_CASE("Installation checks reject ambiguous traversal and native filename syntax",
+          "[local-resource][roots][installation-check][security]")
+{
+    ScopedLocalResourceTestRoot temporary;
+    auto roots = local::LocalResourceSearchRoots::create(temporary.path(), "valve");
+    REQUIRE(roots);
+    auto created = local::LocalResourceResolver::create(std::move(*roots.roots));
+    REQUIRE(created);
+    for (const std::string_view name : {
+             "", "..", "../", "../../secret.cfg", "..\\..\\secret.cfg",
+             "../sub/../../secret.cfg", "sub/../secret.cfg", "..//engine.dll",
+             "../\\engine.dll", "./config.cfg", "//server/share/file.dll",
+             "\\\\server\\share\\file.dll", "C:/file.dll", "C:file.dll",
+             "../C:/file.dll", "\\\\?\\C:\\file.dll", "/file.dll",
+             "config.cfg:stream", "../CON.dll", "../con .dll", "../LPT1.cfg",
+             "../CONIN$", "../conout$.dll",
+             "config.cfg.", "config.cfg ", "../*.dll", "../?.dll", "x|y.cfg",
+             "file\r.cfg", "file\n.cfg", "file\t.cfg"}) {
+        CAPTURE(name);
+        const auto result = created.resolver->resolve_installation_check(name);
+        CHECK_FALSE(result);
+        CHECK(result.code == local::LocalResourceResolutionCode::unsafe_name);
+        CHECK(result.context.find(temporary.path().string()) == std::string::npos);
+    }
+    const std::string embedded_nul{"config\0.cfg", 11U};
+    CHECK(created.resolver->resolve_installation_check(embedded_nul).code ==
+          local::LocalResourceResolutionCode::unsafe_name);
+    const std::string non_ascii{"file\x80.cfg"};
+    CHECK(created.resolver->resolve_installation_check(non_ascii).code ==
+          local::LocalResourceResolutionCode::unsupported_name_encoding);
+}
+
+TEST_CASE("Installation check unreadable and non-file entries are never absence",
+          "[local-resource][roots][installation-check][security]")
+{
+    ScopedLocalResourceTestRoot temporary;
+    temporary.write("", "locked.dll", "private");
+    temporary.write("valve", "directory.cfg/child", "file");
+    auto roots = local::LocalResourceSearchRoots::create(temporary.path(), "valve");
+    REQUIRE(roots);
+    auto created = local::LocalResourceResolver::create(std::move(*roots.roots));
+    REQUIRE(created);
+    const auto path = temporary.path() / "locked.dll";
+    const HANDLE lock = ::CreateFileW(path.c_str(), GENERIC_READ, 0U, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(lock != INVALID_HANDLE_VALUE);
+    const auto denied = created.resolver->resolve_installation_check("../locked.dll");
+    CHECK(::CloseHandle(lock));
+    CHECK_FALSE(denied);
+    CHECK(denied.code == local::LocalResourceResolutionCode::io_error);
+    CHECK(created.resolver->resolve_installation_check("directory.cfg").code ==
+          local::LocalResourceResolutionCode::not_regular_file);
+    CHECK(created.resolver->resolve_installation_check("../locked.dll"));
+}
+
+TEST_CASE("Installation checks reject file hardlinks without changing ordinary resolution",
+          "[local-resource][roots][installation-check][hardlink][security]")
+{
+    ScopedLocalResourceTestRoot temporary;
+    ScopedLocalResourceTestRoot outside;
+    outside.write("valve", "private.cfg", "outside");
+    std::error_code error;
+    std::filesystem::create_hard_link(outside.game_path("valve") / "private.cfg",
+        temporary.path() / "linked.dll", error);
+    REQUIRE_FALSE(error);
+    std::filesystem::create_hard_link(outside.game_path("valve") / "private.cfg",
+        temporary.game_path("valve") / "linked.cfg", error);
+    REQUIRE_FALSE(error);
+    auto roots = local::LocalResourceSearchRoots::create(temporary.path(), "valve");
+    REQUIRE(roots);
+    auto created = local::LocalResourceResolver::create(std::move(*roots.roots));
+    REQUIRE(created);
+    for (const auto name : {"../linked.dll", "linked.cfg"}) {
+        const auto result = created.resolver->resolve_installation_check(name);
+        CHECK_FALSE(result);
+        CHECK(result.code == local::LocalResourceResolutionCode::reparse_escape);
+    }
+    CHECK(created.resolver->resolve("linked.cfg"));
+}
+
+TEST_CASE("Installation checks reject final and intermediate reparse points",
+          "[local-resource][roots][installation-check][reparse][security]")
+{
+    ScopedLocalResourceTestRoot temporary;
+    ScopedLocalResourceTestRoot outside;
+    outside.write("valve", "private.cfg", "outside");
+    std::error_code error;
+    SECTION("base final file reparse") {
+        std::filesystem::create_symlink(outside.game_path("valve") / "private.cfg",
+            temporary.path() / "linked.dll", error);
+        if (error) SKIP("File symlinks are unavailable: " << error.message());
+        auto roots = local::LocalResourceSearchRoots::create(temporary.path(), "valve");
+        REQUIRE(roots);
+        auto created = local::LocalResourceResolver::create(std::move(*roots.roots));
+        REQUIRE(created);
+        CHECK(created.resolver->resolve_installation_check("../linked.dll").code ==
+              local::LocalResourceResolutionCode::reparse_escape);
+    }
+    SECTION("game and base intermediate directory reparses") {
+        if (!hlclient::tests::create_directory_link_if_supported(outside.game_path("valve"),
+                temporary.path() / "outside", error))
+            SKIP("Directory symlinks are unavailable: " << error.message());
+        if (!hlclient::tests::create_directory_link_if_supported(outside.game_path("valve"),
+                temporary.game_path("valve") / "outside", error))
+            SKIP("Directory symlinks are unavailable: " << error.message());
+        auto roots = local::LocalResourceSearchRoots::create(temporary.path(), "valve");
+        REQUIRE(roots);
+        auto created = local::LocalResourceResolver::create(std::move(*roots.roots));
+        REQUIRE(created);
+        for (const auto name : {"../outside/private.cfg", "outside/private.cfg"})
+            CHECK(created.resolver->resolve_installation_check(name).code ==
+                  local::LocalResourceResolutionCode::reparse_escape);
+    }
 }
 
 } // namespace

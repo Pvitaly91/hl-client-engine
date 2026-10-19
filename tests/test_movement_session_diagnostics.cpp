@@ -58,13 +58,50 @@ TEST_CASE("E32 session diagnostics disabled allocates nothing and long sessions 
     CHECK(output->find("approximate_upper_bounds")!=output->npos);
 }
 
+TEST_CASE("B080 producer maxima retain exact identities for every correction and resolve retained or missing evidence",
+    "[b080][movement-session][correction-witness]") {
+    Recorder recorder{true};recorder.observe(frame(1,0),controlled());
+    hlclient::core::MovementCorrectionWitness first;
+    first.event_ordinal=1;first.network_generation=1;first.map_generation=2;
+    first.life_epoch=1;first.source_record_identity=11;first.observed_us=1'000'000;
+    first.raw_position_error=30.025;
+    auto second=first;second.event_ordinal=2;second.source_record_identity=12;second.raw_position_error=.125;
+    recorder.observe_correction(first,controlled());recorder.observe_correction(second,controlled());
+    recorder.observe_correction(second,controlled()); // Same producer identity is not a third event.
+    const std::array retained{first,second};
+    auto output=recorder.encode(retained);REQUIRE(output);
+    const auto maximum=member(member(*output,"totals"),"producer_correction_maximum");
+    CHECK(count(maximum,"events")==2);CHECK(value(maximum,"raw_error")==Catch::Approx(30.025));
+    CHECK(count(member(maximum,"witness_identity"),"event_ordinal")==1);
+    CHECK(member(maximum,"status")=="\"available\"");
+    const auto cohort_max=member(member(member(*output,"cohorts"),"controlled_alive"),"producer_correction_maximum");
+    CHECK(count(cohort_max,"events")==2);
+    CHECK(count(member(*output,"observations"),"producer_duplicates")==1);
+    // Later frame snapshots may expose only the last small correction. They
+    // cannot silently overwrite the independent producer maximum.
+    auto observed=frame(2,1'010'000);observed.raw_correction_units=.125;observed.correction_ordinal=2;
+    recorder.observe(observed,controlled());
+    for(std::uint64_t i=3;i<620;++i)recorder.observe(frame(i,i*1'000'000),controlled());
+    output=recorder.encode(retained);REQUIRE(output);
+    CHECK(count(member(member(*output,"totals"),"producer_correction_maximum"),"events")==2);
+    CHECK(output->find("\"producer_correction_maximum\":{\"events\":2,\"raw_error\":30.025")!=output->npos);
+    const auto missing=recorder.encode();REQUIRE(missing);
+    CHECK(member(member(member(*missing,"totals"),"producer_correction_maximum"),"status")=="\"witness_missing\"");
+    CHECK(recorder.capacity_bytes()<=Recorder::maximum_capacity_bytes);
+    Recorder disabled;disabled.observe_correction(first,controlled());CHECK(disabled.capacity_bytes()==0);
+}
+
 TEST_CASE("E32 FPS logging groups actual slow intervals and retains stages from the original worst frame",
     "[e32][fps-diagnostics][movement-session][movement-diagnostics][app][core]") {
     Recorder recorder{true};recorder.observe(frame(1,0),controlled());
-    auto first=frame(2,25'000);first.frame_interval_ms=25;first.cpu_update_ms=9;recorder.observe(first,controlled());
+    auto first=frame(2,25'000);first.frame_interval_ms=25;first.cpu_update_ms=9;
+    first.prediction_work=hlclient::core::PredictionWorkDiagnostics{9,8,7,90,80,70,60};
+    recorder.observe(first,controlled());
     auto worst=frame(3,65'000);worst.frame_interval_ms=40;worst.cpu_update_ms=27;
     worst.studio_ms=12;worst.render_ms=4;worst.observed_players=16;worst.entities=240;
-    recorder.observe(worst,controlled());recorder.observe(frame(4,75'000),controlled());
+    worst.prediction_work=hlclient::core::PredictionWorkDiagnostics{3,4,5,6,7,8,9};
+    recorder.observe(worst,controlled());worst.prediction_work->command_ms=99;
+    recorder.observe(frame(4,75'000),controlled());
     REQUIRE(recorder.observe_gpu(3,18));CHECK(recorder.observe_gpu(3,100)); // Duplicate cannot replace the original timing.
     const auto output=recorder.encode();REQUIRE(output);const auto pacing=member(*output,"frame_pacing");
     CHECK(value(pacing,"threshold_ms")==20);CHECK(count(pacing,"total_episodes")==1);
@@ -76,7 +113,12 @@ TEST_CASE("E32 FPS logging groups actual slow intervals and retains stages from 
     CHECK(member(episodes,"recovery_observed")=="true");CHECK(episodes.find("\"recovered\"")!=episodes.npos);
     const auto timings=member(episodes,"worst_frame_timings");CHECK(value(timings,"cpu_update_ms")==27);
     CHECK(value(timings,"studio_ms")==12);CHECK(value(timings,"gpu_ms")==18);
+    const auto work=member(episodes,"prediction_work");CHECK(value(work,"command_ms")==3);
+    CHECK(value(work,"replay_ms")==4);CHECK(value(work,"collision_query_ms")==5);
+    CHECK(count(work,"trace_queries")==6);CHECK(count(work,"position_queries")==7);
+    CHECK(count(work,"contents_queries")==8);CHECK(count(work,"traversal_steps")==9);
     CHECK(count(episodes,"observed_players")==16);CHECK(count(episodes,"entities")==240);
+    CHECK(recorder.capacity_bytes()<=Recorder::maximum_capacity_bytes);
     auto exact=frame(5,95'000);exact.frame_interval_ms=20;recorder.observe(exact,controlled());
     CHECK(count(member(*recorder.encode(),"frame_pacing"),"total_episodes")==1);
 }
@@ -139,6 +181,7 @@ TEST_CASE("E32 FPS logging active episodes encode without mutating capture and i
     CHECK(member(active,"recovery_observed")=="false");CHECK(value(active,"span_ms")==1000);
     CHECK(value(active,"slowest_frame_fps_equivalent")==1);
     CHECK(member(member(active,"worst_frame_timings"),"gpu_ms")=="null");
+    CHECK(member(active,"prediction_work")=="null");
     recorder.observe(frame(3,1'010'000),controlled());const auto done=recorder.encode();REQUIRE(done);
     const auto pacing=member(*done,"frame_pacing");CHECK(count(pacing,"total_episodes")==1);
     CHECK(member(member(pacing,"episodes"),"recovery_observed")=="true");

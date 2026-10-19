@@ -2,7 +2,14 @@
 #include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
 #include <hlclient/goldsrc/usercmd_input_adapter.hpp>
 #include <hlclient/goldsrc/reference_prediction_command.hpp>
+#include <hlclient/goldsrc/reference_brush_collision.hpp>
 #include <hlclient/input/input_state_tracker.hpp>
+#include "local_movement_test_fixture.hpp"
+#include "collision_brush_test_fixture.hpp"
+
+#if HLCLIENT_HAS_GAME_HALFLIFE
+#include <hlclient/games/halflife/movement_policy.hpp>
+#endif
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -613,7 +620,7 @@ TEST_CASE("E16 secondary requires explicit wire policy and is inert to old predi
     CHECK(inert.state->view_angles()[0] == Catch::Approx(30.0).margin(.01));
     // MoveLeft (bit 9) is already a valid direction. Use a bit outside this
     // explicitly bounded prediction profile instead.
-    auto bad = *wire.command; bad.buttons |= 1U << 15U;
+    auto bad = *wire.command; bad.buttons |= 1U << 12U;
     CHECK_FALSE(goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(context.command_sequence, bad));
     auto primary = *wire.command; primary.buttons = goldsrc::kReferenceGoldSrcButtonAttack | goldsrc::kReferenceGoldSrcButtonUse;
     const auto before = goldsrc::reference_jump_duck_weapon_use_movement_command(context.command_sequence, primary);
@@ -637,6 +644,215 @@ TEST_CASE("E16 secondary requires explicit wire policy and is inert to old predi
         intent_from_events({input::InputEvent::focus_gained(), input::InputEvent::capture_acquired()}), make_camera(), context);
     REQUIRE(pulse); CHECK(pulse.command->buttons == 2048U); REQUIRE(pulse.one_shot_plan);
     CHECK(pulse.one_shot_plan->commit_after_history_insert(context.command_sequence));
+}
+
+TEST_CASE("Public Half-Life scoreboard holds the exact IN_SCORE bit until release or focus loss",
+          "[goldsrc][input-adapter][public-server][pings][scoreboard]")
+{
+    auto context = build_context();
+    context.reference_button_policy = goldsrc::GoldSrcReferenceButtonPolicy::
+        jump_duck_primary_secondary_reload_use;
+    input::InputStateTracker tracker;
+    const auto bindings = gameplay::GameplayInputBindings::project_default_v1();
+    REQUIRE(bindings);
+    const auto sample = [&](const std::initializer_list<input::InputEvent> events,
+                            const std::uint16_t expected_buttons) {
+        tracker.begin_frame();
+        for (const auto& event : events) tracker.apply_event(event);
+        const auto built = gameplay::GameplayInputIntentBuilder{}.build(
+            tracker.publish_snapshot(), *bindings.bindings,
+            gameplay::MouseLookConfig{}, 0.01);
+        REQUIRE(built);
+        const auto wire = goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+            *built.intent, make_camera(45.0, -20.0), context);
+        REQUIRE(wire);
+        CHECK(wire.command->buttons == expected_buttons);
+        CHECK(wire.command->forward ==
+            ((expected_buttons & goldsrc::kReferenceGoldSrcButtonForward) != 0U ? 320 : 0));
+        const auto original = *wire.command;
+        const auto prediction = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(
+            context.command_sequence, original);
+        REQUIRE(prediction);
+        CHECK(prediction.state->buttons() == expected_buttons);
+        CHECK(*wire.command == original);
+        tracker.end_frame();
+    };
+    constexpr auto score_forward = static_cast<std::uint16_t>(
+        goldsrc::kReferenceGoldSrcButtonScore | goldsrc::kReferenceGoldSrcButtonForward);
+    CHECK(goldsrc::kReferenceGoldSrcButtonScore == 32768U);
+    sample({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_pressed(input::PhysicalKey::tab)}, score_forward);
+    sample({}, score_forward);
+    sample({input::InputEvent::key_released(input::PhysicalKey::tab)},
+        goldsrc::kReferenceGoldSrcButtonForward);
+    sample({input::InputEvent::key_pressed(input::PhysicalKey::tab)}, score_forward);
+    sample({input::InputEvent::focus_lost()}, 0U);
+    sample({input::InputEvent::focus_gained()}, 0U);
+}
+
+TEST_CASE("Scoreboard keeps earlier reference policies strict and changes no other wire field",
+          "[goldsrc][input-adapter][public-server][pings][scoreboard]")
+{
+    const auto intent = intent_from_events({input::InputEvent::focus_gained(),
+        input::InputEvent::capture_acquired(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_pressed(input::PhysicalKey::tab),
+        input::InputEvent::key_pressed(input::PhysicalKey::space),
+        input::InputEvent::mouse_button_pressed(input::PhysicalMouseButton::left)});
+    const auto without_score = intent_from_events({input::InputEvent::focus_gained(),
+        input::InputEvent::capture_acquired(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_pressed(input::PhysicalKey::space),
+        input::InputEvent::mouse_button_pressed(input::PhysicalMouseButton::left)});
+    auto context = build_context();
+    const auto score_only = intent_from_events({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::tab)});
+    for (const auto policy : {goldsrc::GoldSrcReferenceButtonPolicy::none,
+             goldsrc::GoldSrcReferenceButtonPolicy::jump_duck,
+             goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_reload,
+             goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use}) {
+        context.reference_button_policy = policy;
+        CHECK_FALSE(goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+            score_only, make_camera(), context));
+    }
+    context.reference_button_policy = goldsrc::GoldSrcReferenceButtonPolicy::
+        jump_duck_primary_secondary_reload_use;
+    const auto actual = goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+        intent, make_camera(), context);
+    const auto control = goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+        without_score, make_camera(), context);
+    REQUIRE(actual);
+    REQUIRE(control);
+    auto expected = *control.command;
+    expected.buttons |= goldsrc::kReferenceGoldSrcButtonScore;
+    CHECK(*actual.command == expected);
+    CHECK_FALSE(goldsrc::reference_dry_walk_movement_command(context.command_sequence, expected));
+    CHECK_FALSE(goldsrc::reference_jump_duck_movement_command(context.command_sequence, expected));
+    CHECK_FALSE(goldsrc::reference_jump_duck_weapon_movement_command(context.command_sequence, expected));
+    CHECK_FALSE(goldsrc::reference_jump_duck_weapon_use_movement_command(context.command_sequence, expected));
+    REQUIRE(goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(
+        context.command_sequence, expected));
+#if HLCLIENT_HAS_GAME_HALFLIFE
+    const auto policy = hlclient::games::halflife::make_movement_policy();
+    const auto score = gameplay::gameplay_button_mask(gameplay::GameplayButton::scoreboard);
+    CHECK((policy.live_buttons & score) != 0U);
+    CHECK((policy.held_buttons & score) != 0U);
+    CHECK((policy.capture_life_scoped_buttons & score) == 0U);
+#endif
+}
+
+TEST_CASE("IN_SCORE is inert to the ordinary movement kernel for walking jumping and ducking",
+          "[goldsrc][input-adapter][public-server][pings][scoreboard][prediction]")
+{
+    namespace fixture = hlclient::tests::local_movement;
+    namespace player = hlclient::movement;
+    fixture::DeterministicLocalMovementCollision collision;
+    auto info = player::local_player_movement_state_create_info(fixture::make_state());
+    info.command_profile = player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2;
+    info.compatibility_profile = player::GoldSrcMovementCompatibilityProfile::
+        public_valve_pm_shared_dry_actions_subset_v2;
+    const auto initial = player::LocalPlayerMovementState::create(info);
+    REQUIRE(initial);
+    for (const std::uint16_t buttons : {
+             goldsrc::kReferenceGoldSrcButtonForward,
+             static_cast<std::uint16_t>(goldsrc::kReferenceGoldSrcButtonForward | goldsrc::kReferenceGoldSrcButtonJump),
+             static_cast<std::uint16_t>(goldsrc::kReferenceGoldSrcButtonForward | goldsrc::kReferenceGoldSrcButtonDuck)}) {
+        goldsrc::GoldSrcWireUserCmd wire;
+        wire.msec = 20U;
+        wire.forward = 400;
+        wire.buttons = buttons;
+        const auto identity = *goldsrc::GoldSrcUserCmdSequence::create(1U);
+        const auto before = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(identity, wire);
+        REQUIRE(before);
+        wire.buttons |= goldsrc::kReferenceGoldSrcButtonScore;
+        const auto after = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(identity, wire);
+        REQUIRE(after);
+        const auto expected = fixture::simulate(*initial.state, *before.state, collision);
+        const auto actual = fixture::simulate(*initial.state, *after.state, collision);
+        REQUIRE(expected);
+        REQUIRE(actual);
+        CHECK(actual.state->origin().x == expected.state->origin().x);
+        CHECK(actual.state->origin().y == expected.state->origin().y);
+        CHECK(actual.state->origin().z == expected.state->origin().z);
+        CHECK(actual.state->velocity().x == expected.state->velocity().x);
+        CHECK(actual.state->velocity().y == expected.state->velocity().y);
+        CHECK(actual.state->velocity().z == expected.state->velocity().z);
+        CHECK(actual.state->view_offset().x == expected.state->view_offset().x);
+        CHECK(actual.state->view_offset().y == expected.state->view_offset().y);
+        CHECK(actual.state->view_offset().z == expected.state->view_offset().z);
+        CHECK(actual.state->mode() == expected.state->mode());
+        CHECK(actual.state->hull() == expected.state->hull());
+        CHECK(actual.state->simulation_time_nanoseconds() == expected.state->simulation_time_nanoseconds());
+    }
+}
+
+TEST_CASE("IN_SCORE remains inert while climbing a server-marked ladder",
+          "[goldsrc][input-adapter][public-server][pings][scoreboard][prediction]")
+{
+    namespace fixture = hlclient::tests::local_movement;
+    namespace brush = hlclient::tests::collision_brush_fixture;
+    namespace player = hlclient::movement;
+    const auto library = goldsrc::collision::build_brush_collision_model_library(
+        brush::bounded_brush_package(1U, 100.0F));
+    REQUIRE(library);
+    hlclient::client::RuntimeClientObservationState observation;
+    observation.generation = 1U;
+    observation.publication_revision = 11U;
+    observation.entity_metadata.generation = 1U;
+    observation.entity_metadata.freshness = hlclient::client::RuntimeObservationFreshness::observed_in_record;
+    observation.entity_metadata.completeness = hlclient::client::RuntimeObservationCompleteness::complete_reconstruction;
+    observation.entity_metadata.source.emplace();
+    observation.entity_metadata.source->record_identity = 11U;
+    hlclient::client::RuntimePacketEntityObservation ladder;
+    ladder.entity_number = 42U;
+    ladder.model_index = 27U;
+    ladder.solid = 0U;
+    ladder.brush_move_type = 7U;
+    ladder.skin = -16;
+    ladder.origin = {0.0, 0.0, 0.0};
+    ladder.angles = {0.0, 0.0, 0.0};
+    observation.packet_entities.push_back(ladder);
+    const auto context = goldsrc::build_reference_brush_collision(
+        library.library, {{27U, "*1"}}, observation, 1U);
+    REQUIRE(context.scene);
+    REQUIRE(context.ladders.size() == 1U);
+    goldsrc::movement::BrushSceneMovementCollision collision{context.scene};
+    auto info = player::local_player_movement_state_create_info(
+        fixture::make_state({0.75F, 0.0F, 0.0F}, {}, player::PlayerMovementMode::airborne));
+    info.command_profile = player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2;
+    info.compatibility_profile = player::GoldSrcMovementCompatibilityProfile::
+        public_valve_pm_shared_dry_actions_subset_v2;
+    const auto initial = player::LocalPlayerMovementState::create(info);
+    REQUIRE(initial);
+    goldsrc::GoldSrcWireUserCmd wire;
+    wire.msec = 20U;
+    wire.angle_turns[1U] = 32768U;
+    wire.buttons = goldsrc::kReferenceGoldSrcButtonForward;
+    const auto identity = *goldsrc::GoldSrcUserCmdSequence::create(1U);
+    const auto before = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(identity, wire);
+    REQUIRE(before);
+    wire.buttons |= goldsrc::kReferenceGoldSrcButtonScore;
+    const auto after = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(identity, wire);
+    REQUIRE(after);
+    const goldsrc::movement::ReferenceLadderMovementPolicy ladder_policy{200.0F, 0.333F, 270.0F};
+    goldsrc::movement::GoldSrcLocalMovementScratch before_scratch, after_scratch;
+    const auto expected = goldsrc::simulate_reference_movement(*initial.state,
+        *before.state, fixture::make_environment(), collision, before_scratch, {},
+        nullptr, &context, &ladder_policy);
+    const auto actual = goldsrc::simulate_reference_movement(*initial.state,
+        *after.state, fixture::make_environment(), collision, after_scratch, {},
+        nullptr, &context, &ladder_policy);
+    REQUIRE(expected);
+    REQUIRE(actual);
+    CHECK(expected.state->mode() == player::PlayerMovementMode::ladder);
+    CHECK(actual.state->origin().x == expected.state->origin().x);
+    CHECK(actual.state->origin().y == expected.state->origin().y);
+    CHECK(actual.state->origin().z == expected.state->origin().z);
+    CHECK(actual.state->velocity().x == expected.state->velocity().x);
+    CHECK(actual.state->velocity().y == expected.state->velocity().y);
+    CHECK(actual.state->velocity().z == expected.state->velocity().z);
+    CHECK(actual.state->mode() == expected.state->mode());
 }
 
 } // namespace

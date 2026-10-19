@@ -452,6 +452,7 @@ const LocalResourceReadinessEntry* LocalResourceReadinessState::find_exact(
     const ResourceType type,
     const std::uint16_t resource_index) const noexcept
 {
+    if (!resource_has_bindable_index(type, resource_index)) return nullptr;
     const auto found = std::ranges::find_if(
         entries_,
         [type, resource_index](const auto& entry) {
