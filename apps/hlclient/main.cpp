@@ -5494,8 +5494,8 @@ int run_live_visual_control(
   hlclient::app::ModelPreparationCache model_preparation_cache;
   const auto presentation_model = [&](const hlclient::client::RuntimeClientObservationState& state) {
     return local_assets && state.receiving_client && state.receiving_client->viewmodel_index
-        ? local_assets->presentation_model(state.generation, *state.receiving_client->viewmodel_index)
-        : std::optional<hlclient::game_api::LocalWeaponModelMetadata>{};
+        ? local_assets->presentation_model_handle(state.generation, *state.receiving_client->viewmodel_index)
+        : hlclient::game_api::LocalWeaponModelHandle{};
   };
   const auto prepare_presentation_variants = [&](const hlclient::client::RuntimeClientObservationState& state) {
     if(!local_assets) return;
@@ -6215,7 +6215,7 @@ int run_live_visual_control(
     if (const auto& before = scene_source.world_state().runtime_observation()) {
       prepare_presentation_variants(*before);
       if (local_assets)
-        game_client->bind_model(
+        game_client->bind_model_handle(
             presentation_model(*before));
       game_client->observe(*before, presentation_seconds);
     }
@@ -6503,7 +6503,7 @@ int run_live_visual_control(
       prepare_presentation_variants(*after);
       // A pickup/switch must bind before draining its first submitted command.
       // Binding afterwards cancels that action and its frozen shot context.
-      if(local_assets) game_client->bind_model(presentation_model(*after));
+      if(local_assets) game_client->bind_model_handle(presentation_model(*after));
       game_client->observe(*after, presentation_seconds);
     }
     while (const auto submitted = session.poll_weapon_command_submission()) {
@@ -7710,7 +7710,7 @@ int run_live_visual_control(
       const auto movement_viewmodel_started=movement_diagnostics_enabled ? Clock::now() : Clock::time_point{};
       const auto& hud_observation = scene_source.world_state().runtime_observation();
       if (hud_observation) {
-        const auto pose = game_client->viewmodel(*hud_observation,
+        const auto pose = game_client->viewmodel_handle(*hud_observation,
             presentation_model(*hud_observation), presentation_seconds, weapon_presentation.visual);
         render_scene.first_person_entities = local_assets->materialize_viewmodel(pose,visual_context.eye);
         if(movement_diagnostics_enabled)movement_frame.studio_ms=movement_frame.studio_ms.value_or(0.0)+

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -46,6 +47,9 @@ public:
     }
     SceneTargetFrame(const SceneTargetFrame&)=delete;
     SceneTargetFrame& operator=(const SceneTargetFrame&)=delete;
+    [[nodiscard]] bool default_back_output() const noexcept {
+        return draw_==0 && (draw_buffer_==GL_BACK || draw_buffer_==GL_BACK_LEFT);
+    }
     void restore_bindings() const noexcept {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER,static_cast<GLuint>(draw_));
         if(draw_buffers_.empty())glDrawBuffer(static_cast<GLenum>(draw_buffer_));
@@ -90,6 +94,12 @@ class SceneTarget final {
         }
     };
 public:
+    // Borrowed for the remainder of this render only. The target owns the
+    // texture and invalidates it at the next begin(), resize or session reset.
+    struct ResolvedColorInput final {
+        GLuint texture{};
+        RenderExtent extent{};
+    };
     void reset_session_resources() noexcept {
         release();statistics_={};allocated_extent_={};initialized_=false;
     }
@@ -138,11 +148,13 @@ public:
             glEnable(GL_MULTISAMPLE);
         }
     }
-    void resolve(const SceneTargetFrame& frame) {
-        if(!storage_.multisample)return;
+    [[nodiscard]] std::optional<ResolvedColorInput> resolve(
+        const SceneTargetFrame& frame,bool wants_adjustment) {
+        if(!storage_.multisample)return std::nullopt;
         // Both blits retain exact scene pixel dimensions. The first is the
-        // only multisample resolve; the second copies the resolved image to
-        // the caller's single-sample output before the existing color/HUD pass.
+        // only multisample resolve. For a proven 8-bit linear default back
+        // buffer the adjustment shader may sample that owned resolve texture
+        // directly, omitting the otherwise necessary output round-trip.
         const auto scissor=glIsEnabled(GL_SCISSOR_TEST);
         const auto srgb=glIsEnabled(GL_FRAMEBUFFER_SRGB);
         glDisable(GL_SCISSOR_TEST);glDisable(GL_FRAMEBUFFER_SRGB);
@@ -152,17 +164,51 @@ public:
         glDrawBuffer(GL_COLOR_ATTACHMENT0);
         blit();
         frame.restore_bindings();
-        glBindFramebuffer(GL_READ_FRAMEBUFFER,storage_.resolve);
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        blit();
+        const bool direct=wants_adjustment && frame.default_back_output() &&
+            compatible_default_back_output();
+        if(!direct) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER,storage_.resolve);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            blit();
+            ++statistics_.output_color_blits;
+        } else ++statistics_.direct_adjustment_frames;
         frame.restore_bindings();
         if(scissor)glEnable(GL_SCISSOR_TEST);
         if(srgb)glEnable(GL_FRAMEBUFFER_SRGB);
         ++statistics_.resolved_frames;
+        if(direct)return ResolvedColorInput{storage_.texture,allocated_extent_};
+        return std::nullopt;
     }
     void observe_viewport() noexcept {glGetIntegerv(GL_VIEWPORT,statistics_.viewport.data());}
     [[nodiscard]] const OpenGlSceneTargetStatistics& statistics() const noexcept {return statistics_;}
 private:
+    [[nodiscard]] bool compatible_default_back_output() {
+        if(default_back_compatibility_)return *default_back_compatibility_;
+        // Query once per target allocation/context. Custom FBO attachments can
+        // be replaced by their caller, so they intentionally use the old path.
+        // RGBA8 -> 8-bit RGB(A) preserves the intermediate quantization. An
+        // sRGB-capable default attachment is also byte-equivalent here: both
+        // the old blit and the adjustment draw disable FRAMEBUFFER_SRGB, and
+        // framebuffer pixel-path copies do not perform sRGB conversion.
+        GLint samples{},encoding{},component{},red{},green{},blue{},alpha{};
+        glGetIntegerv(GL_SAMPLES,&samples);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+            GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING,&encoding);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+            GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE,&component);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+            GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE,&red);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+            GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE,&green);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+            GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE,&blue);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+            GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE,&alpha);
+        default_back_compatibility_=samples==0 && (encoding==GL_LINEAR || encoding==GL_SRGB) &&
+            component==GL_UNSIGNED_NORMALIZED && red==8 && green==8 && blue==8 &&
+            (alpha==0 || alpha==8);
+        return *default_back_compatibility_;
+    }
     void blit() const {
         glBlitFramebuffer(0,0,allocated_extent_.width,allocated_extent_.height,
             0,0,allocated_extent_.width,allocated_extent_.height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
@@ -171,6 +217,7 @@ private:
         if(storage_.multisample)++statistics_.storage_releases;
         storage_.reset();statistics_.actual_samples=0;statistics_.framebuffer_complete=false;
         statistics_.active_framebuffers=statistics_.active_attachments=0;
+        default_back_compatibility_.reset();
     }
     [[nodiscard]] bool allocation_error() noexcept {
         bool error=false;
@@ -235,6 +282,7 @@ private:
     Storage storage_;
     RenderExtent allocated_extent_{};
     bool initialized_{};
+    std::optional<bool> default_back_compatibility_;
     OpenGlSceneTargetStatistics statistics_;
 };
 } // namespace hlclient::renderer::opengl::detail

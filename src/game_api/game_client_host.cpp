@@ -328,6 +328,7 @@ std::span<const std::string_view> GameClientHost::effect_sprite_preparation() co
     return active_ ? module_->effect_sprite_preparation() : std::span<const std::string_view>{};
 }
 void GameClientHost::reset(GameSessionIdentity identity) noexcept {
+    bound_model_handle_.reset();bound_model_handle_valid_=false;
     finish_console_publication(false);
     console_text_high_water_.reset();
     temporary_delivery_={};
@@ -346,6 +347,7 @@ void GameClientHost::reset(GameSessionIdentity identity) noexcept {
     module_->set_weapon_diagnostic_observer(diagnostic_sink_ ? this : nullptr);
 }
 void GameClientHost::teardown() noexcept {
+    bound_model_handle_.reset();bound_model_handle_valid_=false;
     diagnostic_generations_={};diagnostic_bound_generations_.reset();
     finish_console_publication(false);
     console_text_high_water_.reset();
@@ -575,7 +577,13 @@ std::optional<double> GameClientHost::presentation_seconds(double seconds) const
     return relative >= 0.0 && std::isfinite(relative) ? std::optional<double>{relative} : std::nullopt;
 }
 void GameClientHost::bind_model(std::optional<LocalWeaponModelMetadata> model) {
+    bound_model_handle_.reset();bound_model_handle_valid_=false;
     if (active_) module_->bind_model(std::move(model));
+}
+void GameClientHost::bind_model_handle(LocalWeaponModelHandle model) {
+    if (!active_ || (bound_model_handle_valid_ && bound_model_handle_ == model)) return;
+    module_->bind_model(model ? std::optional<LocalWeaponModelMetadata>{*model} : std::nullopt);
+    bound_model_handle_=std::move(model);bound_model_handle_valid_=true;
 }
 std::span<const std::string_view> GameClientHost::local_model_preparation() const noexcept {
     if(!active_) return {};
@@ -594,7 +602,11 @@ bool GameClientHost::bind_model_variants(std::span<const LocalWeaponModelMetadat
             if(models[j].model_index==model.model_index || models[j].resource_name==model.resource_name ||
                 models[j].generation!=model.generation) return false;
     }
-    module_->bind_model_variants(models);return true;
+    // A variant boundary can change the module's selected presentation model
+    // even when the primary resource handle is unchanged (Satchel charge/radio).
+    bound_model_handle_valid_=false;
+    module_->bind_model_variants(models);
+    return true;
 }
 void GameClientHost::observe(const client::RuntimeClientObservationState& state, double time) {
     if (active_) {diagnostic_observe(state,time);module_->observe(state, time);}
@@ -891,6 +903,10 @@ ViewmodelIntent GameClientHost::viewmodel(const client::RuntimeClientObservation
     std::optional<LocalWeaponModelMetadata> model, double time,
     std::optional<LocalWeaponVisual> visual) {
     return active_ ? module_->viewmodel(state,std::move(model),time,visual) : ViewmodelIntent{};
+}
+ViewmodelIntent GameClientHost::viewmodel_handle(const client::RuntimeClientObservationState& state,
+    LocalWeaponModelHandle model, double time, std::optional<LocalWeaponVisual> visual) {
+    return active_ ? module_->viewmodel_borrowed(state,model.get(),time,visual) : ViewmodelIntent{};
 }
 HudState GameClientHost::hud(const client::RuntimeClientObservationState& state, double time) {
     auto hud = active_ ? module_->hud(state,time) : HudState{};

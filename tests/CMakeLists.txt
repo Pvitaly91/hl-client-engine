@@ -51,6 +51,7 @@ add_executable(hlclient_tests
     test_remote_movement_diagnostics.cpp
     test_video_image_e31.cpp
     test_msaa_e311.cpp
+    test_flash_batch_p3.cpp
     test_hud_sprite_renderer_e29.cpp
     test_hud_resources_e29.cpp
     test_hud_resources_core_e29.cpp

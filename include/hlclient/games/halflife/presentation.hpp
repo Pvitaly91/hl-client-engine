@@ -37,6 +37,10 @@ public:
       const client::RuntimeClientObservationState&,
       const std::optional<game_api::LocalWeaponModelMetadata>&, double,
       std::optional<game_api::LocalWeaponVisual> = {});
+  [[nodiscard]] game_api::ViewmodelIntent viewmodel_borrowed(
+      const client::RuntimeClientObservationState&,
+      const game_api::LocalWeaponModelMetadata*, double,
+      std::optional<game_api::LocalWeaponVisual> = {});
   [[nodiscard]] game_api::HudState hud(const client::RuntimeClientObservationState&, double);
   [[nodiscard]] game_api::CameraIntent camera(
       const client::RuntimeClientObservationState&, double local_punch_pitch_degrees) const noexcept;

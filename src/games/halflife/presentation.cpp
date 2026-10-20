@@ -154,6 +154,13 @@ game_api::ViewmodelIntent HalfLifePresentation::viewmodel(
     const client::RuntimeClientObservationState& observation,
     const std::optional<game_api::LocalWeaponModelMetadata>& input_metadata,
     double now, std::optional<game_api::LocalWeaponVisual> local_visual) {
+  return viewmodel_borrowed(observation,input_metadata ? &*input_metadata : nullptr,now,local_visual);
+}
+
+game_api::ViewmodelIntent HalfLifePresentation::viewmodel_borrowed(
+    const client::RuntimeClientObservationState& observation,
+    const game_api::LocalWeaponModelMetadata* input_metadata,
+    double now, std::optional<game_api::LocalWeaponVisual> local_visual) {
   game_api::ViewmodelIntent result;
   result.generation = observation.generation;
   result.publication_revision = observation.publication_revision;
@@ -179,8 +186,8 @@ game_api::ViewmodelIntent HalfLifePresentation::viewmodel(
     animation_source_.reset(); local_animation_restart_.reset();
     return result;
   }
-  const auto satchel_metadata=controller_.satchel_presentation_model();
-  const auto& metadata=satchel_metadata ? satchel_metadata : input_metadata;
+  const auto* satchel_metadata=controller_.satchel_presentation_model_view();
+  const auto* metadata=satchel_metadata ? satchel_metadata : input_metadata;
   const auto index = satchel_metadata ? satchel_metadata->model_index : *observation.receiving_client->viewmodel_index;
   const auto active = observation.weapon_hud.active_weapon_id;
   // The exhaustible last throw cannot fall back to a retained server idle pose

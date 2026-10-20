@@ -563,6 +563,11 @@ public:
         std::optional<game_api::LocalWeaponVisual> visual) override {
         return presentation_.viewmodel(state,model,time,visual);
     }
+    game_api::ViewmodelIntent viewmodel_borrowed(const client::RuntimeClientObservationState& state,
+        const game_api::LocalWeaponModelMetadata* model, double time,
+        std::optional<game_api::LocalWeaponVisual> visual) override {
+        return presentation_.viewmodel_borrowed(state,model,time,visual);
+    }
     game_api::HudState hud(const client::RuntimeClientObservationState& state,double time) override {
         auto hud = presentation_.hud(state,time);
         if(!hud_context_.diagnostic_overlay)hud.draw={};

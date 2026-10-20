@@ -42,6 +42,7 @@ struct TestModuleProbe {
     client::CommittedTemporaryEffect temporary_observation;
     std::vector<api::LocalWeaponModelMetadata> model_variants;
     std::size_t variant_bindings{};
+    std::size_t model_bind_calls{}, viewmodel_calls{};
     std::size_t sound_observations{},effect_bindings{};
     api::CommittedSoundObservation sound_observation;
     std::size_t palette_bindings{},effect_policies{};
@@ -240,6 +241,7 @@ public:
         ++probe_->commits;
     }
     void bind_model(std::optional<api::LocalWeaponModelMetadata> model) override {
+        ++probe_->model_bind_calls;
         model_ = std::move(model);
     }
     std::span<const std::string_view> local_model_preparation() const noexcept override {
@@ -284,6 +286,7 @@ public:
     api::ViewmodelIntent viewmodel(const client::RuntimeClientObservationState& state,
         std::optional<api::LocalWeaponModelMetadata> model, double time,
         std::optional<api::LocalWeaponVisual>) override {
+        ++probe_->viewmodel_calls;
         if (!model) return {};
         return {api::ViewmodelStatus::ready, state.generation, state.publication_revision,
                 model->model_index, 13U, 2U, time * 2.0, time};
@@ -535,6 +538,43 @@ TEST_CASE("E25 alternate module receives bounded owning model variants through t
     std::array<api::LocalWeaponModelMetadata,9> excessive{};CHECK_FALSE(host.bind_model_variants(excessive));
     host.reset({3,5,2});CHECK(probe->model_variants.empty());host.teardown();
     CHECK(host.local_model_preparation().empty());CHECK_FALSE(host.bind_model_variants({}));
+}
+TEST_CASE("P2 immutable model handle avoids repeat binds and preserves alternate value-module fallback",
+          "[p2-metadata][core-only][game-api]") {
+    auto probe=std::make_shared<TestModuleProbe>();
+    api::GameClientHost host{std::make_unique<TestGameClientModule>(probe)};
+    host.reset({3,4,2});
+    api::LocalWeaponModelMetadata metadata;
+    metadata.generation=3;metadata.model_index=17;metadata.resource_revision=2;
+    metadata.resource_name="models/owned_a.mdl";
+    metadata.sequences.push_back({.fps=12.0,.frame_count=4,.label="owned animation metadata"});
+    auto handle=std::make_shared<const api::LocalWeaponModelMetadata>(std::move(metadata));
+    std::weak_ptr<const api::LocalWeaponModelMetadata> weak=handle;
+    host.bind_model_handle(handle);host.bind_model_handle(handle);
+    CHECK(probe->model_bind_calls==1);
+    REQUIRE(host.bind_model_variants(std::span{handle.get(),std::size_t{1}}));
+    host.bind_model_handle(handle);CHECK(probe->model_bind_calls==2);
+    const auto state=test_observation();
+    const auto first=host.viewmodel_handle(state,handle,.25);
+    CHECK(first.status==api::ViewmodelStatus::ready);
+    CHECK(first.model_index==17);CHECK(first.frame_coordinate==.5);
+    CHECK(probe->viewmodel_calls==1); // Default alternate adapter gets an owning value.
+    auto other_model=*handle;other_model.model_index=18;
+    const auto swapped=std::make_shared<const api::LocalWeaponModelMetadata>(std::move(other_model));
+    host.bind_model_handle(swapped);host.bind_model_handle(swapped);
+    CHECK(probe->model_bind_calls==3);
+    auto newer_revision=*handle;newer_revision.resource_revision=3;
+    const auto revised=std::make_shared<const api::LocalWeaponModelMetadata>(std::move(newer_revision));
+    host.bind_model_handle(revised);host.bind_model_handle(revised);
+    CHECK(probe->model_bind_calls==4);
+    host.bind_model_handle(handle);CHECK(probe->model_bind_calls==5);
+    // A legacy bind changes module state and must invalidate the handle gate.
+    host.bind_model(std::nullopt);CHECK(probe->model_bind_calls==6);
+    host.bind_model_handle(handle);CHECK(probe->model_bind_calls==7);
+    handle.reset();CHECK_FALSE(weak.expired()); // Host retains the immutable owner.
+    host.reset({3,5,2});CHECK(weak.expired());
+    host.bind_model_handle({});CHECK(probe->model_bind_calls==8);
+    host.teardown();host.bind_model_handle({});CHECK(probe->model_bind_calls==8);
 }
 TEST_CASE("E21 alternate module uses the same neutral beam and command impulse host without HL linkage", "[e21][core-only][game-api]") {
     struct EmptyWorld:api::IStaticEffectTrace {api::StaticEffectTrace trace(hlclient::assets::AssetVector3,hlclient::assets::AssetVector3 end) const noexcept override {return {true,false,false,false,false,end,{}};}} world;

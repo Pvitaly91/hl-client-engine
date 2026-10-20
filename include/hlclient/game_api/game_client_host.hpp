@@ -42,6 +42,9 @@ public:
     [[nodiscard]] GameRecordResult stage_record(const GameRecordInput&) const;
     void commit_record(GameRecordState&&) noexcept;
     void bind_model(std::optional<LocalWeaponModelMetadata>);
+    // The module receives an owning copy only at a new immutable model bind.
+    // Repeated normal-frame calls with the same handle do not rebind.
+    void bind_model_handle(LocalWeaponModelHandle);
     [[nodiscard]] std::span<const std::string_view> local_model_preparation() const noexcept;
     [[nodiscard]] bool bind_model_variants(std::span<const LocalWeaponModelMetadata>);
     void observe(const client::RuntimeClientObservationState&, double);
@@ -117,6 +120,8 @@ public:
     void set_movement_audio_time_origin(double steady_clock_seconds) noexcept;
     [[nodiscard]] ViewmodelIntent viewmodel(const client::RuntimeClientObservationState&,
         std::optional<LocalWeaponModelMetadata>, double, std::optional<LocalWeaponVisual> = {});
+    [[nodiscard]] ViewmodelIntent viewmodel_handle(const client::RuntimeClientObservationState&,
+        LocalWeaponModelHandle, double, std::optional<LocalWeaponVisual> = {});
     [[nodiscard]] HudState hud(const client::RuntimeClientObservationState&, double);
     void set_hud_context(HudPresentationContext) noexcept;
     [[nodiscard]] std::span<const HudManifestRequest> hud_resource_preparation() const noexcept;
@@ -210,6 +215,8 @@ private:
     std::uint64_t movement_audio_observations_{}, movement_audio_clock_dropped_{},
         movement_audio_invalid_time_{};
     std::unique_ptr<IGameClientModule> module_;
+    LocalWeaponModelHandle bound_model_handle_;
+    bool bound_model_handle_valid_{};
     bool active_{true};
     FollowEvents follow_events_;
     std::uint64_t follow_generation_{};

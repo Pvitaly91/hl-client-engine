@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -56,6 +57,9 @@ struct LocalWeaponModelMetadata final {
   friend bool operator==(const LocalWeaponModelMetadata&,
                          const LocalWeaponModelMetadata&) = default;
 };
+// Immutable, owning metadata from an approved model resource. Safe to retain
+// across a local-asset owner change; the generation/revision stay in the value.
+using LocalWeaponModelHandle = std::shared_ptr<const LocalWeaponModelMetadata>;
 struct LocalWeaponSubmittedCommand final {
   std::uint64_t generation{};
   std::uint32_t sequence{};

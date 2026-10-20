@@ -1,0 +1,474 @@
+{
+  "schema": "hlclient.optimization-msaa-metadata.43ad240.v1",
+  "status": "offline_verified_manual_not_run",
+  "repository": "Pvitaly91/hl-client-engine",
+  "branch": "main",
+  "source_checkout": "D:\\DEV\\CPP\\HL-Client-engine",
+  "reviewed_head": "43ad24043f5a4f59c7e8aab01e091021eb8abcf8",
+  "source_review_note": "OPTIMIZATION_REVIEW_NEXT_UK.md was referenced but not provided/found; task prompt, current contracts and prior 0b2f2c6 report were read",
+  "environment": {
+    "generator": "Visual Studio 17 2022",
+    "platform": "Win32",
+    "configuration": "Release",
+    "build_testing": true,
+    "halflife_module": true,
+    "warnings_as_errors": true,
+    "dependency_sources": "same local SDL3, BZip2 and Catch2 FetchContent source directories for baseline-source+harness and candidate",
+    "parallel_compilation": false,
+    "agent_live_steam_hlds_game_sessions": 0,
+    "server_stock_assets_auth_modified": false,
+    "staging_commit_push": "none_at_offline_measurement_checkpoint; later Git publication is a separate user request",
+    "manual_acceptance": "not_run"
+  },
+  "baseline": {
+    "production_source": "clean reviewed HEAD exported by git archive",
+    "test_binary_kind": "baseline production source plus test-only measurement harness",
+    "preserved_root": "D:\\DEV\\CPP\\HL-Client-engine\\manual-artifacts\\task-records\\optimization-msaa-metadata-43ad240-20261020",
+    "release_exe_sha256": "2CDABD38864B511F07BDE5869DD2628812311409CE74295FD63BB5A4958AC74D",
+    "release_exe_bytes": 5521920,
+    "clean_source_test_exe_sha256": "A31D48CCD3824274A02D0C1FFB95CDAC7A0B5290A4AC07EB01E12F4B014F372E",
+    "harness_test_exe_sha256": null,
+    "previous_delivery_exe_sha256": "2CDABD38864B511F07BDE5869DD2628812311409CE74295FD63BB5A4958AC74D",
+    "previous_launcher_exe_sha256": "5F3A4BDDEE4DCE1D051CC418BF876405369A83016EFFFE3E12D8528F4142466C",
+    "clean_actual_assets_gl_control": "passed before candidate integration",
+    "baseline_fixture_failures_and_retries": [
+      {
+        "stage": "preserved baseline test binary initial run",
+        "result": "Windows 0xC0000135 missing adjacent SDL3.dll",
+        "resolution": "copied SDL3.dll beside preserved test binary; same offline fixture passed",
+        "production_change": false
+      },
+      {
+        "stage": "separate baseline CMake configure initial attempt",
+        "result": "plain cmake not on PATH",
+        "resolution": "used installed Visual Studio CMake executable by full path",
+        "production_change": false
+      },
+      {
+        "stage": "P2 baseline source+harness first compile",
+        "result": "test harness referenced a candidate-only method",
+        "resolution": "test-only source-compatible harness adjustment",
+        "production_change": false
+      },
+      {
+        "stage": "P3 baseline source+harness first compile/run",
+        "result": "MSVC C4996 getenv in test, then first-person fixture initially invisible",
+        "resolution": "test-only environment access and fixture camera correction",
+        "production_change": false
+      }
+    ]
+  },
+  "candidate": {
+    "source_identity": "reviewed HEAD plus 25 hashed modified/new code and test files; docs excluded to avoid self-reference",
+    "source_file_count": 25,
+    "source_file_sha256": {
+      "apps/hlclient/main.cpp": "BEA2068FB29EFC74B00111F8798BC28964A4A6C393D177F2BB4E977D643F44E1",
+      "include/hlclient/app/runtime_replay_local_assets.hpp": "701C194F62CDBB9BB4210131EDE85A3DF0DD7AC00FC390993995F7111C870988",
+      "include/hlclient/game_api/game_client_host.hpp": "03261D0E7DAF83E51BB114EE54E4B918B7557ED2A59AB42BA7B41B8B46463E8F",
+      "include/hlclient/game_api/game_client_module.hpp": "FCD4F856D8E57E64C6B369A058DDBA9B2A568AD7F796D6289890C8F679F9717D",
+      "include/hlclient/game_api/presentation.hpp": "DF9645B696F6942500357C207631443BC52765290F203F203FDCBDB5F48794B0",
+      "include/hlclient/games/halflife/local_weapon_presentation.hpp": "E28E430C37991334860F635DE123FE0817A0A66A8B0F874E03082D3B95269089",
+      "include/hlclient/games/halflife/presentation.hpp": "E3C8F9DAE9F09928A9237EAB5E8D20D1C1818D3E1B37DA280F77E9DB5C34D64F",
+      "include/hlclient/renderer/opengl/opengl_renderer.hpp": "B4953DDC26E7044E5932C892963034BD30F077B00961960DD139BED187FBE7AB",
+      "src/app/runtime_replay_local_assets.cpp": "C6DD1CC0DDA5BA04BFE564B28C5029181C82A137D17C50F77367F81887D35680",
+      "src/entity_render/entity_scene_render.cpp": "C86202EBA1682BDFE0FC6138FA6D64CB497F89EEB9AABB2196964587FF2B20A6",
+      "src/game_api/game_client_host.cpp": "AD559387FD6541FC35D388B05E2A8082CC51B369D53FB2A521150A2F31992A1A",
+      "src/games/halflife/client_module.cpp": "4F1736723F5FB6A4263590DF72F2C66C3A1748E7D82CA86A4427477C8D51EB7A",
+      "src/games/halflife/presentation.cpp": "52BE1FA5627A31CE1F19A8C25A95DC2788B089214604791CD5055DA6EE59E809",
+      "src/renderer/opengl/opengl_entity_renderer.cpp": "A78C66AE53104C8ACC6502608039557BB3AB2E0556C689E9F124AAF65CEF77D9",
+      "src/renderer/opengl/opengl_renderer.cpp": "0186A3002FE32E95FDBFB895FB92C33246417DCFA9E411E38FD3A206F6910B83",
+      "src/renderer/opengl/opengl_scene_target.hpp": "6EF5BDE49612050D9A59874D574DD11DEF0BD75AB22918688FB52F6CD5114971",
+      "tests/CMakeLists.txt": "AC6843A7754464EBF9BBD55A15AC5CCEDC02B9AD4279193C849961C94F439B56",
+      "tests/test_entity_scene_render_package.cpp": "F307743EA4F9FA8D554A885B696AF7E235603AB6FD655D632F7B138B09D2EC7E",
+      "tests/test_flash_batch_p3.cpp": "8FA53944C92F6A90245948612CD61B42456086EAD38554BA90CF38A18A5B10BD",
+      "tests/test_game_client_module.cpp": "6A90DDEEB84F042437118762BDC203F46386EB6C7776F03327C173BD31314569",
+      "tests/test_msaa_e311.cpp": "1E49D7550DAE325657FE79259B61D043D6ED217ED0160E60B4E0FC903C2A0558",
+      "tests/test_opengl_sprite_entity_renderer.cpp": "F9F665855DDC2B520C79450C778E73D45AB24B020FCE92BC6B5ADC87B63E4989",
+      "tests/test_opengl_studio_entity_renderer.cpp": "147E0F590C91398243734112E9442CE9B721E15C82CB6E51A55D711C0979425B",
+      "tests/test_runtime_replay_local_assets.cpp": "0FD8EF31E973F3B1CA6AE67196DCA1933C9C28B8AFAA8E085F2A1218D82E0069",
+      "tests/test_satchel_local.cpp": "1BFA32DAC37409B13083FD9D9B9C03164575573C4E6F9E0EA07B07A425443E1E"
+    },
+    "release_exe_path": "D:\\DEV\\CPP\\HL-Client-engine\\build\\bin\\Release\\hlclient.exe",
+    "release_exe_bytes": 5530624,
+    "release_exe_sha256": "F84AE4973760C0BC6FCD813843247562A4CBAA4C0F6596346FED2E504AD874C7",
+    "delivered_exe_bytes": 5530624,
+    "delivered_exe_sha256": "F84AE4973760C0BC6FCD813843247562A4CBAA4C0F6596346FED2E504AD874C7",
+    "delivered_exe_path": "D:\\DEV\\CPP\\HLC-steamcfg-5e48b7c1\\build\\bin\\Release\\hlclient.exe",
+    "launcher_source_target": "apps/hlclient_launcher/main.cpp:646 sibling hlclient.exe",
+    "launcher_rebuild_required": false,
+    "launcher_offline_verification": "delivered HLClientLauncher.exe --offline-ui-check exit 0; no live session",
+    "unchanged_launcher_sha256": "5F3A4BDDEE4DCE1D051CC418BF876405369A83016EFFFE3E12D8528F4142466C",
+    "delivered_client_version_check": "--version exit 0: HL Client Engine; Version 0.0.1-dev; Platform Windows x86",
+    "byte_identical_build_and_delivery": true
+  },
+  "packages": {
+    "P1": {
+      "status": "implemented",
+      "source": ["src/renderer/opengl/opengl_scene_target.hpp", "src/renderer/opengl/opengl_renderer.cpp"],
+      "finding": "actual-MSAA nonneutral image adjustment previously resolved to output, copied output to image texture, then adjusted back to output",
+      "fast_path": "confirmed compatible default unsigned-normalized 8-bit RGB(A) output directly samples already resolved texture in adjustment draw",
+      "fallback": "unknown/custom output, unsupported encoding/format, MSAA Off and other ineligible targets retain guarded old path",
+      "ownership": "SceneTarget owns resolved input texture and extent; no read/write feedback",
+      "eligible_operation_before": "hardware resolve plus intermediate output blit plus framebuffer copy plus adjustment draw",
+      "eligible_operation_after": "one hardware resolve plus adjustment draw; no two intermediate round-trip copies",
+      "neutral_adjustments_claimed_copy_saving": false,
+      "candidate_early_focused": {"filter": "[optimization-p1]", "initial_passed_cases": 2, "initial_passed_assertions": 614477, "after_matrix_passed_cases": 3, "after_matrix_passed_assertions": 614673, "exit_code": 0, "before_final_integration": true},
+      "candidate_early_msaa_control": {"filter": "[e311][msaa]", "passed_cases": 7, "passed_assertions": 614837, "exit_code": 0, "before_final_integration": true},
+      "eligible_first_frame_operations": {"resolves": 1, "intermediate_output_blits": 0, "framebuffer_copies": 0, "resolved_texture_reads": 1},
+      "fallback_operation_controls": {
+        "custom_rgba8_or_rgb10_a2": "one output blit and one framebuffer copy",
+        "neutral_msaa": "one output blit and zero framebuffer copies",
+        "msaa_off_nonneutral": "one framebuffer copy"
+      },
+      "observed_default_output": "FBO0 GL_BACK_LEFT samples=0 GL_SRGB unsigned-normalized 8/8/8/8",
+      "pixel_control": "hidden compatible default output direct-vs-forced-legacy exact RGBA equality; final Release full CTest and Debug focused controls passed; unsupported GPU modes remain explicit fallbacks/skips",
+      "measured_gpu_time_delta_ms": null,
+      "gpu_speedup": "not_established"
+    },
+    "P2": {
+      "status": "implemented",
+      "source": ["src/app/runtime_replay_local_assets.cpp", "apps/hlclient/main.cpp", "src/game_api/game_client_host.cpp", "src/games/halflife/client_module.cpp"],
+      "finding": "cached LocalWeaponModelMetadata returned by value copied sequences, nested events and strings each normal frame",
+      "ownership": "immutable owning shared handle through normal presentation/viewmodel path; legacy value API remains for compatibility and bind-boundary copies",
+      "invalidations": ["generation/session", "resource/model revision", "weapon selection and Satchel variant", "late readiness", "host/module reset"],
+      "baseline_minimum_metadata_value_copies_per_frame": 3,
+      "candidate_steady_state_metadata_vector_copies_per_frame": 0,
+      "per_object_allocation_count": null,
+      "measured_time_delta_us": "same-binary legacy-to-handle timings recorded; independent baseline runs varied and are not full-frame deltas",
+      "candidate_output_parity": "exact idle and animated signatures retained",
+      "candidate_focused_assertions": 4876
+    },
+    "P3_world_flashes_particles": {
+      "status": "implemented",
+      "source": ["src/renderer/opengl/opengl_renderer.cpp"],
+      "finding": "per-element small buffer uploads and separate draws/state/uniform updates",
+      "batch_policy": "bounded streaming of contiguous compatible elements only; state/geometry/line changes terminate run; transparent ordering retained",
+      "draw_upload_delta": null,
+      "measured_time_delta_ms": "CPU render-submit fixture recorded below; GPU/present speedup not established",
+      "candidate_exact_pixel_parity": "all eight pixel hashes exact",
+      "single_quad_regression_and_fallback": {
+        "first_batch_candidate_p50_ms": 0.0529,
+        "baseline_p50_ms": 0.0269,
+        "fallback": "one-quad scene without solid-line ordering uses legacy draw to avoid batch preparation/orphaning",
+        "corrected_candidate_p50_ms": 0.0271
+      },
+      "candidate_focused": {"passed_cases": 1, "passed_assertions": 110, "exit_code": 0}
+    },
+    "P3_hud_sprites": {
+      "status": "deferred",
+      "source": ["src/renderer/opengl/opengl_renderer.cpp"],
+      "reason": "exact draw-order/clip/texture/revision compatibility fixture and isolated draw saving not established in safe task scope",
+      "draw_order_or_missing_resource_checks_weakened": false,
+      "measured_time_delta": null
+    },
+    "P4": {
+      "status": "deferred",
+      "source": ["src/renderer/opengl/opengl_renderer.cpp"],
+      "finding": "render_decals repeats full geometry vertex scan before cache hit",
+      "reason": "public shared_ptr<const vector> may retain external mutable alias; immutable validated owner boundary not yet present; scan cost not isolated",
+      "untrusted_geometry_checks_removed": false,
+      "measured_time_delta": null
+    },
+    "P5": {
+      "status": "implemented",
+      "source": ["src/entity_render/entity_scene_render.cpp"],
+      "finding": "per-build unordered sets/maps created despite sorted entity streams",
+      "replacement": "adjacent and monotone sorted-stream joins with bounded attachment owner lookup",
+      "contract": "zero, duplicate primary/attachment/cross-stream, subinstance ordinal, sparse IDs, public unsorted input, error precedence and output order preserved",
+      "per_build_allocation_count": null,
+      "hash_containers_removed_per_build": 3,
+      "initial_candidate_regression": "4096-pair p50 12150 us before O(1) precomputed group change; corrected candidate p50 6067.3 us",
+      "measured_time_delta_us": "P5 paired local fixture timings recorded below, not whole-frame",
+      "candidate_output_parity": "exact signatures for 16, 64 and 4096 pairs",
+      "candidate_focused": {"filter": "[optimization-p5]", "passed_cases": 3, "passed_assertions": 4953, "exit_code": 0}
+    },
+    "P6": {
+      "status": "implemented",
+      "source": ["src/renderer/opengl/opengl_entity_renderer.cpp"],
+      "finding": "shared camera/effect-light pass constants and frame-owned Studio pose uploaded repeatedly for each instance",
+      "pass_boundary": "common uniforms on first Studio draw of each render call; per-instance and per-material values remain local",
+      "pose_ubo_cache_key": "exact StudioRenderPose pointer within synchronous render call; resets between calls/passes; never pose_index alone",
+      "shared_pose_world_pose_ubo_uploads_baseline_candidate": [2, 1],
+      "shared_pose_world_uniform_bundles_baseline_proxy_candidate_actual": [2, 1],
+      "world_to_viewmodel_pose_ubo_uploads_baseline_candidate": [3, 2],
+      "world_to_viewmodel_uniform_bundles_baseline_proxy_candidate_actual": [3, 2],
+      "baseline_uniform_bundle_note": "structural proxy for old per-draw uniform bundle, not a baseline runtime instrumentation counter",
+      "draw_command_color_parity": "exact in both dual-binary fixtures",
+      "measured_submission_delta_ms": null,
+      "measured_gpu_delta_ms": null,
+      "candidate_output_parity": "exact shared_pose_world and world_to_viewmodel color signatures; dual-binary test passed"
+    },
+    "P7": {
+      "status": "deferred",
+      "finding": "A3 already removed per-frame deep summary copy; model_slot_counts and public map staging remain; nested world_entity decisions depend on policy/history",
+      "reason": "scratch/map cost not isolated and full source/order/eviction/occupant/life/revision/policy dependency key not established",
+      "transactional_publication_changed": false,
+      "observation_validation_removed": false,
+      "measured_time_delta": null
+    }
+  },
+  "baseline_measurements": {
+    "P2_metadata": {
+      "unit": "microseconds",
+      "warmup": 48,
+      "samples": 256,
+      "passed_assertions": 2440,
+      "idle": {"p50": 22.4, "p95": 27.2, "p99": 43.6, "max": 478.2, "signature": "5129049765546557968"},
+      "animated": {"p50": 23.7, "p95": 31.2, "p99": 36.7, "max": 66.4, "signature": "10015849200721023205"},
+      "calmer_independent_baseline_rerun": {
+        "idle": {"p50": 4.3, "p95": 5.2, "p99": 30.2, "max": 67.2},
+        "animated": {"p50": 2.7, "p95": 4.7, "p99": 5.1, "max": 111.3}
+      }
+    },
+    "P5_builder": {
+      "unit": "microseconds",
+      "warmup": 32,
+      "samples": 256,
+      "input_clone_inside_timer": false,
+      "passed_assertions": 4356,
+      "pairs_16": {"p50": 26.9, "p95": 30.6, "p99": 58.5, "max": 176.8, "signature": "16184521987587802770"},
+      "pairs_64": {"p50": 109.1, "p95": 117.0, "p99": 157.4, "max": 238.5, "signature": "8500088117491436114"},
+      "pairs_4096": {"p50": 8295.3, "p95": 9074.2, "p99": 10744.1, "max": 11704.1, "signature": "17956067667855471570"}
+    },
+    "P3_render_submit": {
+      "unit": "milliseconds",
+      "warmup": 16,
+      "samples": 128,
+      "pixel_test_passed_assertions": 65,
+      "benchmark_test_passed_assertions": 68,
+      "single": {"p50": 0.0269, "p95": 0.0628, "p99": 0.0902, "max": 0.1388},
+      "mixed": {"p50": 0.1911, "p95": 0.3567, "p99": 0.472, "max": 1.154},
+      "capacity": {"p50": 4.9037, "p95": 6.2869, "p99": 7.5091, "max": 9.6168},
+      "exact_pixel_hashes": {
+        "empty": "1571188897546601253",
+        "single": "8240284972772131789",
+        "single_camera": "7298931310471760689",
+        "mixed_off": "14260208806846906294",
+        "mixed_msaa4": "13552024566737763509",
+        "capacity": "4515965437399056991",
+        "invalid": "8578265860995528261",
+        "first_person": "9238724667232613125"
+      }
+    },
+    "actual_assets_opengl": {
+      "binary": "preserved clean-source baseline test binary",
+      "assets_root": "D:\\DEV\\HLCLIENT-RESEARCH\\Half-Life",
+      "environment": "Intel RaptorLake-S Mobile Graphics Controller; OpenGL 3.3; hidden 1920x1080; MSAA 8x; no swap/present",
+      "filter": "[gauss-71b97-camera][actual-assets][opengl][benchmark]",
+      "exit_code": 0,
+      "scene_signatures_capture_off_on_identical": {
+        "f8": "14806656111895154147",
+        "f8_yaw90": "13673615928794846993",
+        "f8_yaw180": "14418074101699727832",
+        "approach_128": "11835259281581420796",
+        "adjacent_128": "5059785233132418021",
+        "f8_yaw_sweep": "18401949999706022471",
+        "sloped_surface_not_verified_shotgun": "8670911200223983997"
+      },
+      "f8_capture_off_ms": {
+        "cpu_render_submit": {"p50": 0.7769, "p95": 1.1619, "p99": 1.2838, "max": 2.1474},
+        "gpu_total": {"p50": 7.742176, "p95": 9.326928, "p99": 10.136724, "max": 10.143016},
+        "gpu_msaa_resolve": {"p50": 1.318356, "p95": 2.231788, "p99": 2.912208, "max": 3.96786},
+        "gpu_image_adjustments": {"p50": 0.828412, "p95": 0.949156, "p99": 2.182908, "max": 2.3127}
+      },
+      "candidate_first_run_f8_capture_off_ms": {
+        "cpu_render_submit": {"p50": 0.8692, "p95": 1.5813, "p99": 2.7691, "max": 3.6438},
+        "gpu_total": {"p50": 7.249476, "p95": 8.97676, "p99": 9.73674, "max": 13.076648},
+        "gpu_msaa_resolve": {"p50": 0.986232, "p95": 1.34056, "p99": 1.87824, "max": 2.055716},
+        "gpu_image_adjustments": {"p50": 0.474656, "p95": 0.775788, "p99": 1.631916, "max": 2.29866}
+      },
+      "candidate_image_signatures_identical_to_baseline": true,
+      "complete_interleaved_f8_pair_count": 2,
+      "second_pair_f8_capture_off_ms": {
+        "baseline": {
+          "cpu_render_submit": {"p50": 2.0101, "p95": 3.9645, "p99": 5.7814, "max": 6.3362},
+          "gpu_total": {"p50": 9.165936, "p95": 10.88074, "p99": 12.217036, "max": 12.592372},
+          "gpu_msaa_resolve": {"p50": 1.508624, "p95": 2.587624, "p99": 3.166904, "max": 3.167736},
+          "gpu_image_adjustments": {"p50": 0.91104, "p95": 1.603836, "p99": 2.6754, "max": 2.84362}
+        },
+        "candidate": {
+          "cpu_render_submit": {"p50": 0.923, "p95": 1.7198, "p99": 2.5438, "max": 2.6169},
+          "gpu_total": {"p50": 7.670156, "p95": 9.369932, "p99": 9.8293, "max": 10.422308},
+          "gpu_msaa_resolve": {"p50": 0.999804, "p95": 1.233076, "p99": 2.034292, "max": 2.423667},
+          "gpu_image_adjustments": {"p50": 0.47424, "p95": 1.520272, "p99": 2.195388, "max": 2.432352}
+        },
+        "baseline_exit_code": 0,
+        "candidate_exit_code": 0,
+        "baseline_passed_assertions": 13756,
+        "candidate_passed_assertions": 13756,
+        "exact_image_signatures": true
+      },
+      "intermediate_incomplete_pair_p50_ms": {
+        "baseline_unfiltered": {"cpu_render_submit": 1.5338, "gpu_total": 9.000368, "gpu_msaa_resolve": 1.4937, "gpu_image_adjustments": null},
+        "candidate": {"cpu_render_submit": 0.9644, "gpu_total": 8.010132, "gpu_msaa_resolve": 1.016444, "gpu_image_adjustments": 0.478972},
+        "complete_pair": false,
+        "limitation": "baseline image-adjustment output lost; not counted as third complete pair"
+      },
+      "gpu_medians_lower_in_both_complete_pairs": true,
+      "cpu_render_submit_direction_consistent": false,
+      "stable_whole_frame_speedup": "not_established_hidden_no_swap_f8_only",
+      "live_present_scanout_included": false,
+      "verified_shotgun_ramp_capture": false
+    }
+  },
+  "candidate_measurements": {
+    "P1": {"eligible_msaa8_default_nonneutral_operations": {"resolve": 1, "resolved_texture_read": 1, "intermediate_output_blits": 0, "framebuffer_copies": 0}, "actual_assets_two_complete_f8_pairs": "see baseline_measurements.actual_assets_opengl; GPU medians lower in both, CPU direction mixed, live present/FPS and stable whole-frame speedup not established"},
+    "P2": {
+      "unit": "microseconds",
+      "same_binary_legacy_vs_handle": {
+        "idle_legacy": {"p50": 2.6, "p95": 2.7, "p99": 2.8, "max": 12.1},
+        "idle_handle": {"p50": 0.7, "p95": 0.8, "p99": 0.8, "max": 0.8},
+        "animated_legacy": {"p50": 2.5, "p95": 2.7, "p99": 2.7, "max": 3.0},
+        "animated_handle": {"p50": 0.7, "p95": 0.7, "p99": 0.7, "max": 0.8}
+      },
+      "exact_signatures": {"idle": "5129049765546557968", "animated": "10015849200721023205"},
+      "normal_steady_state_metadata_vector_copies_per_frame": 0,
+      "whole_frame_speedup": "not_established"
+    },
+    "P3": {
+      "unit": "milliseconds",
+      "samples": 128,
+      "same_baseline_exact_pixel_hashes": true,
+      "cpu_render_submit": {
+        "single": {"p50": 0.0271, "p95": 0.0409, "p99": 0.0684, "max": 0.0746},
+        "mixed": {"p50": 0.1151, "p95": 0.2292, "p99": 0.4337, "max": 0.8729},
+        "capacity": {"p50": 0.1221, "p95": 0.1866, "p99": 0.2556, "max": 0.3137}
+      },
+      "live_gpu_present_speedup": "not_established"
+    },
+    "P5": {
+      "unit": "microseconds",
+      "samples": 256,
+      "input_clone_inside_timer": false,
+      "exact_signatures_identical_to_baseline": true,
+      "pairs_16": {"p50": 23.0, "p95": 24.1, "p99": 25.1, "max": 33.4},
+      "pairs_64": {"p50": 93.3, "p95": 141.9, "p99": 172.9, "max": 193.1},
+      "pairs_4096": {"p50": 6067.3, "p95": 7310.3, "p99": 7918.0, "max": 8297.1},
+      "whole_frame_speedup": "not_established"
+    },
+    "P6": {
+      "dual_binary_test_only_same_harness": true,
+      "baseline_build": "passed",
+      "candidate_build": "passed",
+      "baseline_cases": 1,
+      "baseline_assertions": 47,
+      "candidate_cases": 1,
+      "candidate_assertions": 49,
+      "shared_pose_world": {
+        "baseline_draws": 2,
+        "candidate_draws": 2,
+        "baseline_commands": 2,
+        "candidate_commands": 2,
+        "baseline_pose_ubo_uploads": 2,
+        "candidate_pose_ubo_uploads": 1,
+        "baseline_old_uniform_bundle_proxy": 2,
+        "candidate_actual_uniform_bundles": 1,
+        "exact_color_signature_both": "8702639546013134117"
+      },
+      "world_to_viewmodel": {
+        "baseline_draws": 3,
+        "candidate_draws": 3,
+        "baseline_commands": 3,
+        "candidate_commands": 3,
+        "baseline_pose_ubo_uploads": 3,
+        "candidate_pose_ubo_uploads": 2,
+        "baseline_old_uniform_bundle_proxy": 3,
+        "candidate_actual_uniform_bundles": 2,
+        "exact_color_signature_both": "12800217161901728357"
+      },
+      "isolated_cpu_time_delta_ms": null,
+      "isolated_gpu_time_delta_ms": null,
+      "speedup": "not_established"
+    },
+    "integrated_actual_assets_gl": "two complete B/C f8 no-swap MSAA8 pairs and 14 exact image signatures; see baseline_measurements.actual_assets_opengl",
+    "memory_high_water": null,
+    "live_present": null
+  },
+  "regressions": {
+    "final_release_build": {
+      "argv": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe --build build --config Release --parallel 1",
+      "target": "ALL_BUILD",
+      "exit_code": 0
+    },
+    "final_release_suite": {
+      "environment": "HLCLIENT_RUN_WFP_CAPABILITY_TEST=0",
+      "argv": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\ctest.exe --test-dir build -C Release --output-on-failure --parallel 2",
+      "execution": "elevated to permit test temp/junction/secure-receipt filesystem operations",
+      "exit_code": 0,
+      "passed_tests": 4229,
+      "total_tests": 4229,
+      "elapsed_seconds": 412.09,
+      "per_test_skips_or_assertions": "not_recorded_from_full_ctest_summary"
+    },
+    "initial_sandbox_full_ctest": {
+      "exit_code": 1,
+      "aborted_after_approximately_tests": 487,
+      "reason": "sandbox Access denied in test temp/junction/secure-receipt paths",
+      "resolution": "full elevated rerun passed 4229/4229; no production patch for this environment failure"
+    },
+    "focused_release_after_final_production_edit": "covered_by_full_4229_of_4229_Release_CTest; separate final focused count not recorded",
+    "initial_sandbox_debug_build": {
+      "argv": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe --build build --config Debug --target hlclient_tests hlclient_core_api_tests hlclient_server_entity_presentation_tests --parallel 1",
+      "exit_code": 1,
+      "reason": "MSVC C1902 PDB mismatch in sandbox",
+      "resolution": "elevated retry with /p:BuildInParallel=false /nodeReuse:false /verbosity:minimal exited 0"
+    },
+    "debug_build_retry": {
+      "argv": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe --build build --config Debug --target hlclient_tests hlclient_core_api_tests hlclient_server_entity_presentation_tests --parallel 1 -- /p:BuildInParallel=false /nodeReuse:false /verbosity:minimal",
+      "execution": "elevated",
+      "exit_code": 0
+    },
+    "focused_debug_after_final_production_edit": {
+      "hlclient_tests_filter": "[optimization-p1],[optimization-p3],[p2-metadata],[optimization-p5],[optimization-p6]",
+      "hlclient_tests_exit_code": 0,
+      "hlclient_tests_passed_cases": 14,
+      "hlclient_tests_passed_assertions": 624839,
+      "server_entity_presentation_filter": "[optimization-p6]",
+      "server_entity_presentation_exit_code": 0,
+      "server_entity_presentation_passed_cases": 3,
+      "server_entity_presentation_passed_assertions": 179,
+      "debug_core_api_execution": "elevated",
+      "debug_core_api_exit_code": 0,
+      "debug_core_api_total_cases": 529,
+      "debug_core_api_passed_cases": 528,
+      "debug_core_api_skipped_cases": 1,
+      "debug_core_api_skip_reason": "HLCLIENT_SKY_ASSET_ROOT unset",
+      "debug_core_api_passed_assertions": 634397,
+      "debug_core_api_total_assertions": 634397
+    },
+    "core_only_and_alternate": {
+      "build_root": "D:\\DEV\\CPP\\HL-Client-engine\\build-core-acceptance-final-20261020",
+      "configuration": "Release; HLCLIENT_BUILD_GAME_HALFLIFE=OFF; BUILD_TESTING=ON; warnings as errors ON",
+      "build_exit_code": 0,
+      "elevated_core_ctest_passed_total": "2/2",
+      "separate_alternate_module_result": "Release full CTest test 551/4229 passed: Core alternate module receives committed events through the same clock and reset seam; 15 assertions in 1 case"
+    },
+    "architecture_guard": "Release full CTest test 86/4229 hlclient_game_boundary_guard passed; allowed/direct/alias/transitive/generator/source/object/include cases",
+    "null_renderer": "Release full CTest test 4190/4229 hlclient_null_renderer_smoke passed; 2 null-renderer frames",
+    "launcher_no_stock_checkonly": {
+      "no_stock_elevated_ctest_passed_total": "3/3",
+      "initial_sandbox_no_stock_failure": "temp/junction filesystem Access denied; elevated rerun passed",
+      "delivered_launcher_offline_ui_check_exit_code": 0,
+      "delivered_client_version_exit_code": 0,
+      "offline_fake_runner_script": "D:\\DEV\\CPP\\HL-Client-engine\\scripts\\test_h2_manual_launch.ps1",
+      "offline_fake_runner_exit_code": 0,
+      "source_only_checkonly_script": "D:\\DEV\\CPP\\HL-Client-engine\\Start-HLClient-H2-Manual.ps1 -CheckOnly -SourceOnly",
+      "source_only_checkonly_exit_code": 0,
+      "source_only_checkonly_live_steam_files": "explicitly skipped",
+      "live_sessions": 0
+    },
+    "git_diff_check": "git -c diff.ignoreSubmodules=all diff --check: exit 0, no diagnostics",
+    "asan_runtime": "not_run",
+    "skips": {"debug_core_api": "one HLCLIENT_SKY_ASSET_ROOT unset", "full_release_per_test": "not_recorded"},
+    "exact_argv_exit_inventory": "recorded for supplied final Release and Debug build/CTest controls; individual focused test argv and core-only configure argv not supplied"
+  },
+  "user_report": {
+    "attribution": "user_report",
+    "scope": "reported_performance_improvement",
+    "msaa_8x_fps_floor_reported": 90,
+    "msaa_off_fps_reported": "greater_than_100",
+    "controlled_benchmark": false,
+    "original_half_life_parity": "not_established",
+    "guaranteed_100_or_144_fps": false
+  }
+}

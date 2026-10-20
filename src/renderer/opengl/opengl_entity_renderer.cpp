@@ -981,7 +981,9 @@ public:
         const RenderMatrix4& view_projection,
         const std::optional<RenderPointLight>& light,
         std::span<const RenderPointLight> effect_lights,
-        const assets::AssetVector3& light_direction)
+        const assets::AssetVector3& light_direction,
+        const entity_render::StudioRenderPose*& uploaded_pose,
+        bool& pass_constants_uploaded)
     {
         if (command.instance_index >= frame.studio_instances().size()) {
             fail_entity(OpenGlRendererErrorCode::entity_draw_invalid,
@@ -1006,7 +1008,13 @@ public:
             fail_entity(OpenGlRendererErrorCode::entity_draw_invalid,
                 "Studio pose identity does not match its render asset");
         }
-        upload_pose(pose);
+        // The single UBO contains only the last uploaded palette. Pointer
+        // identity is safe here because the frame owns immutable poses for
+        // this synchronous render call; a new render/pass starts uncached.
+        if (uploaded_pose != &pose) {
+            upload_pose(pose);
+            uploaded_pose = &pose;
+        }
         const auto transform = entity_matrix(instance.transform);
         if (!is_finite(transform)) {
             fail_entity(OpenGlRendererErrorCode::entity_draw_invalid,
@@ -1033,38 +1041,45 @@ public:
         }
         glUniform1f(studio_program_.opacity, translucent ? instance.opacity : 1.0F);
         glUniform3f(studio_program_.tint, instance.tint[0], instance.tint[1], instance.tint[2]);
-        glUniformMatrix4fv(studio_program_.view_projection, 1, GL_FALSE,
-            view_projection.values.data());
+        if (!pass_constants_uploaded) {
+            // Camera, pass lighting and effect lights are identical for every
+            // Studio draw in this render() call. Uniforms persist across
+            // glUseProgram switches to the sprite program.
+            glUniformMatrix4fv(studio_program_.view_projection, 1, GL_FALSE,
+                view_projection.values.data());
+            glUniform3f(studio_program_.light_direction,
+                light_direction.x, light_direction.y, light_direction.z);
+            studio_program_.effect_lights.upload(effect_lights);
+            glUniform3f(studio_program_.camera_forward,
+                static_cast<float>(camera.target.x - camera.position.x),
+                static_cast<float>(camera.target.y - camera.position.y),
+                static_cast<float>(camera.target.z - camera.position.z));
+            glUniform3f(studio_program_.camera_up,
+                static_cast<float>(camera.up.x),
+                static_cast<float>(camera.up.y),
+                static_cast<float>(camera.up.z));
+            glUniform3f(studio_program_.camera_position,
+                camera.position.x, camera.position.y, camera.position.z);
+            if (light && valid_render_point_light(*light) && light->intensity > 0.0F) {
+                glUniform3f(studio_program_.point_light_center,
+                    light->center.x, light->center.y, light->center.z);
+                glUniform3f(studio_program_.point_light_color,
+                    light->color[0], light->color[1], light->color[2]);
+                glUniform1f(studio_program_.point_light_radius, light->radius_units);
+                glUniform1f(studio_program_.point_light_intensity, light->intensity);
+            } else {
+                glUniform1f(studio_program_.point_light_radius, 0.0F);
+                glUniform1f(studio_program_.point_light_intensity, 0.0F);
+            }
+            ++statistics_.studio_pass_uniform_upload_count;
+            pass_constants_uploaded = true;
+        }
         glUniformMatrix4fv(studio_program_.entity_transform, 1, GL_FALSE,
             transform.values.data());
         const auto static_light = instance.static_light_rgb.value_or(
             std::array<float,3U>{0.85F,0.85F,0.85F});
         glUniform3f(studio_program_.static_light_rgb,
             static_light[0],static_light[1],static_light[2]);
-        glUniform3f(studio_program_.light_direction,
-            light_direction.x,light_direction.y,light_direction.z);
-        studio_program_.effect_lights.upload(effect_lights);
-        if (light && valid_render_point_light(*light) && light->intensity>0.0F) {
-            glUniform3f(studio_program_.point_light_center,
-                light->center.x,light->center.y,light->center.z);
-            glUniform3f(studio_program_.point_light_color,
-                light->color[0],light->color[1],light->color[2]);
-            glUniform1f(studio_program_.point_light_radius,light->radius_units);
-            glUniform1f(studio_program_.point_light_intensity,light->intensity);
-        } else {
-            glUniform1f(studio_program_.point_light_radius,0.0F);
-            glUniform1f(studio_program_.point_light_intensity,0.0F);
-        }
-        glUniform3f(studio_program_.camera_forward,
-            static_cast<float>(camera.target.x - camera.position.x),
-            static_cast<float>(camera.target.y - camera.position.y),
-            static_cast<float>(camera.target.z - camera.position.z));
-        glUniform3f(studio_program_.camera_up,
-            static_cast<float>(camera.up.x),
-            static_cast<float>(camera.up.y),
-            static_cast<float>(camera.up.z));
-        glUniform3f(studio_program_.camera_position,
-            camera.position.x,camera.position.y,camera.position.z);
         glBindVertexArray(resource.vertex_array.name());
         for (const auto submodel_index : submodels.submodel_indices) {
             if (submodel_index >= asset.submodels().size()) {
@@ -1328,10 +1343,13 @@ public:
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
             glDisable(GL_CULL_FACE);
+            const entity_render::StudioRenderPose* uploaded_pose = nullptr;
+            bool pass_constants_uploaded = false;
             const auto draw = [&](const entity_render::EntityDrawCommand& command) {
                 switch (command.visual_kind) {
                 case entity_render::RuntimeEntityVisualKind::studio_model:
-                    draw_studio(gpu, frame, command, camera, view_projection, light,effect_lights,light_direction);
+                    draw_studio(gpu, frame, command, camera, view_projection, light,
+                        effect_lights, light_direction, uploaded_pose, pass_constants_uploaded);
                     break;
                 case entity_render::RuntimeEntityVisualKind::sprite:
                     draw_sprite(gpu, frame, command, camera, view_projection);

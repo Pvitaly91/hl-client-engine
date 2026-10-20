@@ -12,8 +12,6 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
-#include <unordered_set>
-#include <unordered_map>
 #include <utility>
 
 namespace hlclient::entity_render {
@@ -625,40 +623,76 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             input.unsupported_instances.end(),
             by_entity);
 
-        std::unordered_set<std::uint32_t> entity_numbers;
-        entity_numbers.reserve(candidate_count);
-        const auto retain_entity_number = [&entity_numbers](
-                                            const std::uint32_t number) {
-            return number != 0U && entity_numbers.insert(number).second;
+        struct AttachmentOwner {
+            std::uint32_t entity_number;
+            std::size_t primary_index;
         };
-        std::unordered_set<std::uint32_t> attachment_owners;
-        for (const auto& instance : input.studio_instances) {
-            const bool primary=instance.subinstance_ordinal==0U;
-            const bool attached=instance.subinstance_ordinal==1U &&
-                entity_numbers.contains(instance.entity_number) &&
-                attachment_owners.insert(instance.entity_number).second;
-            if (!(primary ? retain_entity_number(instance.entity_number) : attached)) {
+        // The Studio stream is ordered by entity and ordinal. One primary
+        // followed by at most one child is the only valid repeated ID. Retain
+        // just the child owners needed later for draw grouping; unlike the
+        // former two node-based sets, this allocates once only if a child exists.
+        std::vector<AttachmentOwner> attachment_owners;
+        std::uint32_t primary_number=0U;
+        std::size_t primary_index=0U;
+        bool has_attachment=false;
+        for (std::size_t index=0U;index<input.studio_instances.size();++index) {
+            const auto& instance=input.studio_instances[index];
+            if (instance.subinstance_ordinal==0U && instance.entity_number!=0U &&
+                instance.entity_number!=primary_number) {
+                primary_number=instance.entity_number;
+                primary_index=index;
+                has_attachment=false;
+            } else if (instance.subinstance_ordinal==1U && primary_number!=0U &&
+                instance.entity_number==primary_number && !has_attachment) {
+                if(attachment_owners.empty())
+                    attachment_owners.reserve(input.studio_instances.size()/2U);
+                attachment_owners.push_back({instance.entity_number,primary_index});
+                has_attachment=true;
+            } else {
                 return frame_fail(
                     EntityRenderFrameErrorCode::duplicate_entity_number,
                     instance.entity_number,
                     "Invalid primary/attached Studio instance identity");
             }
         }
+        // Preserve the former error precedence: validate every Studio entry,
+        // then each sprite in sorted order, then each unsupported candidate.
+        // Monotone intersections with the already sorted streams replace the
+        // per-build entity-number hash table, including cross-kind collisions.
+        auto studio_at_sprite=input.studio_instances.begin();
+        std::uint32_t previous_sprite=0U;
         for (const auto& instance : input.sprite_instances) {
-            if (!retain_entity_number(instance.entity_number)) {
+            while(studio_at_sprite!=input.studio_instances.end() &&
+                studio_at_sprite->entity_number<instance.entity_number) ++studio_at_sprite;
+            if(instance.entity_number==0U || instance.entity_number==previous_sprite ||
+                (studio_at_sprite!=input.studio_instances.end() &&
+                    studio_at_sprite->entity_number==instance.entity_number)) {
                 return frame_fail(
                     EntityRenderFrameErrorCode::duplicate_entity_number,
                     instance.entity_number,
                     "Entity number is zero or repeated across frame candidates");
             }
+            previous_sprite=instance.entity_number;
         }
+        auto studio_at_unsupported=input.studio_instances.begin();
+        auto sprite_at_unsupported=input.sprite_instances.begin();
+        std::uint32_t previous_unsupported=0U;
         for (const auto& instance : input.unsupported_instances) {
-            if (!retain_entity_number(instance.entity_number)) {
+            while(studio_at_unsupported!=input.studio_instances.end() &&
+                studio_at_unsupported->entity_number<instance.entity_number) ++studio_at_unsupported;
+            while(sprite_at_unsupported!=input.sprite_instances.end() &&
+                sprite_at_unsupported->entity_number<instance.entity_number) ++sprite_at_unsupported;
+            if(instance.entity_number==0U || instance.entity_number==previous_unsupported ||
+                (studio_at_unsupported!=input.studio_instances.end() &&
+                    studio_at_unsupported->entity_number==instance.entity_number) ||
+                (sprite_at_unsupported!=input.sprite_instances.end() &&
+                    sprite_at_unsupported->entity_number==instance.entity_number)) {
                 return frame_fail(
                     EntityRenderFrameErrorCode::duplicate_entity_number,
                     instance.entity_number,
                     "Entity number is zero or repeated across frame candidates");
             }
+            previous_unsupported=instance.entity_number;
         }
 
         std::vector<EntityDrawCommand> draw_commands;
@@ -871,16 +905,31 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
                 std::nullopt,
                 "Entity draw count exceeds the configured limit");
         }
-        std::unordered_map<std::uint32_t,EntityDrawClass> owner_classes;
-        for(const auto& instance:input.studio_instances)
-            if(instance.subinstance_ordinal==0U && attachment_owners.contains(instance.entity_number))
-                owner_classes.emplace(instance.entity_number,
-                    instance.material_support_status==StudioEntityMaterialSupportStatus::supported_masked ?
-                    EntityDrawClass::studio_masked : EntityDrawClass::studio_opaque);
+        // Resolve each attached pair's effective draw class once, after the
+        // primary's material status is known. The comparator is called many
+        // times per draw; searching attachment owners there made the large
+        // Studio scene slower than the former hash-table implementation.
+        // Zero means an unattached instance, whose own draw class is retained.
+        std::vector<std::uint8_t> attached_grouped_classes;
+        if (!attachment_owners.empty()) {
+            attached_grouped_classes.resize(input.studio_instances.size(), 0U);
+            for (const auto& owner : attachment_owners) {
+                const auto& primary=input.studio_instances[owner.primary_index];
+                const auto grouped=primary.material_support_status==
+                        StudioEntityMaterialSupportStatus::supported_masked
+                    ? std::uint8_t{2U} : std::uint8_t{1U};
+                attached_grouped_classes[owner.primary_index]=grouped;
+                attached_grouped_classes[owner.primary_index+1U]=grouped;
+            }
+        }
         const auto grouped_class=[&](const EntityDrawCommand& command) {
             if(command.visual_kind!=RuntimeEntityVisualKind::studio_model ||
-                !attachment_owners.contains(command.entity_number)) return command.draw_class;
-            return owner_classes.at(command.entity_number);
+                attached_grouped_classes.empty())
+                return command.draw_class;
+            const auto grouped=attached_grouped_classes[command.instance_index];
+            if(grouped==0U) return command.draw_class;
+            return grouped==2U ? EntityDrawClass::studio_masked :
+                EntityDrawClass::studio_opaque;
         };
         std::sort(draw_commands.begin(),
             draw_commands.end(),

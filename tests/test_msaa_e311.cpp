@@ -119,6 +119,36 @@ void require_msaa(const render::opengl::OpenGlRenderer& renderer) {
     }
     REQUIRE(stats.framebuffer_complete);REQUIRE(stats.actual_samples>=2);
 }
+
+std::vector<std::uint8_t> draw_to_custom_color(glfixture::HiddenContext& context,
+        const render::RenderScene& scene,GLenum format=GL_RGBA8) {
+    GLuint framebuffer{},color{};
+    glGenFramebuffers(1,&framebuffer);glGenRenderbuffers(1,&color);
+    REQUIRE(framebuffer);REQUIRE(color);
+    GLint previous_draw{},previous_read{},previous_draw_buffer{},previous_read_buffer{},previous_renderbuffer{};
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&previous_draw);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&previous_read);
+    glGetIntegerv(GL_DRAW_BUFFER0,&previous_draw_buffer);
+    glGetIntegerv(GL_READ_BUFFER,&previous_read_buffer);
+    glGetIntegerv(GL_RENDERBUFFER_BINDING,&previous_renderbuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER,color);
+    glRenderbufferStorage(GL_RENDERBUFFER,format,extent.width,extent.height);
+    glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,color);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);glReadBuffer(GL_COLOR_ATTACHMENT0);
+    REQUIRE(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE);
+    context.renderer().render(scene,extent);
+    std::vector<std::uint8_t> result(static_cast<std::size_t>(extent.width)*extent.height*4U);
+    glReadPixels(0,0,extent.width,extent.height,GL_RGBA,GL_UNSIGNED_BYTE,result.data());
+    CHECK(glGetError()==GL_NO_ERROR);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,static_cast<GLuint>(previous_draw));
+    glDrawBuffer(static_cast<GLenum>(previous_draw_buffer));
+    glBindFramebuffer(GL_READ_FRAMEBUFFER,static_cast<GLuint>(previous_read));
+    glReadBuffer(static_cast<GLenum>(previous_read_buffer));
+    glBindRenderbuffer(GL_RENDERBUFFER,static_cast<GLuint>(previous_renderbuffer));
+    glDeleteRenderbuffers(1,&color);glDeleteFramebuffers(1,&framebuffer);
+    return result;
+}
 }
 
 TEST_CASE("E31.1 MSAA resolves fractional coverage on world diagonals and thin rails", "[e311][msaa][opengl][no-stock]") {
@@ -171,6 +201,177 @@ TEST_CASE("E31.1 MSAA precedes one image adjustment and sharp native HUD", "[e31
     CHECK(pixel(adjusted,25,9)==result);CHECK(pixel(adjusted,25,11)==result);
     CHECK(context->renderer().image_adjustment_statistics().adjusted_frames==1);
     scene.image_adjustments={};CHECK(draw(*context,scene)==off);
+}
+
+TEST_CASE("MSAA adjustment reuses the resolved texture only for a compatible output",
+    "[optimization-p1][msaa][opengl][no-stock]") {
+    auto context=glfixture::try_context(extent.width,extent.height);if(!context)SKIP("OpenGL unavailable");
+    context->initialize_renderer();glDisable(GL_DITHER);
+    auto scene=glfixture::render_scene(glfixture::studio_scene());
+    scene.clear_color={.13F,.29F,.43F,.37F};
+    scene.requested_msaa_samples=8;
+    scene.image_adjustments={.08F,1.7F,1.2F};
+    scene.basic_hud.emplace();
+    scene.basic_hud->rectangles.push_back({12,12,50,18,{.95F,.2F,.1F,.5F}});
+
+    GLint default_draw_fbo{},default_draw_buffer{};
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&default_draw_fbo);
+    glGetIntegerv(GL_DRAW_BUFFER0,&default_draw_buffer);
+    GLint default_samples{},default_encoding{},default_component{};
+    GLint default_red{},default_green{},default_blue{},default_alpha{};
+    glGetIntegerv(GL_SAMPLES,&default_samples);
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+        GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING,&default_encoding);
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+        GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE,&default_component);
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+        GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE,&default_red);
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+        GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE,&default_green);
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+        GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE,&default_blue);
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+        GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE,&default_alpha);
+    const auto default_output=draw(*context,scene);
+    require_msaa(context->renderer());
+    const auto after_default=context->renderer().scene_target_statistics();
+    const auto image_after_default=context->renderer().image_adjustment_statistics();
+    if(after_default.direct_adjustment_frames==0)
+        SKIP("Default back-buffer is not eligible: draw="<<default_draw_fbo
+            <<" buffer="<<default_draw_buffer<<" samples="<<default_samples
+            <<" encoding="<<default_encoding<<" component="<<default_component
+            <<" bits="<<default_red<<'/'<<default_green<<'/'<<default_blue<<'/'<<default_alpha);
+    CHECK(after_default.output_color_blits==0);
+    CHECK(image_after_default.resolved_texture_reads==1);
+    CHECK(image_after_default.framebuffer_color_copies==0);
+    CHECK(image_after_default.active_texture_count==0);
+
+    // The caller-owned RGBA8 FBO forces the legacy blit/copy path. It is an
+    // independent output oracle for the direct default-back-buffer path.
+    const auto legacy_output=draw_to_custom_color(*context,scene);
+    const auto after_legacy=context->renderer().scene_target_statistics();
+    const auto image_after_legacy=context->renderer().image_adjustment_statistics();
+    CHECK(after_legacy.output_color_blits==after_default.output_color_blits+1);
+    CHECK(after_legacy.direct_adjustment_frames==after_default.direct_adjustment_frames);
+    CHECK(image_after_legacy.framebuffer_color_copies==image_after_default.framebuffer_color_copies+1);
+    CHECK(image_after_legacy.resolved_texture_reads==image_after_default.resolved_texture_reads);
+    CHECK(image_after_legacy.active_texture_count==1);
+    REQUIRE(default_output.size()==legacy_output.size());
+    for(std::size_t i=0;i<default_output.size();i+=4) {
+        for(unsigned c=0;c<3;++c)CHECK(default_output[i+c]==legacy_output[i+c]);
+        if(default_alpha==8)CHECK(default_output[i+3]==legacy_output[i+3]);
+    }
+    CHECK(draw(*context,scene)==default_output);
+
+    // A non-8-bit caller attachment must retain the blit/copy fallback; its
+    // 10:10:10:2 quantization is intentionally not compared byte-for-byte
+    // with the default 8-bit output.
+    const auto scene_before_non8=context->renderer().scene_target_statistics();
+    const auto image_before_non8=context->renderer().image_adjustment_statistics();
+    const auto non8_output=draw_to_custom_color(*context,scene,GL_RGB10_A2);
+    CHECK(non8_output.size()==default_output.size());
+    CHECK(maximum_red(non8_output)>0);
+    const auto scene_after_non8=context->renderer().scene_target_statistics();
+    const auto image_after_non8=context->renderer().image_adjustment_statistics();
+    CHECK(scene_after_non8.output_color_blits==scene_before_non8.output_color_blits+1);
+    CHECK(scene_after_non8.direct_adjustment_frames==scene_before_non8.direct_adjustment_frames);
+    CHECK(image_after_non8.framebuffer_color_copies==image_before_non8.framebuffer_color_copies+1);
+    CHECK(image_after_non8.resolved_texture_reads==image_before_non8.resolved_texture_reads);
+
+    // Caller sRGB enable must survive both paths. The image adjustment
+    // itself writes encoded RGB with conversion disabled in either case.
+    scene.basic_hud.reset();
+    glEnable(GL_FRAMEBUFFER_SRGB);
+    const auto direct_with_srgb_enabled=draw(*context,scene);
+    CHECK(glIsEnabled(GL_FRAMEBUFFER_SRGB)==GL_TRUE);
+    const auto legacy_with_srgb_enabled=draw_to_custom_color(*context,scene);
+    CHECK(glIsEnabled(GL_FRAMEBUFFER_SRGB)==GL_TRUE);
+    REQUIRE(direct_with_srgb_enabled.size()==legacy_with_srgb_enabled.size());
+    for(std::size_t i=0;i<direct_with_srgb_enabled.size();i+=4) {
+        for(unsigned c=0;c<3;++c)
+            CHECK(direct_with_srgb_enabled[i+c]==legacy_with_srgb_enabled[i+c]);
+        if(default_alpha==8)
+            CHECK(direct_with_srgb_enabled[i+3]==legacy_with_srgb_enabled[i+3]);
+    }
+    glDisable(GL_FRAMEBUFFER_SRGB);
+}
+
+TEST_CASE("Neutral MSAA and non-MSAA correction retain the legacy copy policy",
+    "[optimization-p1][msaa][opengl][no-stock]") {
+    auto context=glfixture::try_context(extent.width,extent.height);if(!context)SKIP("OpenGL unavailable");
+    context->initialize_renderer();render::RenderScene scene;
+    scene.clear_color={.2F,.3F,.4F,.6F};scene.requested_msaa_samples=8;
+    (void)draw(*context,scene);require_msaa(context->renderer());
+    CHECK(context->renderer().scene_target_statistics().output_color_blits==1);
+    CHECK(context->renderer().scene_target_statistics().direct_adjustment_frames==0);
+    CHECK(context->renderer().image_adjustment_statistics().framebuffer_color_copies==0);
+    scene.requested_msaa_samples=0;scene.image_adjustments={.08F,1.7F,1.2F};
+    (void)draw(*context,scene);
+    CHECK(context->renderer().scene_target_statistics().actual_samples==0);
+    CHECK(context->renderer().scene_target_statistics().direct_adjustment_frames==0);
+    CHECK(context->renderer().image_adjustment_statistics().framebuffer_color_copies==1);
+    CHECK(context->renderer().image_adjustment_statistics().resolved_texture_reads==0);
+}
+
+TEST_CASE("MSAA resolve and adjustment matrix keeps exact fallback pixels and bounded resize state",
+    "[optimization-p1][msaa][opengl][no-stock]") {
+    auto context=glfixture::try_context(extent.width,extent.height);if(!context)SKIP("OpenGL unavailable");
+    context->initialize_renderer();glDisable(GL_DITHER);glDisable(GL_FRAMEBUFFER_SRGB);
+    GLint default_alpha_bits{};
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,GL_BACK_LEFT,
+        GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE,&default_alpha_bits);
+    const auto same_output=[&](const auto& direct,const auto& copied) {
+        if(direct.size()!=copied.size())return false;
+        for(std::size_t i=0;i<direct.size();i+=4) {
+            for(unsigned c=0;c<3;++c)if(direct[i+c]!=copied[i+c])return false;
+            if(default_alpha_bits==8 && direct[i+3]!=copied[i+3])return false;
+        }
+        return true;
+    };
+    auto scene=glfixture::render_scene(glfixture::studio_scene());
+    scene.clear_color={.11F,.23F,.31F,.47F};
+    scene.basic_hud.emplace();
+    scene.basic_hud->rectangles.push_back({7,9,23,19,{.9F,.3F,.1F,.45F}});
+    for(const unsigned requested:{2U,4U,8U}) {
+        DYNAMIC_SECTION("requested samples "<<requested) {
+            scene.requested_msaa_samples=requested;
+            scene.image_adjustments={};
+            const auto image_before_neutral=context->renderer().image_adjustment_statistics();
+            const auto neutral=draw(*context,scene);
+            const auto neutral_stats=context->renderer().scene_target_statistics();
+            if(neutral_stats.actual_samples!=requested) {
+                SKIP("Actual MSAA count unavailable for this mode: "<<requested<<" => "
+                    <<neutral_stats.actual_samples<<" ("<<render::opengl::to_string(
+                        neutral_stats.fallback_reason)<<')');
+            }
+            CHECK(neutral_stats.output_color_blits>0);
+            CHECK(neutral_stats.direct_adjustment_frames==0);
+            const auto neutral_custom=draw_to_custom_color(*context,scene);
+            CHECK(same_output(neutral,neutral_custom));
+            CHECK(context->renderer().image_adjustment_statistics().framebuffer_color_copies==
+                  image_before_neutral.framebuffer_color_copies);
+
+            scene.image_adjustments={.08F,1.7F,1.2F};
+            const auto adjusted_default=draw(*context,scene);
+            const auto adjusted_stats=context->renderer().scene_target_statistics();
+            if(adjusted_stats.direct_adjustment_frames==neutral_stats.direct_adjustment_frames)
+                SKIP("Default back buffer is not eligible for a direct adjustment");
+            CHECK(adjusted_stats.output_color_blits==neutral_stats.output_color_blits+1);
+            const auto image_before_custom=context->renderer().image_adjustment_statistics();
+            CHECK(image_before_custom.framebuffer_color_copies==image_before_neutral.framebuffer_color_copies);
+            CHECK(image_before_custom.resolved_texture_reads==image_before_neutral.resolved_texture_reads+1);
+            const auto adjusted_custom=draw_to_custom_color(*context,scene);
+            CHECK(same_output(adjusted_default,adjusted_custom)); // RGB and available alpha, all pixels
+            const auto image_after_custom=context->renderer().image_adjustment_statistics();
+            CHECK(image_after_custom.framebuffer_color_copies==image_before_custom.framebuffer_color_copies+1);
+
+            (void)draw(*context,scene,{240,180});
+            const auto resized=context->renderer().scene_target_statistics();
+            CHECK(resized.scene_extent==render::RenderExtent{240,180});
+            CHECK(resized.actual_samples==requested);
+            CHECK(draw(*context,scene)==adjusted_default);
+        }
+    }
 }
 
 TEST_CASE("E31.1 scene sample settings and resizes keep bounded resources and native extents", "[e311][msaa][opengl][no-stock]") {

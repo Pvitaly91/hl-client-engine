@@ -382,6 +382,10 @@ public:
   }
   [[nodiscard]] std::optional<game_api::LocalWeaponModelMetadata>
   presentation_model(std::uint64_t generation, std::uint32_t model_index);
+  // The normal per-frame reader retains immutable metadata without copying its
+  // nested sequences/events. The handle owns the value beyond this asset owner.
+  [[nodiscard]] game_api::LocalWeaponModelHandle
+  presentation_model_handle(std::uint64_t generation, std::uint32_t model_index);
   // Immutable, retained metadata from an already approved/imported Studio slot.
   // No asset I/O or mutable engine state escapes this read view.
   [[nodiscard]] std::shared_ptr<const assets::SkeletalModelAssetData>
@@ -458,7 +462,7 @@ private:
   MuzzleSpriteStatistics muzzle_sprite_stats_;
   std::uint64_t muzzle_sprite_frame_revision_{};
   goldsrc::studio::StudioBoneMergeCache bone_merge_cache_;
-  std::map<std::uint32_t, game_api::LocalWeaponModelMetadata> presentation_models_;
+  std::map<std::uint32_t, game_api::LocalWeaponModelHandle> presentation_models_;
   std::uint32_t maximum_clients_{};
   std::shared_ptr<const client::RuntimeClientObservationState> previous_entities_, current_entities_;
   // Derived only from the validated, sorted authoritative source. Commit with

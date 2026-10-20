@@ -17,8 +17,10 @@
 #include <cmath>
 #include <memory>
 #include <limits>
+#include <iostream>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -687,7 +689,9 @@ TEST_CASE("OpenGL Studio entities share uploads and update bounded poses",
     CHECK(first_statistics.sprite_asset_upload_count == 0U);
     CHECK(first_statistics.entity_frame_revision == 1U);
     CHECK(first_statistics.studio_draw_count > 0U);
-    CHECK(first_statistics.pose_ubo_update_count >= 2U);
+    // Both visible Studio instances borrow the same frame-owned pose. The
+    // second draw must reuse the palette already in the single pose UBO.
+    CHECK(first_statistics.pose_ubo_update_count == 1U);
     CHECK(first_statistics.visible_entity_count == 2U);
     CHECK(context->renderer().statistics().upload_count == 1U);
     CHECK(fixture::has_non_clear_pixel(first_pixels,
@@ -723,6 +727,122 @@ TEST_CASE("OpenGL Studio entities share uploads and update bounded poses",
               .entity_resource_release_count == 1U);
     CHECK(context->renderer().statistics().upload_count == 1U);
     CHECK_FALSE(context->renderer().statistics().active_world_resources);
+    context->release_renderer();
+}
+
+TEST_CASE("Studio pose UBO reuses only the immediately resident palette",
+    "[optimization-p6][renderer][opengl][studio][actual-context][no-stock]")
+{
+    auto context = fixture::try_context();
+    if (!context || !fixture::capable_context())
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    const auto package = studio_blend_package();
+    const auto make_scene = [&](const std::uint64_t revision,
+                                const std::array<std::uint32_t, 3U> pose_indices) {
+        std::array<entity::StudioEntityRenderInstance, 3U> instances{
+            studio_blend_instance(1U, 4.0F, entity::StudioBlendMode::opaque, 1.0F),
+            studio_blend_instance(2U, 5.0F, entity::StudioBlendMode::opaque, 1.0F),
+            studio_blend_instance(3U, 6.0F, entity::StudioBlendMode::opaque, 1.0F),
+        };
+        for (std::size_t i = 0U; i < instances.size(); ++i)
+            instances[i].pose_index = pose_indices[i];
+        auto input = studio_blend_input(*package, {instances.data(), instances.size()});
+        input.resource_revision = revision;
+        input.interpolation = {0.5, 0.0, 1.0, 0.5F, revision, revision + 1U,
+            entity::EntityRenderInterpolationProfile::synthetic_seconds_v1};
+        auto moved_bone = fixture::pose_matrix();
+        moved_bone[13U] = 1.0F;
+        input.studio_poses.push_back({package->studio_assets()[0U]->source_identity(),
+            {moved_bone, fixture::pose_matrix()}});
+        auto built = entity::EntityRenderFrameBuilder{}.build(*package, std::move(input));
+        INFO((built.error ? built.error->context : std::string{}));
+        REQUIRE(built);
+        const fixture::SceneAndFrame entities{package,
+            std::make_shared<const entity::EntityRenderFrame>(std::move(*built.frame))};
+        REQUIRE(entities.frame->draw_commands().size() == 3U);
+        auto scene = fixture::render_scene(entities);
+        scene.camera.position = {};
+        scene.camera.target = {1.0F, 0.0F, 0.0F};
+        return scene;
+    };
+
+    const auto aba = make_scene(1U, {0U, 1U, 0U});
+    context->renderer().render(aba, {96, 96});
+    const auto after_aba = context->renderer().entity_statistics();
+    CHECK(after_aba.pose_ubo_update_count == 3U);
+    CHECK(after_aba.studio_pass_uniform_upload_count == 1U);
+    CHECK(after_aba.studio_draw_count == 3U);
+    CHECK(fixture::has_non_clear_pixel(fixture::framebuffer(),
+        {std::byte{5U}, std::byte{8U}, std::byte{10U}, std::byte{255U}}));
+
+    const auto aab = make_scene(2U, {0U, 0U, 1U});
+    REQUIRE(aba.dynamic_entities->frame->frame_signature() !=
+        aab.dynamic_entities->frame->frame_signature());
+    context->renderer().render(aab, {96, 96});
+    const auto after_aab = context->renderer().entity_statistics();
+    // Even though both pose objects were seen in the previous frame, only
+    // adjacent A/A draws may share the current single UBO contents.
+    CHECK(after_aab.pose_ubo_update_count - after_aba.pose_ubo_update_count == 2U);
+    CHECK(after_aab.studio_pass_uniform_upload_count -
+        after_aba.studio_pass_uniform_upload_count == 1U);
+    CHECK(after_aab.studio_draw_count - after_aba.studio_draw_count == 3U);
+    CHECK(glGetError() == GL_NO_ERROR);
+    context->release_renderer();
+}
+
+TEST_CASE("Studio pass constants and pose residency reset for camera passes and sessions",
+    "[optimization-p6][renderer][opengl][studio][actual-context][no-stock]")
+{
+    auto context = fixture::try_context();
+    if (!context || !fixture::capable_context())
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    const auto entities = fixture::studio_scene();
+    auto scene = fixture::render_scene(entities);
+    scene.first_person_entities = scene.dynamic_entities;
+    context->renderer().render(scene, {96, 96});
+    CHECK(context->renderer().entity_statistics().pose_ubo_update_count == 2U);
+    CHECK(context->renderer().entity_statistics().studio_pass_uniform_upload_count == 2U);
+
+    scene.first_person_entities.reset();
+    context->renderer().render(scene, {96, 96});
+    CHECK(context->renderer().entity_statistics().pose_ubo_update_count == 3U);
+    CHECK(context->renderer().entity_statistics().studio_pass_uniform_upload_count == 3U);
+    const auto world_only_pixels = fixture::framebuffer();
+    context->renderer().reset_session_resources();
+    context->renderer().render(scene, {96, 96});
+    CHECK(context->renderer().entity_statistics().pose_ubo_update_count == 1U);
+    CHECK(context->renderer().entity_statistics().studio_pass_uniform_upload_count == 1U);
+    CHECK(context->renderer().entity_statistics().studio_asset_upload_count == 1U);
+    CHECK(fixture::framebuffer() == world_only_pixels);
+
+    // Same effect-light count with different contents must not reuse stale
+    // per-pass uniforms. The established lighting fixture provides a stable
+    // center pixel with zero static light and one world effect light.
+    context->renderer().reset_session_resources();
+    const auto light_package = studio_surface_package({0.0F, 0.0F, 1.0F});
+    const auto light_scene = [&](const std::uint64_t revision,
+                                 const std::array<float, 3U> effect_color) {
+        auto result = studio_surface_scene(light_package, revision,
+            std::array<float, 3U>{0.0F, 0.0F, 0.0F});
+        result.transient_world_light = renderer::RenderPointLight{
+            {4.0F, 0.0F, 0.0F}, 1000.0F, 0.2F, {1.0F, 0.0F, 0.0F}};
+        result.world_effect_lights[0U] = renderer::RenderPointLight{
+            {4.0F, 0.0F, 0.0F}, 1000.0F, 0.3F, effect_color};
+        result.world_effect_light_count = 1U;
+        return result;
+    };
+    const auto green = studio_surface_pixel(*context,
+        light_scene(2U, {0.0F, 1.0F, 0.0F}));
+    const auto blue = studio_surface_pixel(*context,
+        light_scene(3U, {0.0F, 0.0F, 1.0F}));
+    const auto green_again = studio_surface_pixel(*context,
+        light_scene(4U, {0.0F, 1.0F, 0.0F}));
+    CHECK(green[1U] > blue[1U]);
+    CHECK(blue[2U] > green[2U]);
+    CHECK(green_again == green);
+    CHECK(glGetError() == GL_NO_ERROR);
     context->release_renderer();
 }
 
@@ -1386,6 +1506,114 @@ TEST_CASE("OpenGL Studio translucency sorts by camera depth after opaque geometr
         entity::StudioBlendMode::opaque, 1.0F);
     scene = studio_blend_scene(package, {front, back, opaque_front});
     check_studio_surface_pixel(studio_surface_pixel(*context, scene), {200, 160, 100});
+    context->release_renderer();
+}
+
+// The same test-only source is compiled against clean 43ad240 and the
+// candidate.  The baseline has no pass-bundle counter, so the dependent probe
+// keeps its API clean while retaining an exact pose-upload and pixel oracle.
+TEST_CASE("P6 dual-binary Studio submission counts preserve exact pixels",
+    "[optimization-p6][dual-binary][renderer][opengl][studio][actual-context][no-stock]")
+{
+    auto context = fixture::try_context();
+    if (!context || !fixture::capable_context())
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+
+    const auto package = studio_blend_package();
+    const std::array world_instances{
+        studio_blend_instance(1U, 4.0F, entity::StudioBlendMode::opaque, 1.0F),
+        studio_blend_instance(2U, 6.0F, entity::StudioBlendMode::opaque, 1.0F)};
+    auto world_built = entity::EntityRenderFrameBuilder{}.build(*package,
+        studio_blend_input(*package,
+            {world_instances.data(), world_instances.size()}));
+    REQUIRE(world_built);
+    const fixture::SceneAndFrame entities{package,
+        std::make_shared<const entity::EntityRenderFrame>(
+            std::move(*world_built.frame))};
+    REQUIRE(entities.frame->draw_commands().size() == 2U);
+    auto viewmodel_instance = studio_blend_instance(1U, 4.0F,
+        entity::StudioBlendMode::opaque, 1.0F, {0.25F, 1.0F, 0.25F});
+    viewmodel_instance.transform.origin.y = 2.0F;
+    auto viewmodel_input = studio_blend_input(*package,
+        {&viewmodel_instance, 1U});
+    viewmodel_input.resource_revision = 2U;
+    auto viewmodel_built = entity::EntityRenderFrameBuilder{}.build(
+        *package, std::move(viewmodel_input));
+    REQUIRE(viewmodel_built);
+    const fixture::SceneAndFrame viewmodel_entities{package,
+        std::make_shared<const entity::EntityRenderFrame>(
+            std::move(*viewmodel_built.frame))};
+    REQUIRE(viewmodel_entities.frame->draw_commands().size() == 1U);
+    const auto viewmodel_scene = fixture::render_scene(viewmodel_entities);
+    constexpr renderer::RenderExtent extent{96, 96};
+    const auto pass_bundle_delta = []<typename Statistics>(
+                                       const Statistics& before,
+                                       const Statistics& after)
+        -> std::optional<std::uint64_t> {
+        if constexpr (requires(const Statistics& value) {
+                          value.studio_pass_uniform_upload_count;
+                      }) {
+            return after.studio_pass_uniform_upload_count -
+                before.studio_pass_uniform_upload_count;
+        } else {
+            return std::nullopt;
+        }
+    };
+    const auto exercise = [&](const std::string_view label,
+                              const bool include_viewmodel,
+                              const std::uint64_t expected_draws,
+                              const std::uint64_t expected_commands,
+                              const std::uint64_t baseline_pose_uploads,
+                              const std::uint64_t candidate_pose_uploads,
+                              const std::uint64_t candidate_pass_bundles) {
+        auto scene = fixture::render_scene(entities);
+        scene.camera.position = {};
+        scene.camera.target = {1.0F, 0.0F, 0.0F};
+        if (include_viewmodel)
+            scene.first_person_entities = viewmodel_scene.dynamic_entities;
+        const auto before = context->renderer().entity_statistics();
+        context->renderer().render(scene, extent);
+        const auto pixels = context->renderer().observe_framebuffer(
+            extent, scene.clear_color);
+        REQUIRE(pixels);
+        REQUIRE(pixels.non_clear_pixel_count > 0U);
+        const auto after = context->renderer().entity_statistics();
+        const auto draws = after.studio_draw_count - before.studio_draw_count;
+        const auto poses = after.pose_ubo_update_count - before.pose_ubo_update_count;
+        const auto bundles = pass_bundle_delta(before, after);
+        CHECK(draws == expected_draws);
+        if (bundles) {
+            CHECK(poses == candidate_pose_uploads);
+            CHECK(*bundles == candidate_pass_bundles);
+        } else {
+            CHECK(poses == baseline_pose_uploads);
+        }
+        std::cout << "[p6-dual-binary] {\"scene\":\"" << label
+                  << "\",\"implementation\":\""
+                  << (bundles ? "candidate" : "clean_baseline")
+                  << "\",\"studio_draws\":" << draws
+                  << ",\"studio_commands\":" << expected_commands
+                  << ",\"pose_ubo_uploads\":" << poses
+                  << ",\"pass_constant_bundles\":";
+        if (bundles) std::cout << *bundles;
+        else std::cout << "null";
+        std::cout << ",\"pass_constant_bundle_proxy\":"
+                  << (bundles ? *bundles : expected_commands)
+                  << ",\"color_signature\":" << pixels.color_signature
+                  << ",\"non_clear_pixels\":" << pixels.non_clear_pixel_count
+                  << "}\n";
+        return pixels.color_signature;
+    };
+
+    const auto shared_pose = exercise(
+        "shared_pose_world", false, 2U, 2U, 2U, 1U, 1U);
+    const auto world_viewmodel = exercise(
+        "shared_pose_world_then_viewmodel", true, 3U, 3U, 3U, 2U, 2U);
+    CHECK(shared_pose != 0U);
+    CHECK(world_viewmodel != 0U);
+    CHECK(world_viewmodel != shared_pose);
+    CHECK(glGetError() == GL_NO_ERROR);
     context->release_renderer();
 }
 

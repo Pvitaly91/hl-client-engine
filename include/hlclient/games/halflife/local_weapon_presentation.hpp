@@ -32,6 +32,9 @@ public:
   [[nodiscard]] std::optional<LocalWeaponModelMetadata> satchel_presentation_model() const {
     return satchel_selected_ ? model_ : std::nullopt;
   }
+  [[nodiscard]] const LocalWeaponModelMetadata* satchel_presentation_model_view() const noexcept {
+    return satchel_selected_ && model_ ? &*model_ : nullptr;
+  }
   [[nodiscard]] bool satchel_waiting_retirement() const noexcept { return satchel_selected_ && satchel_.retired; }
   void observe(const client::RuntimeClientObservationState&, double now_seconds);
   void submit(const LocalWeaponSubmittedCommand&, double now_seconds);

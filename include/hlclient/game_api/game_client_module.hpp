@@ -247,6 +247,15 @@ public:
         const client::RuntimeClientObservationState&,
         std::optional<LocalWeaponModelMetadata>, double,
         std::optional<LocalWeaponVisual>) = 0;
+    // Borrowed only for this synchronous call. Legacy/alternate modules retain
+    // their value API; the normal Half-Life module reads without a deep copy.
+    [[nodiscard]] virtual ViewmodelIntent viewmodel_borrowed(
+        const client::RuntimeClientObservationState& state,
+        const LocalWeaponModelMetadata* model, double time,
+        std::optional<LocalWeaponVisual> visual) {
+        return viewmodel(state, model ? std::optional<LocalWeaponModelMetadata>{*model} :
+            std::nullopt, time, visual);
+    }
     [[nodiscard]] virtual HudState hud(const client::RuntimeClientObservationState&, double) = 0;
     virtual void set_hud_context(HudPresentationContext) noexcept {}
     [[nodiscard]] virtual std::span<const HudManifestRequest> hud_resource_preparation() const noexcept { return {}; }

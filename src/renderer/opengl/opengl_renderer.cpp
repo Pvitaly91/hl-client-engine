@@ -272,6 +272,33 @@ private:
     std::array<GLint,4> scissor_box_{};
 };
 
+// One state snapshot for all contiguous world-transient runs in a frame.
+// Unlike the old per-quad path this also restores bindings after an error.
+class TransientBatchGlStateGuard final {
+public:
+    TransientBatchGlStateGuard() {
+        cull_=glIsEnabled(GL_CULL_FACE);blend_=glIsEnabled(GL_BLEND);
+        glGetBooleanv(GL_DEPTH_WRITEMASK,&depth_write_);
+        glGetIntegerv(GL_BLEND_SRC_RGB,&src_rgb_);glGetIntegerv(GL_BLEND_DST_RGB,&dst_rgb_);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA,&src_alpha_);glGetIntegerv(GL_BLEND_DST_ALPHA,&dst_alpha_);
+        glGetIntegerv(GL_CURRENT_PROGRAM,&program_);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING,&array_);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING,&buffer_);
+    }
+    ~TransientBatchGlStateGuard() noexcept {
+        glBindBuffer(GL_ARRAY_BUFFER,static_cast<GLuint>(buffer_));
+        glBindVertexArray(static_cast<GLuint>(array_));
+        glUseProgram(static_cast<GLuint>(program_));
+        glBlendFuncSeparate(src_rgb_,dst_rgb_,src_alpha_,dst_alpha_);
+        if(blend_)glEnable(GL_BLEND);else glDisable(GL_BLEND);
+        glDepthMask(depth_write_);
+        if(cull_)glEnable(GL_CULL_FACE);else glDisable(GL_CULL_FACE);
+    }
+private:
+    GLboolean cull_{},blend_{},depth_write_{};
+    GLint src_rgb_{},dst_rgb_{},src_alpha_{},dst_alpha_{},program_{},array_{},buffer_{};
+};
+
 // Extra state touched by the scene-color copy. The existing HUD state guard
 // already owns program/VAO, texture/sampler, blend/depth/cull and pixel unpack.
 class ImageCopyGlStateGuard final {
@@ -1377,6 +1404,9 @@ void main() {
         hud_textures_.clear();hud_vertices_.clear();hud_batches_.clear();
         hud_commands_.reset();hud_extent_={};hud_cache_clock_=0;hud_statistics_={};
         sky_asset_.reset();sky_texture_.reset();
+        flash_batch_vertices_.clear();flash_batch_gpu_cursor_=0;
+        flash_batch_gpu_orphaned_this_frame_=false;
+        flash_batch_frame_vertex_capacity_=0;
         image_texture_.reset();image_program_.reset();image_array_.reset();
         image_adjustments_=-1;image_extent_={};image_statistics_={};
         scene_target.reset_session_resources();
@@ -1582,7 +1612,8 @@ void main() {
         gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::invalid;return false;
     }
     const OpenGlGpuTimingStatistics& gpu_timing_statistics() const noexcept {return gpu_timing_;}
-    void adjust_image(const core::ImageAdjustments& settings, const RenderExtent extent) {
+    void adjust_image(const core::ImageAdjustments& settings,const RenderExtent extent,
+        const std::optional<detail::SceneTarget::ResolvedColorInput>& resolved_color) {
         image_statistics_.last_extent=extent;
         if(settings==core::ImageAdjustments{}) {
             ++image_statistics_.neutral_frames;
@@ -1626,34 +1657,45 @@ void main() {
                 fail(OpenGlRendererErrorCode::program_link_failed,"Scene color uniforms unavailable");
             glUseProgram(name);glUniform1i(sampler,0);
             image_array_=create_vertex_array();
-            image_texture_=create_texture(OpenGlRendererErrorCode::texture_upload_failed,"Scene color copy texture");
             image_program_=std::move(program);
-            image_statistics_.active_texture_count=1;
         }
         glActiveTexture(GL_TEXTURE0);glBindSampler(0,0);
-        glBindTexture(GL_TEXTURE_2D,image_texture_.name());
-        if(image_extent_!=extent) {
-            GLint maximum{};glGetIntegerv(GL_MAX_TEXTURE_SIZE,&maximum);
-            if(extent.width>maximum || extent.height>maximum ||
-                static_cast<std::uint64_t>(extent.width)*static_cast<std::uint64_t>(extent.height)>32U*1024U*1024U)
-                fail(OpenGlRendererErrorCode::texture_upload_failed,"Scene color framebuffer exceeds bounded texture size");
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0);
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,0);
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,0);
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
-            glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,extent.width,extent.height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
-            require_no_gl_error(OpenGlRendererErrorCode::texture_upload_failed,"Scene color storage resize");
-            image_extent_=extent;++image_statistics_.storage_reallocations;
+        if(resolved_color) {
+            // The scene target owns this immutable-in-frame RGBA8 input; the
+            // caller output is bound only as a draw destination, never read.
+            if(resolved_color->extent!=extent || !resolved_color->texture)
+                fail(OpenGlRendererErrorCode::gl_operation_failed,"Resolved scene color input is invalid");
+            glBindTexture(GL_TEXTURE_2D,resolved_color->texture);
+        } else {
+            if(!image_texture_.name()) {
+                image_texture_=create_texture(OpenGlRendererErrorCode::texture_upload_failed,
+                    "Scene color copy texture");
+                image_statistics_.active_texture_count=1;
+            }
+            glBindTexture(GL_TEXTURE_2D,image_texture_.name());
+            if(image_extent_!=extent) {
+                GLint maximum{};glGetIntegerv(GL_MAX_TEXTURE_SIZE,&maximum);
+                if(extent.width>maximum || extent.height>maximum ||
+                    static_cast<std::uint64_t>(extent.width)*static_cast<std::uint64_t>(extent.height)>32U*1024U*1024U)
+                    fail(OpenGlRendererErrorCode::texture_upload_failed,"Scene color framebuffer exceeds bounded texture size");
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,0);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,0);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,extent.width,extent.height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+                require_no_gl_error(OpenGlRendererErrorCode::texture_upload_failed,"Scene color storage resize");
+                image_extent_=extent;++image_statistics_.storage_reallocations;
+            }
+            GLint draw_framebuffer{},draw_buffer{};
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&draw_framebuffer);
+            glGetIntegerv(GL_DRAW_BUFFER0,&draw_buffer);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER,static_cast<GLuint>(draw_framebuffer));
+            glReadBuffer(static_cast<GLenum>(draw_buffer));
+            glCopyTexSubImage2D(GL_TEXTURE_2D,0,0,0,0,0,extent.width,extent.height);
         }
-        GLint draw_framebuffer{},draw_buffer{};
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&draw_framebuffer);
-        glGetIntegerv(GL_DRAW_BUFFER0,&draw_buffer);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER,static_cast<GLuint>(draw_framebuffer));
-        glReadBuffer(static_cast<GLenum>(draw_buffer));
-        glCopyTexSubImage2D(GL_TEXTURE_2D,0,0,0,0,0,extent.width,extent.height);
         glDisable(GL_FRAMEBUFFER_SRGB);glDisable(GL_STENCIL_TEST);
         glDisable(GL_DEPTH_TEST);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);glDisable(GL_SCISSOR_TEST);
         glDepthMask(GL_FALSE);glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
@@ -1662,6 +1704,8 @@ void main() {
         glDrawArrays(GL_TRIANGLES,0,3);
         require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Scene color adjustment pass");
         ++image_statistics_.adjusted_frames;
+        if(resolved_color)++image_statistics_.resolved_texture_reads;
+        else ++image_statistics_.framebuffer_color_copies;
     }
     void begin_decals() noexcept {
         ++decal_frame_serial_;
@@ -1886,18 +1930,23 @@ void main(){
         decal_sampler_=glGetUniformLocation(name,"decal_texture");
         decal_material_mode_=glGetUniformLocation(name,"material_mode");
     }
+    [[nodiscard]] static bool valid_flash(const RenderMuzzleFlash& flash,
+                                          const float head_taper_fraction) noexcept {
+        const auto& p=flash.center;
+        return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z)&&
+            std::isfinite(flash.radius_units)&&flash.radius_units>0.0F&&
+            flash.radius_units<=16.0F&&std::isfinite(head_taper_fraction)&&
+            head_taper_fraction>=0&&head_taper_fraction<=1&&
+            std::none_of(flash.color.begin(),flash.color.end(),[](float c){
+                return !std::isfinite(c)||c<0.0F||c>1.0F;
+            });
+    }
     void render_flash(const RenderMuzzleFlash& flash, const RenderMatrix4& view_projection,
                       assets::AssetVector3 right={0,1,0}, assets::AssetVector3 up={0,0,1},
                       int shape=0, float head_taper_fraction=0)
     {
+        if (!valid_flash(flash,head_taper_fraction)) return;
         const auto& p=flash.center;
-        if (!std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z)||
-            !std::isfinite(flash.radius_units)||flash.radius_units<=0.0F||
-            flash.radius_units>16.0F || !std::isfinite(head_taper_fraction) ||
-            head_taper_fraction<0 || head_taper_fraction>1 ||
-            std::any_of(flash.color.begin(),flash.color.end(),[](float c){
-                return !std::isfinite(c)||c<0.0F||c>1.0F;
-            })) return;
         if (!flash_program_.name()) create_flash_program();
         const float r=flash.radius_units;
         // Camera-local +X forward: billboard in YZ at the evaluated Studio
@@ -1945,8 +1994,7 @@ void main(){
     }
 
     void render_solid_line(const RenderWorldLine& line,const RenderMatrix4& matrix,
-                           assets::AssetVector3 eye) {
-        const auto mesh=solid_line_mesh(line);
+                           assets::AssetVector3 eye,const RenderLineMesh& mesh) {
         if(!mesh.vertex_count || !is_finite(eye)) return;
         if(!solid_line_program_.name()) create_solid_line_program();
         glBindBuffer(GL_ARRAY_BUFFER,solid_line_buffer_.name());
@@ -2027,8 +2075,167 @@ void main(){
         require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Solid line GPU initialization");
     }
 
+    struct FlashBatchVertex {
+        float x,y,z,u,v,r,g,b,a,shape,taper;
+    };
+    static_assert(sizeof(FlashBatchVertex)==11*sizeof(float));
+    static constexpr std::size_t kMaximumFlashBatchVertices=(32U+256U+64U)*6U;
+
+    [[nodiscard]] static std::size_t valid_world_flash_quads(const RenderScene& scene) {
+        std::size_t quads{};
+        for(std::size_t i=0;i<std::min(scene.world_flash_count,scene.world_flashes.size());++i)
+            quads+=valid_flash(scene.world_flashes[i],0.0F);
+        for(std::size_t i=0;i<std::min(scene.world_particle_count,scene.world_particles.size());++i) {
+            const auto& particle=scene.world_particles[i];
+            quads+=valid_flash({particle.center,particle.radius_units,particle.color},0.0F);
+        }
+        for(std::size_t i=0;i<std::min(scene.world_line_count,scene.world_lines.size());++i) {
+            const auto& line=scene.world_lines[i];
+            if(line.geometry!=game_api::WorldLineGeometry::flat_billboard ||
+               !std::isfinite(line.emission_gain) || line.emission_gain<0 || line.emission_gain>4)
+                continue;
+            const auto axis=assets::AssetVector3{(line.end.x-line.start.x)*0.5F,
+                (line.end.y-line.start.y)*0.5F,(line.end.z-line.start.z)*0.5F};
+            const auto n=std::hypot(axis.x,axis.y,axis.z);
+            if(!std::isfinite(n)||n<0.001F||n>5000 || !std::isfinite(line.width_units)||
+               line.width_units<=0 || line.width_units>4 || !std::isfinite(line.head_taper_fraction)||
+               line.head_taper_fraction<0 || line.head_taper_fraction>1)continue;
+            const RenderMuzzleFlash flash{{(line.start.x+line.end.x)*0.5F,
+                (line.start.y+line.end.y)*0.5F,(line.start.z+line.end.z)*0.5F},
+                1.0F,line.color};
+            quads+=valid_flash(flash,line.head_taper_fraction);
+        }
+        return quads;
+    }
+
+    void append_flash_batch(const RenderMuzzleFlash& flash,assets::AssetVector3 right,
+                            assets::AssetVector3 up,int shape,float taper) {
+        if(!valid_flash(flash,taper))return;
+        constexpr std::array<std::array<float,2>,6> corners{{
+            {-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}}};
+        const auto& p=flash.center;
+        const float radius=flash.radius_units;
+        for(const auto& corner:corners) {
+            const float x=corner[0],y=corner[1];
+            flash_batch_vertices_.push_back({
+                p.x+radius*(right.x*x+up.x*y),
+                p.y+radius*(right.y*x+up.y*y),
+                p.z+radius*(right.z*x+up.z*y),
+                x,y,flash.color[0],flash.color[1],flash.color[2],flash.color[3],
+                static_cast<float>(shape),taper});
+        }
+    }
+
+    void draw_flash_batch(const RenderMatrix4& matrix,bool alpha_blend) {
+        if(flash_batch_vertices_.empty())return;
+        if(!flash_batch_program_.name())create_flash_batch_program();
+        glBindBuffer(GL_ARRAY_BUFFER,flash_batch_buffer_.name());
+        if(!flash_batch_gpu_orphaned_this_frame_) {
+            // The one bounded storage orphan for this nonempty frame avoids a
+            // driver wait when a prior frame still reads the same buffer.
+            const auto storage_bytes=flash_batch_frame_vertex_capacity_*sizeof(FlashBatchVertex);
+            glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(storage_bytes),nullptr,GL_DYNAMIC_DRAW);
+            require_no_gl_error(OpenGlRendererErrorCode::buffer_upload_failed,
+                                "World transient batch allocation");
+            flash_batch_gpu_orphaned_this_frame_=true;
+            ++statistics_.transient_flash_storage_orphan_count;
+            statistics_.transient_flash_storage_bytes_high_water=std::max(
+                statistics_.transient_flash_storage_bytes_high_water,storage_bytes);
+        }
+        const auto bytes=static_cast<GLsizeiptr>(flash_batch_vertices_.size()*sizeof(FlashBatchVertex));
+        const auto first=flash_batch_gpu_cursor_;
+        if(first+flash_batch_vertices_.size()>flash_batch_frame_vertex_capacity_)
+            fail(OpenGlRendererErrorCode::buffer_upload_failed,
+                 "World transient batch exceeds its finite scene capacity");
+        glBufferSubData(GL_ARRAY_BUFFER,static_cast<GLintptr>(first*sizeof(FlashBatchVertex)),
+                        bytes,flash_batch_vertices_.data());
+        require_no_gl_error(OpenGlRendererErrorCode::buffer_upload_failed,
+                            "World transient batch upload");
+        glDisable(GL_CULL_FACE);glDepthMask(GL_FALSE);glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA,alpha_blend?GL_ONE_MINUS_SRC_ALPHA:GL_ONE);
+        glUseProgram(flash_batch_program_.name());
+        glUniformMatrix4fv(flash_batch_matrix_,1,GL_FALSE,matrix.values.data());
+        glBindVertexArray(flash_batch_array_.name());
+        glDrawArrays(GL_TRIANGLES,static_cast<GLint>(first),
+                     static_cast<GLsizei>(flash_batch_vertices_.size()));
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+                            "World transient batch draw");
+        ++statistics_.transient_flash_upload_count;
+        ++statistics_.transient_flash_draw_count;
+        statistics_.transient_flash_quad_count+=flash_batch_vertices_.size()/6U;
+        flash_batch_gpu_cursor_+=flash_batch_vertices_.size();
+        flash_batch_vertices_.clear();
+    }
+
+    void create_flash_batch_program() {
+        constexpr char vertex_source[]=R"GLSL(#version 330 core
+layout(location=0) in vec3 p;
+layout(location=1) in vec2 uv;
+layout(location=2) in vec4 color;
+layout(location=3) in float shape;
+layout(location=4) in float taper;
+uniform mat4 view_projection;
+out vec2 offset;
+flat out vec4 tint;
+flat out float soft_particle;
+flat out float head_taper_fraction;
+void main(){gl_Position=view_projection*vec4(p,1.0);offset=uv;
+  tint=color;soft_particle=shape;head_taper_fraction=taper;}
+)GLSL";
+        constexpr char fragment_source[]=R"GLSL(#version 330 core
+in vec2 offset;
+flat in vec4 tint;
+flat in float soft_particle;
+flat in float head_taper_fraction;
+out vec4 output_color;
+void main(){
+  if(soft_particle==2.0 && head_taper_fraction>0.0){
+    float half_width=clamp((1.0-offset.x)/(2.0*head_taper_fraction),0.0,1.0);
+    if(abs(offset.y)>half_width) discard;
+  }
+  float core=max(0.0,1.0-length(offset));
+  float rays=max(max(0.0,1.0-abs(offset.x)*5.0),max(0.0,1.0-abs(offset.y)*5.0));
+  float alpha=(soft_particle==2.0 ? 1.0 : (soft_particle==1.0 || soft_particle==3.0) ? core*core : clamp(core*core+rays*0.35,0.0,1.0))*tint.a;
+  output_color=vec4(tint.rgb,alpha);
+}
+)GLSL";
+        auto vertex=compile_shader(GL_VERTEX_SHADER,vertex_source,"World transient batch vertex");
+        auto fragment=compile_shader(GL_FRAGMENT_SHADER,fragment_source,"World transient batch fragment");
+        const GLuint name=glCreateProgram();
+        if(!name)fail(OpenGlRendererErrorCode::program_link_failed,
+                      "World transient batch program creation failed");
+        flash_batch_program_=GlObject::adopt(GlObjectKind::program,name);
+        glAttachShader(name,vertex.name());glAttachShader(name,fragment.name());glLinkProgram(name);
+        GLint linked=GL_FALSE;glGetProgramiv(name,GL_LINK_STATUS,&linked);
+        if(linked!=GL_TRUE)fail(OpenGlRendererErrorCode::program_link_failed,
+                              "World transient batch program link failed");
+        flash_batch_matrix_=glGetUniformLocation(name,"view_projection");
+        flash_batch_array_=create_vertex_array();flash_batch_buffer_=create_buffer();
+        glBindVertexArray(flash_batch_array_.name());
+        glBindBuffer(GL_ARRAY_BUFFER,flash_batch_buffer_.name());
+        constexpr auto stride=sizeof(FlashBatchVertex);
+        glEnableVertexAttribArray(0U);
+        glVertexAttribPointer(0U,3,GL_FLOAT,GL_FALSE,stride,nullptr);
+        glEnableVertexAttribArray(1U);
+        glVertexAttribPointer(1U,2,GL_FLOAT,GL_FALSE,stride,
+            reinterpret_cast<const void*>(offsetof(FlashBatchVertex,u)));
+        glEnableVertexAttribArray(2U);
+        glVertexAttribPointer(2U,4,GL_FLOAT,GL_FALSE,stride,
+            reinterpret_cast<const void*>(offsetof(FlashBatchVertex,r)));
+        glEnableVertexAttribArray(3U);
+        glVertexAttribPointer(3U,1,GL_FLOAT,GL_FALSE,stride,
+            reinterpret_cast<const void*>(offsetof(FlashBatchVertex,shape)));
+        glEnableVertexAttribArray(4U);
+        glVertexAttribPointer(4U,1,GL_FLOAT,GL_FALSE,stride,
+            reinterpret_cast<const void*>(offsetof(FlashBatchVertex,taper)));
+        glBindVertexArray(0U);
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+                            "World transient batch GPU initialization");
+    }
+
     void render_world_flashes(const RenderScene& scene, const RenderMatrix4& matrix,
                              const RenderCamera& camera) {
+        if(!scene.world_flash_count&&!scene.world_particle_count&&!scene.world_line_count)return;
         auto f=assets::AssetVector3{camera.target.x-camera.position.x,
             camera.target.y-camera.position.y,camera.target.z-camera.position.z};
         const auto length=std::sqrt(f.x*f.x+f.y*f.y+f.z*f.z);
@@ -2040,17 +2247,60 @@ void main(){
         if(!std::isfinite(rl)||rl<0.0001F) return;
         r={r.x/rl,r.y/rl,r.z/rl};
         const auto u=assets::AssetVector3{r.y*f.z-r.z*f.y,r.z*f.x-r.x*f.z,r.x*f.y-r.y*f.x};
+        flash_batch_vertices_.clear();
+        flash_batch_gpu_cursor_=0;
+        flash_batch_gpu_orphaned_this_frame_=false;
+        const auto valid_quads=valid_world_flash_quads(scene);
+        flash_batch_frame_vertex_capacity_=valid_quads*6U;
+        if(flash_batch_frame_vertex_capacity_>kMaximumFlashBatchVertices)
+            fail(OpenGlRendererErrorCode::draw_range_invalid,
+                 "World transient scene capacity exceeded");
+        const auto line_count=std::min(scene.world_line_count,scene.world_lines.size());
+        const bool contains_solid_line=std::any_of(scene.world_lines.begin(),
+            scene.world_lines.begin()+line_count,[](const RenderWorldLine& line){
+                return line.geometry==game_api::WorldLineGeometry::solid_3d;
+            });
+        // A one-quad scene is common for a muzzle flash or one particle. The
+        // legacy draw is cheaper than preparing/orphaning a batch with no
+        // adjacent work to combine. Keep solid-line ordering on the batch path.
+        const bool single_quad_fallback=valid_quads==1U && !contains_solid_line;
+        std::optional<TransientBatchGlStateGuard> batch_state;
+        bool alpha_blend=false;
+        const auto flush=[&] {
+            if(flash_batch_vertices_.empty())return;
+            if(!batch_state)batch_state.emplace();
+            draw_flash_batch(matrix,alpha_blend);
+        };
+        const auto queue=[&](const RenderMuzzleFlash& flash,assets::AssetVector3 right,
+                             assets::AssetVector3 up,int shape,float taper=0.0F) {
+            if(!valid_flash(flash,taper))return;
+            if(single_quad_fallback) {
+                render_flash(flash,matrix,right,up,shape,taper);
+                return;
+            }
+            if(flash_batch_vertices_.capacity()<flash_batch_frame_vertex_capacity_)
+                flash_batch_vertices_.reserve(flash_batch_frame_vertex_capacity_);
+            const bool next_alpha=shape==1;
+            if(!flash_batch_vertices_.empty() && (next_alpha!=alpha_blend ||
+               flash_batch_vertices_.size()+6U>kMaximumFlashBatchVertices))flush();
+            alpha_blend=next_alpha;
+            append_flash_batch(flash,right,up,shape,taper);
+        };
         for(std::size_t i=0;i<std::min(scene.world_flash_count,scene.world_flashes.size());++i)
-            render_flash(scene.world_flashes[i],matrix,r,u);
+            queue(scene.world_flashes[i],r,u,0);
         for(std::size_t i=0;i<std::min(scene.world_particle_count,scene.world_particles.size());++i) {
             const auto& particle=scene.world_particles[i];
-            render_flash({particle.center,particle.radius_units,particle.color},matrix,r,u,particle.emissive ? 3 : 1);
+            queue({particle.center,particle.radius_units,particle.color},r,u,particle.emissive ? 3 : 1);
         }
         for(std::size_t i=0;i<std::min(scene.world_line_count,scene.world_lines.size());++i) {
             const auto& line=scene.world_lines[i];
             if(!std::isfinite(line.emission_gain) || line.emission_gain<0 || line.emission_gain>4) continue;
             if(line.geometry==game_api::WorldLineGeometry::solid_3d) {
-                render_solid_line(line,matrix,camera.position);continue;
+                const auto mesh=solid_line_mesh(line);
+                if(mesh.vertex_count && is_finite(camera.position)) {
+                    flush();render_solid_line(line,matrix,camera.position,mesh);
+                }
+                continue;
             }
             if(line.geometry!=game_api::WorldLineGeometry::flat_billboard) continue;
             auto axis=assets::AssetVector3{(line.end.x-line.start.x)*0.5F,
@@ -2064,9 +2314,10 @@ void main(){
             if(sl<0.0001F) side=r;
             else side={side.x/sl,side.y/sl,side.z/sl};
             side={side.x*line.width_units*0.5F,side.y*line.width_units*0.5F,side.z*line.width_units*0.5F};
-            render_flash({{(line.start.x+line.end.x)*0.5F,(line.start.y+line.end.y)*0.5F,
-                (line.start.z+line.end.z)*0.5F},1.0F,line.color},matrix,axis,side,2,line.head_taper_fraction);
+            queue({{(line.start.x+line.end.x)*0.5F,(line.start.y+line.end.y)*0.5F,
+                (line.start.z+line.end.z)*0.5F},1.0F,line.color},axis,side,2,line.head_taper_fraction);
         }
+        flush();
     }
 
     void create_flash_program()
@@ -2914,6 +3165,12 @@ private:
     GlObject flash_array_;
     GlObject flash_buffer_;
     GLint flash_matrix_{-1}, flash_color_{-1};
+    GlObject flash_batch_program_,flash_batch_array_,flash_batch_buffer_;
+    GLint flash_batch_matrix_{-1};
+    bool flash_batch_gpu_orphaned_this_frame_{};
+    std::size_t flash_batch_gpu_cursor_{};
+    std::size_t flash_batch_frame_vertex_capacity_{};
+    std::vector<FlashBatchVertex> flash_batch_vertices_;
     GlObject hud_program_;
     GlObject hud_array_;
     GlObject hud_buffer_;
@@ -3265,10 +3522,11 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             glDepthMask(GL_TRUE);
         }
         implementation_->gpu_pass_boundary(OpenGlGpuPass::msaa_resolve);
-        implementation_->scene_target.resolve(target_frame);
+        const auto resolved_color=implementation_->scene_target.resolve(
+            target_frame,scene.image_adjustments!=core::ImageAdjustments{});
         require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Native scene resolve");
         implementation_->gpu_pass_boundary(OpenGlGpuPass::image_adjustments);
-        implementation_->adjust_image(scene.image_adjustments,{width,height});
+        implementation_->adjust_image(scene.image_adjustments,{width,height},resolved_color);
         implementation_->gpu_pass_boundary(OpenGlGpuPass::hud_console);
         implementation_->render_screen_overlay(scene.screen_effects);
         if (scene.basic_hud)
@@ -3599,10 +3857,11 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         glDepthMask(GL_TRUE);
     }
     implementation_->gpu_pass_boundary(OpenGlGpuPass::msaa_resolve);
-    implementation_->scene_target.resolve(target_frame);
+    const auto resolved_color=implementation_->scene_target.resolve(
+        target_frame,scene.image_adjustments!=core::ImageAdjustments{});
     require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Native scene resolve");
     implementation_->gpu_pass_boundary(OpenGlGpuPass::image_adjustments);
-    implementation_->adjust_image(scene.image_adjustments,{width,height});
+    implementation_->adjust_image(scene.image_adjustments,{width,height},resolved_color);
     implementation_->gpu_pass_boundary(OpenGlGpuPass::hud_console);
     implementation_->render_screen_overlay(scene.screen_effects);
     if (scene.basic_hud) {

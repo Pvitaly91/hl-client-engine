@@ -2609,6 +2609,13 @@ RuntimeReplayLocalAssets::studio_model_data(const std::uint32_t index) const noe
 std::optional<game_api::LocalWeaponModelMetadata>
 RuntimeReplayLocalAssets::presentation_model(
     const std::uint64_t generation, const std::uint32_t index) {
+  if (auto model=presentation_model_handle(generation,index)) return *model;
+  return {};
+}
+
+game_api::LocalWeaponModelHandle
+RuntimeReplayLocalAssets::presentation_model_handle(
+    const std::uint64_t generation, const std::uint32_t index) {
   if (!library_ || !package_ || generation != generation_) return {};
   const auto bound = bindings_.find(index);
   const auto named = summary_->model_names.find(index);
@@ -2616,8 +2623,10 @@ RuntimeReplayLocalAssets::presentation_model(
       bound->second.status != ReplayLocalVisualStatus::ready_studio ||
       !bound->second.library_index || !bound->second.render_index) return {};
   if (auto cached = presentation_models_.find(index); cached != presentation_models_.end()) {
-    cached->second.generation = generation_;
-    return cached->second;
+    if (cached->second && cached->second->generation == generation_ &&
+        cached->second->resource_revision == library_->resource_revision() &&
+        cached->second->resource_name == named->second) return cached->second;
+    presentation_models_.erase(cached);
   }
   const auto& record = library_->records()[*bound->second.library_index];
   if (!record.model_asset() || !record.model_asset()->skeletal_data) return {};
@@ -2638,8 +2647,9 @@ RuntimeReplayLocalAssets::presentation_model(
         result.selectable_bodies[body] &&
         r::studio_entity_material_support(asset, static_cast<std::uint32_t>(body), 0U).has_value();
   }
-  presentation_models_.emplace(index, result);
-  return result;
+  auto owned=std::make_shared<const game_api::LocalWeaponModelMetadata>(std::move(result));
+  presentation_models_.emplace(index,owned);
+  return owned;
 }
 
 std::optional<renderer::RenderDynamicEntities>

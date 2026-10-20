@@ -95,6 +95,12 @@ struct OpenGlWorldRendererStatistics {
     std::uint64_t transform_upload_count{0U};
     std::uint64_t camera_upload_count{0U};
     std::uint64_t light_upload_count{0U};
+    // World transient quads only: actual GPU submissions, not visible pixels.
+    std::uint64_t transient_flash_upload_count{0U};
+    std::uint64_t transient_flash_draw_count{0U};
+    std::uint64_t transient_flash_quad_count{0U};
+    std::uint64_t transient_flash_storage_orphan_count{0U};
+    std::size_t transient_flash_storage_bytes_high_water{0U};
     RenderExtent last_extent{};
     bool world_present{false};
     bool scene_present{false};
@@ -126,6 +132,7 @@ struct OpenGlEntityRendererStatistics {
     std::uint64_t model_texture_bind_count{0U};
     std::uint64_t sprite_texture_bind_count{0U};
     std::uint64_t pose_ubo_update_count{0U};
+    std::uint64_t studio_pass_uniform_upload_count{0U};
     std::uint64_t visible_entity_count{0U};
     std::uint64_t entity_resource_release_count{0U};
     bool entity_scene_present{false};
@@ -155,6 +162,7 @@ struct OpenGlDecalRendererStatistics {
 
 struct OpenGlImageAdjustmentStatistics {
     std::uint64_t adjusted_frames{}, neutral_frames{}, storage_reallocations{};
+    std::uint64_t framebuffer_color_copies{}, resolved_texture_reads{};
     std::size_t active_texture_count{};
     RenderExtent last_extent{};
 };
@@ -182,6 +190,7 @@ struct OpenGlSceneTargetStatistics {
     std::array<int,4> viewport{};
     OpenGlMsaaFallback fallback_reason{OpenGlMsaaFallback::disabled};
     std::uint64_t storage_allocations{}, storage_releases{}, resolved_frames{};
+    std::uint64_t output_color_blits{}, direct_adjustment_frames{};
     std::size_t active_framebuffers{}, active_attachments{};
 };
 

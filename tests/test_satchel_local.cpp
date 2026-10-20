@@ -2,6 +2,7 @@
 #include <hlclient/games/halflife/inventory.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <memory>
 namespace {namespace f=hlclient::tests::satchel_fixture;namespace api=hlclient::game_api;
 namespace g=hlclient::goldsrc;using Catch::Approx;}
 TEST_CASE("E25 first throw switches charge to radio draw without canonical ammo or projectile mutation","[e25][satchel-local][no-stock]") {
@@ -12,6 +13,40 @@ TEST_CASE("E25 first throw switches charge to radio draw without canonical ammo 
     CHECK(m.controller.satchel_state().reserved_ammo==1);CHECK(m.observed==before);
     CHECK(m.controller.satchel_state().last_throw_context==f::command(1,.02).shot_context);
     CHECK(m.controller.drain_audio().count==0);CHECK(out.primary_fire_starts==0);CHECK(out.recoil_starts==0);
+}
+TEST_CASE("P2 Satchel charge and radio retain viewmodel parity with immutable handles",
+          "[p2-metadata][satchel-local][no-stock]") {
+    const auto same_visual=[](const std::optional<api::LocalWeaponVisual>& lhs,
+                              const std::optional<api::LocalWeaponVisual>& rhs) {
+        if(!lhs || !rhs) return !lhs && !rhs;
+        return lhs->sequence==rhs->sequence && lhs->body==rhs->body &&
+               lhs->restart_identity==rhs->restart_identity &&
+               lhs->started_at_seconds==rhs->started_at_seconds &&
+               lhs->source==rhs->source && lhs->status==rhs->status;
+    };
+    f::Module legacy, optimized;
+    const api::LocalWeaponModelHandle charge=std::make_shared<const api::LocalWeaponModelMetadata>(f::model());
+    const api::LocalWeaponModelHandle radio=std::make_shared<const api::LocalWeaponModelMetadata>(f::model(true));
+    optimized.host.bind_model_handle(charge);
+    for(const auto now:{0.0,.01}) {
+        optimized.host.bind_model_handle(charge);
+        legacy.host.bind_model(f::model());
+        CHECK(optimized.host.viewmodel_handle(optimized.observed,charge,now)==
+              legacy.host.viewmodel(legacy.observed,f::model(),now));
+    }
+    const auto command=f::command(1,.02);
+    optimized.host.submit(command,.02);legacy.host.submit(command,.02);
+    const auto fast=optimized.host.sample(.02),slow=legacy.host.sample(.02);
+    CHECK(fast.identity==slow.identity);CHECK(same_visual(fast.visual,slow.visual));
+    auto server=f::state(2,1,2);
+    server.weapon_slots[0].auxiliary_integer1_updated_in_record=true;
+    optimized.host.bind_model_handle(radio);legacy.host.bind_model(f::model(true));
+    optimized.host.observe(server,.1);legacy.host.observe(server,.1);
+    optimized.host.bind_model_handle(radio);legacy.host.bind_model(f::model(true));
+    const auto after_fast=optimized.host.sample(.1),after_slow=legacy.host.sample(.1);
+    CHECK(after_fast.identity==after_slow.identity);CHECK(same_visual(after_fast.visual,after_slow.visual));
+    CHECK(optimized.host.viewmodel_handle(server,radio,.1,after_fast.visual)==
+          legacy.host.viewmodel(server,f::model(true),.1,after_slow.visual));
 }
 TEST_CASE("E25 radio permits additional throws only at one second cadence","[e25][satchel-local][input]") {
     f::Controller m;m.submit(1,.02);m.submit(2,.5);CHECK(m.controller.satchel_state().throws==1);

@@ -3880,6 +3880,130 @@ TEST_CASE("E16 approved project-owned MP5 primary and secondary flow from normal
   }
 }
 
+// This test-only workload is intentionally source-compatible with 43ad240.
+// In a clean baseline source tree it runs the legacy value path; in the
+// candidate it also runs the immutable-handle normal path in the same binary.
+// A separate clean-source + harness baseline build can use the same workload.
+TEST_CASE("P2 warm metadata cache follows the normal bind and viewmodel path",
+          "[p2-metadata][benchmark][local-capture-assets][first-person][no-stock]") {
+  LocalContext context;const auto model=e16_owned_mp5_viewmodel();
+  context.root.write("valve","models/v_9mmAR.mdl",model);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/v_9mmAR.mdl",21U,static_cast<std::uint32_t>(model.size()),0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(created.projection);
+  auto& assets=*created.projection;
+  const auto state=e16_mp5_viewmodel_state();client::ClientWorldState world;
+  REQUIRE(assets.reset_generation(state,world));
+  const auto bind=[]<bool Handle,class A,class H>(A& a,H& h,std::uint64_t generation) {
+    if constexpr (Handle) {
+      auto metadata=a.presentation_model_handle(generation,21U);REQUIRE(metadata);
+      h.bind_model_handle(std::move(metadata));
+    } else {
+      auto metadata=a.presentation_model(generation,21U);REQUIRE(metadata);
+      h.bind_model(std::move(metadata));
+    }
+  };
+  const auto view=[]<bool Handle,class A,class H>(A& a,H& h,const auto& observation,double now,
+      std::optional<hlclient::game_api::LocalWeaponVisual> visual) {
+    if constexpr (Handle) {
+      auto metadata=a.presentation_model_handle(observation.generation,21U);REQUIRE(metadata);
+      return h.viewmodel_handle(observation,std::move(metadata),now,visual);
+    } else {
+      auto metadata=a.presentation_model(observation.generation,21U);REQUIRE(metadata);
+      return h.viewmodel(observation,std::move(metadata),now,visual);
+    }
+  };
+  constexpr std::size_t warmup=48U,samples=256U;
+  const auto run=[&]<bool Handle>(bool animated) {
+    hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+    host.reset({state.generation,1U,1U});host.set_movement_audio_time_origin(0.0);
+    bind.template operator()<Handle>(assets,host,state.generation);host.observe(state,0.0);
+    if(animated) host.submit({state.generation,1U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack,.02},.02);
+    std::array<double,samples> elapsed{};
+    std::uint64_t signature=14695981039346656037ULL;
+    const auto mix=[&](std::uint64_t value) {
+      for(unsigned byte=0U;byte<8U;++byte){signature^=(value>>(byte*8U))&255U;signature*=1099511628211ULL;}
+    };
+    for(std::size_t i=0U;i<warmup+samples;++i) {
+      const double now=.03+double(i)*.002;
+      const auto begin=std::chrono::steady_clock::now();
+      bind.template operator()<Handle>(assets,host,state.generation);host.observe(state,now);
+      bind.template operator()<Handle>(assets,host,state.generation);host.observe(state,now);
+      const auto sampled=host.sample(now);
+      const auto pose=view.template operator()<Handle>(assets,host,state,now,sampled.visual);
+      const auto end=std::chrono::steady_clock::now();
+      REQUIRE(pose.status==hlclient::game_api::ViewmodelStatus::ready);
+      if(i<warmup)continue;
+      elapsed[i-warmup]=std::chrono::duration<double,std::micro>(end-begin).count();
+      mix(static_cast<std::uint64_t>(pose.status));mix(pose.sequence);mix(pose.body);
+      mix(std::bit_cast<std::uint64_t>(pose.frame_coordinate));
+    }
+    std::sort(elapsed.begin(),elapsed.end());
+    std::cout<<"[p2-metadata] {\"path\":\""<<(Handle?"handle":"legacy_value")<<"\",\"animated\":"<<(animated?"true":"false")
+        <<",\"warmup\":"<<warmup<<",\"samples\":"<<samples
+        <<",\"p50_us\":"<<elapsed[127U]<<",\"p95_us\":"<<elapsed[242U]
+        <<",\"p99_us\":"<<elapsed[252U]<<",\"max_us\":"<<elapsed.back()
+        <<",\"output_signature\":\""<<signature<<"\",\"metadata_value_copies_per_frame_lower_bound\":"
+        <<(Handle?0:3)<<"}\n";
+    return signature;
+  };
+  const auto dispatch=[&]<class A,class H>(A& asset_owner,H*) {
+    constexpr bool supports_handle=requires(A& a,H& host) {
+      host.viewmodel_handle(state,a.presentation_model_handle(state.generation,21U),0.0);
+    };
+    (void)asset_owner;
+    for(const bool animated:{false,true}) {
+      const auto legacy_signature=run.template operator()<false>(animated);
+      if constexpr (supports_handle)
+        CHECK(run.template operator()<true>(animated)==legacy_signature);
+    }
+  };
+  dispatch(assets,static_cast<hlclient::game_api::GameClientHost*>(nullptr));
+}
+
+TEST_CASE("P2 metadata owner survives replacement and never mutates a handed-out value",
+          "[p2-metadata][local-capture-assets][lifecycle][no-stock]") {
+  LocalContext context;const auto model=e16_owned_mp5_viewmodel();
+  context.root.write("valve","models/v_9mmAR.mdl",model);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/v_9mmAR.mdl",21U,static_cast<std::uint32_t>(model.size()),0U}});
+  auto create=[&] {
+    return app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+        context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  };
+  auto created=create();REQUIRE(created.projection);
+  const auto state=e16_mp5_viewmodel_state();client::ClientWorldState world;
+  REQUIRE(created.projection->reset_generation(state,world));
+  const auto verify=[&]<class A>(A& assets) {
+    if constexpr (requires(A& a) { a.presentation_model_handle(state.generation,21U); }) {
+      const auto first=assets.presentation_model_handle(state.generation,21U);
+      REQUIRE(first);REQUIRE(first->sequences.size()==8U);
+      CHECK(assets.presentation_model_handle(state.generation,21U)==first);
+      CHECK_FALSE(assets.presentation_model_handle(state.generation+1U,21U));
+      CHECK_FALSE(assets.presentation_model_handle(state.generation,20U));
+      const auto legacy=assets.presentation_model(state.generation,21U);REQUIRE(legacy);
+      CHECK(*legacy==*first);
+      CHECK(legacy->sequences.data()!=first->sequences.data());
+      const auto original_generation=first->generation;
+      auto other=create();REQUIRE(other.projection);
+      client::ClientWorldState other_world;
+      REQUIRE(other.projection->reset_generation(state,other_world));
+      const auto replacement=other.projection->presentation_model_handle(state.generation,21U);
+      REQUIRE(replacement);CHECK(replacement!=first);CHECK(*replacement==*first);
+      created.projection.reset();
+      CHECK(first->generation==original_generation);
+      CHECK(first->resource_name=="models/v_9mmAR.mdl");
+      CHECK(first->sequences.size()==8U);
+      CHECK(replacement->sequences.data()!=first->sequences.data());
+    } else SKIP("Immutable metadata handle is unavailable in the clean baseline source");
+  };
+  verify(*created.projection);
+}
+
 TEST_CASE("E16 normal MP5 primary and secondary animation changes first-person GPU pixels without reupload",
           "[e16][e15][local-capture-assets][first-person][opengl][actual-context]") {
   auto gl=fixture::entity_opengl_fixture::try_context(320,240);

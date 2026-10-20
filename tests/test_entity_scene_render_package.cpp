@@ -8,9 +8,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -618,6 +622,190 @@ TEST_CASE("E11 generic frame keeps sixteen owner-child pairs and rejects orphan 
     CHECK_FALSE(render::EntityRenderFrameBuilder{}.build(*scene.package,std::move(orphan)));
     auto illegal=input;illegal.studio_instances[0].subinstance_ordinal=2U;
     CHECK_FALSE(render::EntityRenderFrameBuilder{}.build(*scene.package,std::move(illegal)));
+}
+
+TEST_CASE("Sorted frame identity admission preserves duplicate errors across all candidate streams",
+          "[entity-render][frame][duplicates][optimization-p5]") {
+    auto scene=fixture::scene_package(fixture::render_assets());REQUIRE(scene);
+    const auto base=mixed_frame_input(*scene.package);
+    const auto expect_duplicate=[&](render::EntityRenderFrameBuildInput input,
+                                    const std::uint32_t number,
+                                    const char* context) {
+        const auto rejected=render::EntityRenderFrameBuilder{}.build(*scene.package,std::move(input));
+        REQUIRE_FALSE(rejected);
+        REQUIRE(rejected.error);
+        CHECK(rejected.error->code==render::EntityRenderFrameErrorCode::duplicate_entity_number);
+        CHECK(rejected.error->entity_number==number);
+        CHECK(rejected.error->context==context);
+    };
+    constexpr auto studio_error="Invalid primary/attached Studio instance identity";
+    constexpr auto other_error="Entity number is zero or repeated across frame candidates";
+
+    SECTION("all Studio errors take precedence over later candidate streams") {
+        auto duplicate=base;
+        duplicate.studio_instances.push_back(duplicate.studio_instances[0]);
+        duplicate.sprite_instances[0].entity_number=0U;
+        duplicate.unsupported_instances[0].entity_number=0U;
+        expect_duplicate(std::move(duplicate),2U,studio_error);
+
+        auto orphan=base;
+        orphan.studio_instances[0].subinstance_ordinal=1U;
+        expect_duplicate(std::move(orphan),2U,studio_error);
+
+        auto zero_child=base;
+        zero_child.studio_instances[0].entity_number=0U;
+        zero_child.studio_instances[0].subinstance_ordinal=1U;
+        expect_duplicate(std::move(zero_child),0U,studio_error);
+
+        auto repeated_child=base;
+        auto child=repeated_child.studio_instances[0];child.subinstance_ordinal=1U;
+        repeated_child.studio_instances.push_back(child);
+        repeated_child.studio_instances.push_back(child);
+        expect_duplicate(std::move(repeated_child),2U,studio_error);
+
+        auto illegal_ordinal=base;
+        illegal_ordinal.studio_instances[0].subinstance_ordinal=2U;
+        expect_duplicate(std::move(illegal_ordinal),2U,studio_error);
+    }
+    SECTION("sorted sprites reject zero, repeat and Studio collisions before unsupported IDs") {
+        auto zero=base;
+        zero.sprite_instances[0].entity_number=0U;
+        expect_duplicate(std::move(zero),0U,other_error);
+
+        auto repeated=base;
+        repeated.sprite_instances.push_back(repeated.sprite_instances[0]);
+        repeated.unsupported_instances[0].entity_number=0U;
+        expect_duplicate(std::move(repeated),3U,other_error);
+
+        auto cross_kind=base;
+        cross_kind.sprite_instances[0].entity_number=2U;
+        cross_kind.unsupported_instances[0].entity_number=0U;
+        expect_duplicate(std::move(cross_kind),2U,other_error);
+    }
+    SECTION("unsupported candidates retain sorted first-error precedence") {
+        auto zero=base;
+        zero.unsupported_instances[0].entity_number=0U;
+        expect_duplicate(std::move(zero),0U,other_error);
+
+        auto repeated=base;
+        repeated.unsupported_instances.push_back(repeated.unsupported_instances[0]);
+        expect_duplicate(std::move(repeated),1U,other_error);
+
+        auto cross_kind=base;
+        auto studio_collision=cross_kind.unsupported_instances[0];
+        studio_collision.entity_number=2U;
+        cross_kind.unsupported_instances.push_back(studio_collision);
+        auto sprite_collision=studio_collision;sprite_collision.entity_number=3U;
+        cross_kind.unsupported_instances.push_back(sprite_collision);
+        expect_duplicate(std::move(cross_kind),2U,other_error);
+
+        auto sprite_only=base;
+        sprite_only.unsupported_instances[0].entity_number=3U;
+        expect_duplicate(std::move(sprite_only),3U,other_error);
+    }
+}
+
+TEST_CASE("Large sparse IDs and unsorted owner-child streams retain exact frame order and identity",
+          "[entity-render][frame][duplicates][optimization-p5]") {
+    auto scene=fixture::scene_package(fixture::render_assets());REQUIRE(scene);
+    auto input=mixed_frame_input(*scene.package);
+    const auto body=input.studio_instances[0];
+    const auto sprite=input.sprite_instances[0];
+    const auto unsupported=input.unsupported_instances[0];
+    input.studio_instances.clear();
+    input.sprite_instances.clear();
+    input.unsupported_instances.clear();
+    constexpr std::uint32_t pairs=64U;
+    for(std::uint32_t index=0U;index<pairs;++index) {
+        const auto number=std::numeric_limits<std::uint32_t>::max()-3U-index*3U;
+        auto parent=body;parent.entity_number=number;
+        auto child=parent;child.subinstance_ordinal=1U;
+        input.studio_instances.push_back(child);
+        input.studio_instances.push_back(parent);
+        auto next_sprite=sprite;next_sprite.entity_number=number+1U;
+        input.sprite_instances.push_back(next_sprite);
+        auto next_unsupported=unsupported;next_unsupported.entity_number=number+2U;
+        input.unsupported_instances.push_back(next_unsupported);
+    }
+    const auto first=render::EntityRenderFrameBuilder{}.build(*scene.package,input);
+    INFO((first.error?first.error->context:std::string{}));
+    REQUIRE(first);REQUIRE(first.frame);
+    CHECK(first.frame->studio_instances().size()==pairs*2U);
+    CHECK(first.frame->sprite_instances().size()==pairs);
+    CHECK(first.frame->unsupported_instances().size()==pairs);
+    CHECK(first.frame->draw_commands().size()==pairs*5U);
+    for(std::size_t index=0U;index<pairs;++index) {
+        const auto parent=index*2U;
+        CHECK(first.frame->studio_instances()[parent].subinstance_ordinal==0U);
+        CHECK(first.frame->studio_instances()[parent+1U].subinstance_ordinal==1U);
+        CHECK(first.frame->draw_commands()[index*4U].instance_index==parent);
+        CHECK(first.frame->draw_commands()[index*4U+1U].instance_index==parent);
+        CHECK(first.frame->draw_commands()[index*4U+2U].instance_index==parent+1U);
+        CHECK(first.frame->draw_commands()[index*4U+3U].instance_index==parent+1U);
+    }
+    std::reverse(input.studio_instances.begin(),input.studio_instances.end());
+    std::reverse(input.sprite_instances.begin(),input.sprite_instances.end());
+    std::reverse(input.unsupported_instances.begin(),input.unsupported_instances.end());
+    const auto reordered=render::EntityRenderFrameBuilder{}.build(*scene.package,std::move(input));
+    INFO((reordered.error?reordered.error->context:std::string{}));
+    REQUIRE(reordered);REQUIRE(reordered.frame);
+    CHECK(reordered.frame->frame_signature()==first.frame->frame_signature());
+}
+
+TEST_CASE("Opt-in sorted frame identity admission benchmark excludes source construction",
+          "[optimization-p5][benchmark][.]") {
+    // This fixture intentionally uses only the unchanged public builder API,
+    // so the identical test source can be compiled against baseline and
+    // candidate production sources. The input clone is outside the timer.
+    auto scene=fixture::scene_package(fixture::render_assets());REQUIRE(scene);
+    const auto source=mixed_frame_input(*scene.package);
+    constexpr std::size_t warmup=32U,samples=256U;
+    for(const std::size_t pairs:{16U,64U,4096U}) {
+        auto input=source;
+        input.studio_instances.clear();
+        input.sprite_instances.clear();
+        input.unsupported_instances.clear();
+        input.studio_instances.reserve(pairs*2U);
+        for(std::size_t index=0U;index<pairs;++index) {
+            auto primary=source.studio_instances[0U];
+            primary.entity_number=static_cast<std::uint32_t>(pairs-index);
+            auto child=primary;child.subinstance_ordinal=1U;
+            input.studio_instances.push_back(child);
+            input.studio_instances.push_back(primary);
+        }
+        auto limits=render::RuntimeEntityVisualLimits{};
+        limits.maximum_entities=std::max(limits.maximum_entities,pairs*2U);
+        limits.maximum_studio_instances=std::max(limits.maximum_studio_instances,pairs*2U);
+        render::EntityRenderFrameBuilder builder;
+        std::optional<std::uint64_t> expected_signature;
+        std::vector<double> microseconds;
+        microseconds.reserve(samples);
+        for(std::size_t iteration=0U;iteration<warmup+samples;++iteration) {
+            auto staged=input;
+            const auto start=std::chrono::steady_clock::now();
+            const auto built=builder.build(*scene.package,std::move(staged),limits);
+            const auto stop=std::chrono::steady_clock::now();
+            INFO((built.error?built.error->context:std::string{}));
+            REQUIRE(built);REQUIRE(built.frame);
+            REQUIRE(built.frame->studio_instances().size()==pairs*2U);
+            REQUIRE(built.frame->draw_commands().size()==pairs*4U);
+            if(!expected_signature) expected_signature=built.frame->frame_signature();
+            CHECK(built.frame->frame_signature()==*expected_signature);
+            if(iteration>=warmup) microseconds.push_back(
+                std::chrono::duration<double,std::micro>(stop-start).count());
+        }
+        std::sort(microseconds.begin(),microseconds.end());
+        const auto quantile=[&](const std::size_t numerator,const std::size_t denominator) {
+            return microseconds[(samples*numerator+denominator-1U)/denominator-1U];
+        };
+        std::cout<<std::setprecision(9)
+            <<"[optimization-p5-bench] {\"fixture\":\"synthetic_studio_parent_child_v1\","
+            <<"\"pairs\":"<<pairs<<",\"warmup\":"<<warmup<<",\"n\":"<<samples
+            <<",\"unit\":\"us\",\"source_copy_timed\":false,\"p50\":"<<quantile(1U,2U)
+            <<",\"p95\":"<<quantile(95U,100U)<<",\"p99\":"<<quantile(99U,100U)
+            <<",\"max\":"<<microseconds.back()<<",\"frame_signature\":"<<*expected_signature
+            <<",\"allocations_per_build\":null}\n";
+    }
 }
 TEST_CASE("Entity render boundary exposes no paths snapshots or GL handles",
     "[entity-render][scene][boundary]")

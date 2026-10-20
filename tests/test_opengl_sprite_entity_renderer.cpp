@@ -509,7 +509,7 @@ TEST_CASE("OpenGL Sprite rejects unsupported and degenerate billboard bases",
     CHECK(recovered.sprite_texture_bind_count ==
         retained.sprite_texture_bind_count + 1U);
     CHECK(recovered.pose_ubo_update_count ==
-        retained.pose_ubo_update_count + 2U);
+        retained.pose_ubo_update_count + 1U);
     CHECK(recovered.visible_entity_count == retained.visible_entity_count);
     CHECK(recovered.entity_resource_release_count ==
         retained.entity_resource_release_count);
