@@ -287,6 +287,17 @@ struct StudioPoseStatistics {
     std::size_t suppressed_motion_axis_count{0U};
     std::size_t accounted_pose_bytes{0U};
     std::size_t composition_sample_count{1U};
+    // V2 operation telemetry describes this successful evaluation, not the
+    // size of the retained output. Extreme-input validation fallback builds
+    // are included. The legacy world_matrix_count remains the output count.
+    std::size_t world_build_calls_v2{0U};
+    std::size_t world_matrices_built_v2{0U};
+    // Exact capacity * sizeof(T) of the four retained pose-owned vectors:
+    // locals, worlds, bodyparts and skin references. This is NOT total heap
+    // use or peak working set: transient channel/controller/hierarchy vectors,
+    // model-identity string, container headers and allocator overhead are
+    // excluded. The legacy accounted_pose_bytes remains an admission budget.
+    std::optional<std::size_t> retained_pose_vector_capacity_bytes_v2;
 };
 
 class StudioPoseState final {

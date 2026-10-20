@@ -111,6 +111,11 @@ bool same_event_identity(const Event& a,const Event& b) noexcept {
     return a.identity.producer==b.identity.producer && a.identity.producer_event_id==b.identity.producer_event_id &&
         a.identity.network_generation==b.identity.network_generation && a.identity.map_generation==b.identity.map_generation;
 }
+using EventIdentityKey=std::array<std::uint64_t,4>;
+EventIdentityKey event_identity_key(const Event& e) noexcept {
+    return {static_cast<std::uint64_t>(e.identity.producer),e.identity.producer_event_id,
+        e.identity.network_generation,e.identity.map_generation};
+}
 std::uint64_t sample_key(const Event& e) noexcept {
     const auto phase=std::visit([](const auto& p)->std::uint64_t {
         if constexpr(requires{p.phase;})return static_cast<std::uint64_t>(p.phase);
@@ -222,6 +227,9 @@ struct MultiplayerTimeline::Storage final {
     };
     std::array<Event,maximum_recent_events> recent{};
     std::array<Event,maximum_exact_events> exact_events{};
+    // F8-only membership scratch lives in the already heap-owned timeline,
+    // not on the Win32 action/F8 stack. It has no retained evidence semantics.
+    std::array<EventIdentityKey,maximum_exact_events> protected_keys{};
     std::array<Window,maximum_manual_windows> manual{};
     std::array<ProducerState,producer_count> producers{};
     std::array<SampleState,256> samples{};
@@ -319,18 +327,22 @@ bool MultiplayerTimeline::mark_manual_relative_us(const std::uint64_t time) noex
         (s.manual_count && trigger<s.manual[s.manual_count-1].trigger)){++s.stats.manual_marks_dropped;return false;}
     auto& window=s.manual[s.manual_count++];window.trigger=trigger;window.begin=trigger>pre_window_ns?trigger-pre_window_ns:0;
     window.end=trigger+post_window_ns;++s.stats.manual_marks;
-    for(std::size_t i=0;i<s.exact_count;++i)
-        s.append_window(window,s.exact_events[(s.exact_first+i)%maximum_action_exact_events],2U);
-    for(std::size_t i=0;i<s.chain_count;++i)
-        s.append_window(window,s.exact_events[maximum_action_exact_events+(s.chain_first+i)%maximum_chain_exact_events],1U);
+    std::size_t protected_count{};
+    for(std::size_t i=0;i<s.exact_count;++i) {
+        const auto& e=s.exact_events[(s.exact_first+i)%maximum_action_exact_events];
+        s.append_window(window,e,2U);s.protected_keys[protected_count++]=event_identity_key(e);
+    }
+    for(std::size_t i=0;i<s.chain_count;++i) {
+        const auto& e=s.exact_events[maximum_action_exact_events+(s.chain_first+i)%maximum_chain_exact_events];
+        s.append_window(window,e,1U);s.protected_keys[protected_count++]=event_identity_key(e);
+    }
+    std::sort(s.protected_keys.begin(),s.protected_keys.begin()+protected_count);
     for(std::size_t i=0;i<s.recent_count;++i) {
-        const auto& e=s.recent[(s.recent_first+i)%maximum_recent_events];bool protected_copy=false;
+        const auto& e=s.recent[(s.recent_first+i)%maximum_recent_events];
         // Skip copies even if that protected event was itself omitted by the
         // 64-event window cap, so duplicates cannot inflate loss counters.
-        for(std::size_t j=0;j<s.exact_count && !protected_copy;++j)
-            protected_copy=same_event_identity(e,s.exact_events[(s.exact_first+j)%maximum_action_exact_events]);
-        for(std::size_t j=0;j<s.chain_count && !protected_copy;++j)
-            protected_copy=same_event_identity(e,s.exact_events[maximum_action_exact_events+(s.chain_first+j)%maximum_chain_exact_events]);
+        const bool protected_copy=std::binary_search(s.protected_keys.begin(),
+            s.protected_keys.begin()+protected_count,event_identity_key(e));
         if(!protected_copy)s.append_window(window,e,priority(e));
     }
     return true;

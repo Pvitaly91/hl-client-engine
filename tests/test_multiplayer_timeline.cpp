@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <array>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -308,6 +310,38 @@ TEST_CASE("Full F8 priority window keeps nearest observations and stable equal-d
     CHECK(timeline.statistics().manual_omissions==9);
 }
 
+TEST_CASE("F8 protected membership uses producer and both generations rather than action ID alone",
+    "[multiplayer-timeline][manual][identity][core][app]") {
+    constexpr std::uint64_t origin=1'000'000'000ULL;
+    Timeline timeline{true};timeline.set_clock_origin_ns(origin);
+    auto protected_action=action(1,origin+400'000'000ULL);
+    protected_action.identity.action_id=101;
+    REQUIRE(timeline.observe(protected_action));
+    auto background=action(1,origin+600'000'000ULL);
+    background.identity.network_generation=2;background.identity.action_id=102;
+    std::get<core::MultiplayerActionPayload>(background.payload).phase=core::MultiplayerActionPhase::feedback;
+    background.knowledge=core::MultiplayerKnowledge::cosmetic_feedback;
+    REQUIRE(timeline.observe(background));
+    background.identity.map_generation=2;background.identity.action_id=103;
+    background.local_steady_ns=origin+800'000'000ULL;
+    REQUIRE(timeline.observe(background));
+    auto other_producer=command(1,origin+1'000'000'000ULL);
+    REQUIRE(timeline.observe(other_producer));
+    REQUIRE(timeline.mark_manual_relative_us(1'200'000));
+    const auto encoded=timeline.encode();REQUIRE(encoded);
+    const auto begin=encoded->find("\"manual_windows\":[");
+    const auto end=encoded->find("\"exact_transitions\":[",begin);
+    REQUIRE(begin!=encoded->npos);REQUIRE(end!=encoded->npos);
+    const auto manual=encoded->substr(begin,end-begin);
+    for(const auto action_id:{101U,102U,103U}) {
+        const auto token="\"action_id\":"+std::to_string(action_id)+",";
+        const auto first=manual.find(token);REQUIRE(first!=manual.npos);
+        CHECK(manual.find(token,first+token.size())==manual.npos);
+    }
+    CHECK(manual.find("\"producer\":2,\"producer_event_id\":1,")!=manual.npos);
+    CHECK(timeline.statistics().manual_omissions==0);
+}
+
 TEST_CASE("Immutable command and action evidence survives rendering cadence stalls death and delayed F8","[multiplayer-timeline][cadence][manual][core][app]") {
     constexpr std::uint64_t origin=1'000'000'000ULL, duration=3'000'000'000ULL;
     constexpr std::array<std::uint64_t,5> accepted_commands{20,70,120,220,270};
@@ -394,4 +428,74 @@ TEST_CASE("Immutable command and action evidence survives rendering cadence stal
         CHECK(encoded->find("\"transport_ack_proves_execution\":false")!=encoded->npos);
         CHECK(encoded->size()<=Timeline::maximum_encoded_bytes);
     }
+}
+
+TEST_CASE("Benchmark full multiplayer F8 window membership with deterministic retained identities",
+    "[.][optimization-benchmark][multiplayer-timeline][f8]") {
+    // Explicit opt-in. Population and terminal encoding are outside the timed
+    // mark, so this measures the F8 duplicate search rather than construction.
+    constexpr std::uint64_t origin=1'000'000'000ULL;
+    constexpr std::size_t warmup=8,samples=128;
+    std::array<double,samples> measured{};
+    std::uint64_t retained_hash{};
+    app::MultiplayerTimelineStatistics retained_stats{};
+    for(std::size_t iteration=0;iteration<warmup+samples;++iteration) {
+        Timeline timeline{true};REQUIRE(timeline.enabled());timeline.set_clock_origin_ns(origin);
+        for(std::uint64_t i=1;i<=Timeline::maximum_action_exact_events;++i)
+            REQUIRE(timeline.observe(action(i,origin+i*1'000ULL)));
+        for(std::uint64_t i=1;i<=Timeline::maximum_chain_exact_events;++i) {
+            auto e=command(i,origin+(Timeline::maximum_action_exact_events+i)*1'000ULL);
+            std::get<core::MultiplayerCommandPayload>(e.payload).phase=core::MultiplayerCommandPhase::history_inserted;
+            REQUIRE(timeline.observe(e));
+        }
+        for(std::uint64_t i=Timeline::maximum_action_exact_events+1;
+            i<=Timeline::maximum_action_exact_events+1'000U;++i) {
+            auto e=action(i,origin+(Timeline::maximum_exact_events+i)*1'000ULL);
+            auto& p=std::get<core::MultiplayerActionPayload>(e.payload);
+            p.phase=core::MultiplayerActionPhase::feedback;
+            p.weapon_id=static_cast<std::uint32_t>(i+1'000U);
+            e.knowledge=core::MultiplayerKnowledge::cosmetic_feedback;
+            REQUIRE(timeline.observe(e));
+        }
+        const auto begin=std::chrono::steady_clock::now();
+        const bool marked=timeline.mark_manual_relative_us(1'000);
+        const auto elapsed=std::chrono::duration<double,std::micro>(
+            std::chrono::steady_clock::now()-begin).count();
+        REQUIRE(marked);
+        if(iteration>=warmup)measured[iteration-warmup]=elapsed;
+        if(iteration==warmup) {
+            retained_stats=timeline.statistics();
+            const auto encoded=timeline.encode();REQUIRE(encoded);
+            const auto first=encoded->find("\"manual_windows\":[");
+            const auto end=encoded->find("\"exact_transitions\":[",first);
+            REQUIRE(first!=encoded->npos);REQUIRE(end!=encoded->npos);
+            const std::string_view manual{encoded->data()+first,end-first};
+            // The exact lane wins the full 64-entry window; protected recent
+            // copies are skipped even when their exact copy was omitted.
+            CHECK(manual.find("\"action_id\":320,")==manual.npos);
+            CHECK(manual.find("\"action_id\":321,")!=manual.npos);
+            CHECK(manual.find("\"action_id\":384,")!=manual.npos);
+            CHECK(retained_stats.accepted==1'512);
+            CHECK(retained_stats.recent_evictions==232);
+            CHECK(retained_stats.exact_evictions==0);
+            CHECK(retained_stats.manual_omissions==1'448);
+            retained_hash=14'695'981'039'346'656'037ULL;
+            for(const unsigned char byte:manual) {
+                retained_hash^=byte;
+                retained_hash*=1'099'511'628'211ULL;
+            }
+        }
+    }
+    std::sort(measured.begin(),measured.end());
+    for(const auto value:measured)CHECK(std::isfinite(value));
+    std::cout<<"[optimization-benchmark] scope=multiplayer_f8_full_ring samples="<<samples
+        <<" exact="<<Timeline::maximum_exact_events
+        <<" recent="<<Timeline::maximum_recent_events
+        <<" retained_identity_hash="<<retained_hash
+        <<" accepted="<<retained_stats.accepted
+        <<" recent_evictions="<<retained_stats.recent_evictions
+        <<" exact_evictions="<<retained_stats.exact_evictions
+        <<" manual_omissions="<<retained_stats.manual_omissions
+        <<" p50_us="<<measured[63]<<" p95_us="<<measured[120]
+        <<" p99_us="<<measured[125]<<" max_us="<<measured.back()<<'\n';
 }

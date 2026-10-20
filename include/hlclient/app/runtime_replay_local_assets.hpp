@@ -278,9 +278,9 @@ public:
   // Lost committed slot events require a conservative visual continuity reset,
   // not a network/map reset. Fresh entity records can materialize new occupants.
   void invalidate_player_continuity() noexcept;
-  void acknowledge_unchanged() noexcept { ++summary_.unchanged_records; }
+  void acknowledge_unchanged() noexcept { ++summary_->unchanged_records; }
   [[nodiscard]] const ReplayLocalVisualSummary &summary() const noexcept {
-    return summary_;
+    return *summary_;
   }
   // Borrow the already imported map collision package for live prediction.
   // Ownership remains with this asset projection; no second BSP parse.
@@ -410,7 +410,15 @@ private:
     std::optional<std::uint32_t> brush_model;
     assets::AssetVector3 brush_source_origin{};
   };
-  ReplayLocalVisualSummary summary_;
+  // Owning buffers survive a move of this asset context; only their pointers
+  // swap at publication, so a completed render cannot be half-published by a
+  // potentially throwing aggregate move of the summary.
+  std::unique_ptr<ReplayLocalVisualSummary> summary_owner_{
+      std::make_unique<ReplayLocalVisualSummary>()};
+  std::unique_ptr<ReplayLocalVisualSummary> staged_summary_owner_{
+      std::make_unique<ReplayLocalVisualSummary>()};
+  ReplayLocalVisualSummary* summary_{summary_owner_.get()};
+  ReplayLocalVisualSummary* staged_summary_{staged_summary_owner_.get()};
   goldsrc::PreparedSoundResources sound_resources_;
   goldsrc::PreparedSkyAssets sky_assets_;
   std::shared_ptr<goldsrc::ApprovedPlayerModelAssets> player_model_assets_;
@@ -453,6 +461,9 @@ private:
   std::map<std::uint32_t, game_api::LocalWeaponModelMetadata> presentation_models_;
   std::uint32_t maximum_clients_{};
   std::shared_ptr<const client::RuntimeClientObservationState> previous_entities_, current_entities_;
+  // Derived only from the validated, sorted authoritative source. Commit with
+  // current_entities_; game-module decisions remain render-time decisions.
+  std::vector<std::uint32_t> ordinary_entity_candidates_, player_entity_candidates_;
   goldsrc::RuntimeOrdinarySnapshotPresentation ordinary_presentation_;
   goldsrc::RuntimePlayerSnapshotPresentation player_presentation_;
   goldsrc::studio::StudioEntityAnimationPresentation ordinary_animation_;
@@ -491,6 +502,7 @@ private:
     std::shared_ptr<const client::RuntimeClientObservationState> retained;
     std::optional<goldsrc::RuntimeOrdinarySnapshotPresentation> ordinary;
     std::optional<goldsrc::RuntimePlayerSnapshotPresentation> players;
+    std::vector<std::uint32_t> ordinary_entity_candidates, player_entity_candidates;
     std::map<std::uint32_t, PlayerLifetime> lifetimes;
     std::uint64_t lifetime_identity{};
     std::unique_ptr<EntityFollowPresentation> follow;
@@ -558,6 +570,10 @@ private:
   ReplayLocalVisualStatus shell_resource_status_{ReplayLocalVisualStatus::absent_model};
   ReplayShellFrameStatus last_shell_frame_status_{ReplayShellFrameStatus::not_attempted};
   std::optional<assets::AssetVector3> viewmodel_attachment_zero_;
+  // The just-materialized camera-local pose also serves same-frame sockets.
+  // Historical frame requests continue through an independent evaluation.
+  std::optional<game_api::ViewmodelIntent> viewmodel_pose_intent_;
+  std::optional<goldsrc::studio::StudioPoseState> viewmodel_pose_;
 
   ReplayLocalVisualStatus first_person_status_{ReplayLocalVisualStatus::absent_model};
 };

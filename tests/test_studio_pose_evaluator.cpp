@@ -6,9 +6,16 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
+#include <iomanip>
+#include <iostream>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -432,6 +439,36 @@ TEST_CASE("Studio body and skin selectors are exact and never fall back",
           studio::StudioPoseErrorCode::invalid_skin_family);
 }
 
+TEST_CASE("Studio evaluated pose owns the exact selected body and skin",
+          "[goldsrc-studio][pose][body][skin][selection-ownership]")
+{
+    const auto model = pose_model();
+    for (std::int32_t body_value = 0; body_value < 4; ++body_value) {
+        for (std::uint32_t skin_family = 0U; skin_family < 2U; ++skin_family) {
+            const auto body = studio::StudioBodyPartSelector{}.select(model, body_value);
+            const auto skin = studio::StudioSkinSelector{}.select(model, skin_family);
+            REQUIRE(body);
+            REQUIRE(skin);
+            studio::StudioPoseInput input;
+            input.body_value = body_value;
+            input.skin_family_index = skin_family;
+            const auto evaluated = studio::StudioPoseEvaluator{}.evaluate(
+                model_identity(), model, input);
+            REQUIRE(evaluated);
+            const auto& selected = evaluated.pose->body_selection().bodyparts;
+            REQUIRE(selected.size() == body.selection->bodyparts.size());
+            for (std::size_t index = 0U; index < selected.size(); ++index) {
+                CHECK(selected[index].bodypart_index == body.selection->bodyparts[index].bodypart_index);
+                CHECK(selected[index].local_model_index == body.selection->bodyparts[index].local_model_index);
+                CHECK(selected[index].submodel_index == body.selection->bodyparts[index].submodel_index);
+            }
+            CHECK(evaluated.pose->skin_selection().family_index == skin.selection->family_index);
+            CHECK(evaluated.pose->skin_selection().texture_indices_by_skin_reference ==
+                  skin.selection->texture_indices_by_skin_reference);
+        }
+    }
+}
+
 TEST_CASE("E10 composes transition and numeric masked layers in local bone space",
           "[e10][goldsrc-studio][pose][composition]")
 {
@@ -477,9 +514,153 @@ TEST_CASE("E10 composes transition and numeric masked layers in local bone space
     CHECK(masked.local_bones()[1].translation.x == Approx(1.0F));
     CHECK(masked.world_bones()[1].transform.values[3] == Approx(21.0F));
     CHECK(masked.statistics().composition_sample_count == 3U);
+    CHECK(masked.statistics().world_build_calls_v2 == 1U);
+    CHECK(masked.statistics().world_matrices_built_v2 == model.bones.size());
     for (auto& bone : model.bones) bone.name = "no-game-specific-bone-name";
     const auto renamed = compose();
     CHECK(renamed.world_bones()[1].transform.values == masked.world_bones()[1].transform.values);
+}
+
+TEST_CASE("Studio composition retains evaluated main pose and conservative byte budget",
+          "[goldsrc-studio][pose][composition][local-evaluation]")
+{
+    const auto model = pose_model(4U, false, true);
+    studio::StudioPoseCompositionInput input;
+    input.main.frame_coordinate = 1.25;
+    input.main.blending_values = {128U, 192U};
+    input.main.body_value = 3;
+    input.main.skin_family_index = 1U;
+    const auto single = studio::StudioPoseEvaluator{}.evaluate(
+        model_identity(), model, input.main);
+    const auto composed = studio::StudioPoseEvaluator{}.compose(
+        model_identity(), model, input);
+    REQUIRE(single);
+    REQUIRE(composed);
+    REQUIRE(single.pose->local_bones().size() == composed.pose->local_bones().size());
+    REQUIRE(single.pose->world_bones().size() == composed.pose->world_bones().size());
+    for (std::size_t bone = 0U; bone < single.pose->local_bones().size(); ++bone) {
+        const auto& left = single.pose->local_bones()[bone];
+        const auto& right = composed.pose->local_bones()[bone];
+        CHECK(left.translation.x == right.translation.x);
+        CHECK(left.translation.y == right.translation.y);
+        CHECK(left.translation.z == right.translation.z);
+        CHECK(left.rotation.x == right.rotation.x);
+        CHECK(left.rotation.y == right.rotation.y);
+        CHECK(left.rotation.z == right.rotation.z);
+        CHECK(left.rotation.w == right.rotation.w);
+        CHECK(single.pose->world_bones()[bone].transform.values ==
+              composed.pose->world_bones()[bone].transform.values);
+        CHECK(single.pose->world_bones()[bone].normal_rotation ==
+              composed.pose->world_bones()[bone].normal_rotation);
+    }
+    CHECK(single.pose->body_selection().bodyparts.size() ==
+          composed.pose->body_selection().bodyparts.size());
+    CHECK(single.pose->skin_selection().texture_indices_by_skin_reference ==
+          composed.pose->skin_selection().texture_indices_by_skin_reference);
+    CHECK(single.pose->statistics().world_matrix_count == model.bones.size());
+    CHECK(composed.pose->statistics().world_matrix_count == model.bones.size());
+    CHECK(single.pose->statistics().world_build_calls_v2 == 1U);
+    CHECK(composed.pose->statistics().world_build_calls_v2 == 1U);
+    CHECK(single.pose->statistics().world_matrices_built_v2 == model.bones.size());
+    CHECK(composed.pose->statistics().world_matrices_built_v2 == model.bones.size());
+    REQUIRE(single.pose->statistics().retained_pose_vector_capacity_bytes_v2);
+    REQUIRE(composed.pose->statistics().retained_pose_vector_capacity_bytes_v2);
+    const auto output_bytes = model.bones.size() *
+        (sizeof(studio::ModelBoneLocalPose) + sizeof(studio::ModelBoneWorldPose));
+    const auto minimum_retained_bytes = output_bytes +
+        composed.pose->body_selection().bodyparts.size() *
+            sizeof(studio::StudioBodyPartSelection) +
+        composed.pose->skin_selection().texture_indices_by_skin_reference.size() *
+            sizeof(std::uint16_t);
+    CHECK(*composed.pose->statistics().retained_pose_vector_capacity_bytes_v2 >=
+          minimum_retained_bytes);
+    CHECK(composed.pose->statistics().accounted_pose_bytes ==
+          single.pose->statistics().accounted_pose_bytes + output_bytes);
+    CHECK(composed.pose->statistics().composition_sample_count == 1U);
+
+    input.previous = input.main;
+    input.previous_weight = 0.0F;
+    const auto two_samples = studio::StudioPoseEvaluator{}.compose(
+        model_identity(), model, input);
+    REQUIRE(two_samples);
+    CHECK(two_samples.pose->statistics().accounted_pose_bytes ==
+          2U * single.pose->statistics().accounted_pose_bytes + output_bytes);
+    CHECK(two_samples.pose->statistics().composition_sample_count == 2U);
+    CHECK(two_samples.pose->statistics().world_build_calls_v2 == 1U);
+    CHECK(two_samples.pose->statistics().world_matrices_built_v2 == model.bones.size());
+
+    auto limits = studio::StudioPoseEvaluationLimits{};
+    limits.maximum_pose_bytes = two_samples.pose->statistics().accounted_pose_bytes - 1U;
+    const auto byte_rejected = studio::StudioPoseEvaluator{}.compose(
+        model_identity(), model, input, limits);
+    REQUIRE_FALSE(byte_rejected);
+    REQUIRE(byte_rejected.error);
+    CHECK(byte_rejected.error->code == studio::StudioPoseErrorCode::pose_byte_limit_exceeded);
+    ++limits.maximum_pose_bytes;
+    REQUIRE(studio::StudioPoseEvaluator{}.compose(model_identity(), model, input, limits));
+    limits = studio::StudioPoseEvaluationLimits{};
+    limits.maximum_pose_matrices = model.bones.size() * 3U - 1U;
+    const auto matrix_rejected = studio::StudioPoseEvaluator{}.compose(
+        model_identity(), model, input, limits);
+    REQUIRE_FALSE(matrix_rejected);
+    REQUIRE(matrix_rejected.error);
+    CHECK(matrix_rejected.error->code == studio::StudioPoseErrorCode::composition_limit_exceeded);
+    ++limits.maximum_pose_matrices;
+    REQUIRE(studio::StudioPoseEvaluator{}.compose(model_identity(), model, input, limits));
+}
+
+TEST_CASE("Studio composition validates hidden extreme samples and hierarchy",
+          "[goldsrc-studio][pose][composition][local-evaluation][rejection]")
+{
+    auto model = pose_model();
+    auto extreme = model.sequences[0U];
+    extreme.animation_blends[0U].bone_tracks[0U].channels[0U].source_default = 3.0e38F;
+    extreme.animation_blends[0U].bone_tracks[0U].channels[5U].source_default = 0.0F;
+    extreme.animation_blends[0U].bone_tracks[1U].channels[0U].source_default = 3.0e38F;
+    model.sequences.push_back(std::move(extreme));
+    studio::StudioPoseCompositionInput input;
+    input.previous.emplace();
+    input.previous->sequence_index = 1U;
+    input.previous_weight = 0.0F;
+    const auto rejected_previous = studio::StudioPoseEvaluator{}.compose(
+        model_identity(), model, input);
+    REQUIRE_FALSE(rejected_previous);
+    REQUIRE(rejected_previous.error);
+    CHECK(rejected_previous.error->code == studio::StudioPoseErrorCode::non_finite_pose);
+    CHECK(rejected_previous.error->sequence_index == 1U);
+
+    input.previous.reset();
+    input.layer.emplace();
+    input.layer->sequence_index = 1U;
+    input.lower_bone_indices = {2U}; // The overflowing child is hidden by the mask.
+    const auto rejected_layer = studio::StudioPoseEvaluator{}.compose(
+        model_identity(), model, input);
+    REQUIRE_FALSE(rejected_layer);
+    REQUIRE(rejected_layer.error);
+    CHECK(rejected_layer.error->code == studio::StudioPoseErrorCode::non_finite_pose);
+    CHECK(rejected_layer.error->sequence_index == 1U);
+
+    // A finite, unusual sample still takes the full-world validation path.
+    // Count that real fallback separately from the final composed hierarchy.
+    model.sequences[1U].animation_blends[0U].bone_tracks[0U].channels[0U].source_default = 20'000.0F;
+    model.sequences[1U].animation_blends[0U].bone_tracks[1U].channels[0U].source_default = 20'000.0F;
+    const auto guarded_layer = studio::StudioPoseEvaluator{}.compose(
+        model_identity(), model, input);
+    REQUIRE(guarded_layer);
+    CHECK(guarded_layer.pose->statistics().world_matrix_count == model.bones.size());
+    CHECK(guarded_layer.pose->statistics().world_build_calls_v2 == 2U);
+    CHECK(guarded_layer.pose->statistics().world_matrices_built_v2 ==
+          2U * model.bones.size());
+    REQUIRE(guarded_layer.pose->statistics().retained_pose_vector_capacity_bytes_v2);
+
+    model.bones[1U].parent_index = 1;
+    input.layer.reset();
+    input.lower_bone_indices.clear();
+    const auto rejected_hierarchy = studio::StudioPoseEvaluator{}.compose(
+        model_identity(), model, input);
+    REQUIRE_FALSE(rejected_hierarchy);
+    REQUIRE(rejected_hierarchy.error);
+    CHECK(rejected_hierarchy.error->code == studio::StudioPoseErrorCode::invalid_hierarchy);
 }
 
 TEST_CASE("E10 composition rejects invalid masks weights samples and finite inputs",
@@ -698,6 +879,183 @@ TEST_CASE("E12 weapon socket follows final merged main gait and transition pose 
         CHECK(composed.pose->world_bones()[0].transform.values==before);
     }
 }
+
+TEST_CASE("Opt-in deterministic Studio pose evaluation and composition benchmark",
+          "[studio-pose-bench][.]")
+{
+    // Kept out of normal acceptance: timings are evidence, not pass/fail gates.
+    // The same test source runs against the captured before and after binaries.
+    bool enabled = false;
+#ifdef _WIN32
+    char* setting = nullptr;
+    std::size_t setting_length = 0U;
+    if (_dupenv_s(&setting, &setting_length, "HLCLIENT_STUDIO_POSE_BENCH") == 0) {
+        enabled = setting != nullptr && std::string_view{setting} == "1";
+    }
+    std::free(setting);
+#else
+    const auto* setting = std::getenv("HLCLIENT_STUDIO_POSE_BENCH");
+    enabled = setting != nullptr && std::string_view{setting} == "1";
+#endif
+    if (!enabled) {
+        SKIP("Set HLCLIENT_STUDIO_POSE_BENCH=1 to run this offline benchmark");
+    }
+
+    auto model = pose_model(4U, true, true);
+    constexpr std::uint32_t bone_count = 64U;
+    for (std::uint32_t bone = 3U; bone < bone_count; ++bone) {
+        auto record = model.bones[1U];
+        record.name = "benchmark_bone_" + std::to_string(bone);
+        record.parent_index = static_cast<std::int32_t>(bone - 1U);
+        model.bones.push_back(std::move(record));
+        for (auto& blend : model.sequences[0U].animation_blends) {
+            auto animation = blend.bone_tracks[1U];
+            animation.bone_index = bone;
+            animation.channels[0U].source_default =
+                0.125F + static_cast<float>(bone % 7U) * 0.01F;
+            blend.bone_tracks.push_back(std::move(animation));
+        }
+    }
+    auto previous_sequence = model.sequences[0U];
+    previous_sequence.label = "benchmark_previous";
+    for (auto& blend : previous_sequence.animation_blends) {
+        blend.bone_tracks[0U].channels[0U].source_default += 1.75F;
+    }
+    model.sequences.push_back(std::move(previous_sequence));
+    auto layer_sequence = model.sequences[0U];
+    layer_sequence.label = "benchmark_layer";
+    for (auto& blend : layer_sequence.animation_blends) {
+        blend.bone_tracks[2U].channels[1U].source_default += 0.5F;
+    }
+    model.sequences.push_back(std::move(layer_sequence));
+
+    studio::StudioPoseInput main_input;
+    main_input.frame_coordinate = 1.25;
+    main_input.body_value = 3;
+    main_input.skin_family_index = 1U;
+    main_input.blending_values = {97U, 161U};
+    studio::StudioPoseCompositionInput main_only;
+    main_only.main = main_input;
+    auto combined = main_only;
+    combined.previous = main_input;
+    combined.previous->sequence_index = 1U;
+    combined.previous->frame_coordinate = 0.25;
+    combined.previous->blending_values = {5U, 220U};
+    combined.previous_weight = 0.35F;
+    combined.layer = main_input;
+    combined.layer->sequence_index = 2U;
+    combined.layer->frame_coordinate = 1.75;
+    combined.layer->blending_values = {192U, 73U};
+    for (std::uint32_t bone = 2U; bone < 32U; ++bone) {
+        combined.lower_bone_indices.push_back(bone);
+    }
+
+    // FNV-1a over explicit numeric fields: independent of source/build paths,
+    // pointer values, vector capacity, and diagnostic accounting changes.
+    const auto fingerprint = [](const studio::StudioPoseState& pose) {
+        std::uint64_t hash = 14695981039346656037ULL;
+        const auto number = [&](std::uint64_t value, unsigned byte_count) {
+            for (unsigned index = 0U; index < byte_count; ++index) {
+                hash ^= (value >> (index * 8U)) & 0xffU;
+                hash *= 1099511628211ULL;
+            }
+        };
+        const auto scalar = [&](float value) {
+            number(std::bit_cast<std::uint32_t>(value), 4U);
+        };
+        number(pose.sequence_index(), 4U);
+        const auto& frame = pose.frame_sample();
+        number(std::bit_cast<std::uint64_t>(frame.source_frame_coordinate), 8U);
+        number(std::bit_cast<std::uint64_t>(frame.normalized_frame_coordinate), 8U);
+        number(frame.frame_zero, 4U);
+        number(frame.frame_one, 4U);
+        number(frame.quantized_fraction, 2U);
+        scalar(frame.fraction);
+        number(frame.looped ? 1U : 0U, 1U);
+        number(frame.clamped ? 1U : 0U, 1U);
+        for (const auto& bone : pose.local_bones()) {
+            scalar(bone.translation.x);
+            scalar(bone.translation.y);
+            scalar(bone.translation.z);
+            scalar(bone.rotation.x);
+            scalar(bone.rotation.y);
+            scalar(bone.rotation.z);
+            scalar(bone.rotation.w);
+        }
+        for (const auto& bone : pose.world_bones()) {
+            for (const auto value : bone.transform.values) scalar(value);
+            for (const auto value : bone.normal_rotation) scalar(value);
+        }
+        number(pose.body_selection().bodyparts.size(), 4U);
+        for (const auto& part : pose.body_selection().bodyparts) {
+            number(part.bodypart_index, 4U);
+            number(part.local_model_index, 4U);
+            number(part.submodel_index, 4U);
+        }
+        number(pose.skin_selection().family_index, 4U);
+        number(pose.skin_selection().texture_indices_by_skin_reference.size(), 4U);
+        for (const auto index : pose.skin_selection().texture_indices_by_skin_reference) {
+            number(index, 2U);
+        }
+        return hash;
+    };
+
+    studio::StudioPoseEvaluator evaluator;
+    const auto identity = model_identity();
+    constexpr std::size_t warmup = 64U;
+    constexpr std::size_t samples = 256U;
+    const auto measure = [&](std::string_view name, auto&& evaluate_pose) {
+        for (std::size_t index = 0U; index < warmup; ++index) {
+            const auto result = evaluate_pose();
+            INFO((result.error ? result.error->context : std::string{}));
+            REQUIRE(result);
+        }
+        std::vector<double> microseconds;
+        microseconds.reserve(samples);
+        std::optional<std::uint64_t> expected_fingerprint;
+        for (std::size_t index = 0U; index < samples; ++index) {
+            const auto start = std::chrono::steady_clock::now();
+            const auto result = evaluate_pose();
+            const auto stop = std::chrono::steady_clock::now();
+            INFO((result.error ? result.error->context : std::string{}));
+            REQUIRE(result);
+            const auto observed = fingerprint(*result.pose);
+            if (!expected_fingerprint) expected_fingerprint = observed;
+            REQUIRE(observed == *expected_fingerprint);
+            microseconds.push_back(
+                std::chrono::duration<double, std::micro>(stop - start).count());
+        }
+        std::sort(microseconds.begin(), microseconds.end());
+        const auto quantile = [&](std::size_t numerator, std::size_t denominator) {
+            return microseconds[(samples * numerator + denominator - 1U) /
+                                denominator - 1U];
+        };
+        std::cout << std::setprecision(9)
+                  << "[studio-pose-bench] {\"fixture\":\"synthetic_64bone_4blend_v1\","
+                  << "\"case\":\"" << name << "\",\"warmup\":" << warmup
+                  << ",\"n\":" << samples << ",\"unit\":\"us\","
+                  << "\"p50\":" << quantile(1U, 2U)
+                  << ",\"p95\":" << quantile(95U, 100U)
+                  << ",\"p99\":" << quantile(99U, 100U)
+                  << ",\"max\":" << microseconds.back()
+                  << ",\"allocations_per_call\":null,\"pose_fingerprint\":\""
+                  << std::hex << std::setw(16) << std::setfill('0')
+                  << *expected_fingerprint << std::dec << std::setfill(' ')
+                  << "\"}\n";
+        return *expected_fingerprint;
+    };
+    const auto evaluated = measure("evaluate", [&] {
+        return evaluator.evaluate(identity, model, main_input);
+    });
+    const auto composed_main = measure("compose_main", [&] {
+        return evaluator.compose(identity, model, main_only);
+    });
+    CHECK(evaluated == composed_main);
+    (void)measure("compose_combined", [&] {
+        return evaluator.compose(identity, model, combined);
+    });
+}
+
 static_assert(!std::is_copy_assignable_v<studio::StudioPoseState>);
 static_assert(std::is_same_v<decltype(studio::StudioPoseCacheResult{}.pose),
                              std::shared_ptr<const studio::StudioPoseState>>);

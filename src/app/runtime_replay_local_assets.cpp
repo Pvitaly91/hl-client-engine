@@ -40,6 +40,15 @@
 
 namespace hlclient::app {
 namespace {
+// Observation validity guarantees strictly ascending, unique entity numbers.
+// Presented effect entities are a filtered copy preserving that same order.
+[[nodiscard]] const client::RuntimePacketEntityObservation* find_sorted_packet_entity(
+    const std::vector<client::RuntimePacketEntityObservation>& entities,
+    std::uint32_t number) noexcept {
+  const auto found=std::ranges::lower_bound(entities,number,{},
+      &client::RuntimePacketEntityObservation::entity_number);
+  return found!=entities.end() && found->entity_number==number ? &*found : nullptr;
+}
 bool rigid_effect_surface_transform(const renderer::RenderMatrix4& matrix) noexcept {
   if(!renderer::is_finite(matrix) || std::abs(matrix.values[3])>1e-6F ||
       std::abs(matrix.values[7])>1e-6F || std::abs(matrix.values[11])>1e-6F ||
@@ -240,8 +249,8 @@ void RuntimeReplayLocalAssets::sound_sources(const client::RuntimeClientObservat
     assets::AssetVector3 position{static_cast<float>(*entity.origin.x),static_cast<float>(*entity.origin.y),static_cast<float>(*entity.origin.z)};
     const auto binding=entity.model_index ? bindings_.find(*entity.model_index) : bindings_.end();
     if(entity.model_index) {
-      const auto named=summary_.model_names.find(*entity.model_index);
-      if(named!=summary_.model_names.end() && named->second.starts_with("*") &&
+      const auto named=summary_->model_names.find(*entity.model_index);
+      if(named!=summary_->model_names.end() && named->second.starts_with("*") &&
           (binding==bindings_.end() || !binding->second.brush_model)) continue;
     }
     if(binding!=bindings_.end() && binding->second.brush_model) {
@@ -594,7 +603,7 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
           "; status=" + std::string{manifest ? g::to_string(manifest.state->completeness()) :
               manifest.error ? g::to_string(manifest.error->code) : std::string_view{"unavailable"}}};
     }
-    auto &summary = result->summary_;
+    auto &summary = *result->summary_;
     std::size_t checked_resources{};
     for(const auto& entry:inventory.state->entries()) {
       preparation_progress(loading_work,LoadingStage::resources,checked_resources++,inventory.state->entries().size());
@@ -1140,15 +1149,18 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       break;
     }
     check_preparation(loading_work);
+    // Resource diagnostics are immutable for this local asset context. Keep a
+    // second owning copy once, rather than duplicating their maps each frame.
+    *result->staged_summary_ = summary;
     return {std::move(result), {}};
   } catch (const AssetPreparationCancelled&) {
     return {{},RuntimeReplayVisualProjectionError{
         RuntimeReplayVisualProjectionErrorCode::asset_preparation_cancelled,{},{},"asset_preparation_cancelled"}};
   } catch (const std::exception &error) {
     return {{}, visual_error(error.what()),
-        result ? std::move(result->summary_.resource_issues) :
+        result ? std::move(result->summary_->resource_issues) :
             std::vector<ReplayLocalVisualSummary::ResourceIssue>{},
-        result ? result->summary_.resource_issues_omitted : 0U};
+        result ? result->summary_->resource_issues_omitted : 0U};
   }
 }
 
@@ -1176,6 +1188,9 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::reset_generation(
   candidate.set_world_scene(world_scene_);
   auto result = project_entities(observation, candidate);
   if (result) {
+    viewmodel_pose_intent_.reset();
+    viewmodel_pose_.reset();
+    viewmodel_attachment_zero_.reset();
     impact_brush_scene_.reset();impact_brush_generation_=impact_brush_revision_=0;
     entity_follow_.reset(observation.generation);entity_follow_.observe(observation);
     target = std::move(candidate);
@@ -1239,9 +1254,9 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
   if(current_entities_)for(const auto& entity:current_entities_->packet_entities)if(entity.custom_beam) {
     const auto slot=entity.custom_beam->sprite_model_index;
     if(beam_glow_profiles_.contains(slot))continue;
-    const auto named=summary_.model_names.find(slot);
+    const auto named=summary_->model_names.find(slot);
     const auto bound=bindings_.find(slot);
-    if(named!=summary_.model_names.end() && bound!=bindings_.end() &&
+    if(named!=summary_->model_names.end() && bound!=bindings_.end() &&
         bound->second.status==ReplayLocalVisualStatus::ready_sprite) {
       beam_glow_profiles_.emplace(slot,game.beam_ribbon_glow_profile(named->second));
       beam_light_profiles_.emplace(slot,std::array{
@@ -1271,46 +1286,29 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
   std::size_t discontinuous_count{};
   const auto previous_record=previous.entity_metadata.source ? previous.entity_metadata.source->record_ordinal : 0U;
   for(const auto& [entity,lifetime]:player_lifetimes_) {
-    const auto now=std::ranges::find(current_entities_->packet_entities,entity,&client::RuntimePacketEntityObservation::entity_number);
-    const auto before=std::ranges::find(previous.packet_entities,entity,&client::RuntimePacketEntityObservation::entity_number);
-    const bool game_boundary=now!=current_entities_->packet_entities.end() && game.world_entity({*now,
-        before==previous.packet_entities.end() ? nullptr : &*before,current_entities_->packet_entities,maximum_clients_}).discontinuity;
+    const auto* now=find_sorted_packet_entity(current_entities_->packet_entities,entity);
+    const auto* before=find_sorted_packet_entity(previous.packet_entities,entity);
+    const bool game_boundary=now && game.world_entity({*now,before,
+        current_entities_->packet_entities,maximum_clients_}).discontinuity;
     if(((lifetime.continuity_floor && previous_record<=lifetime.continuity_floor) || game_boundary) && discontinuous_count<discontinuous.size())
       discontinuous[discontinuous_count++]=entity;
   }
   options.discontinuous_entities=std::span{discontinuous}.first(discontinuous_count);
-  // Ready kinetic Studio slots and supported server-controlled glow sprites
-  // opt in. MOVETYPE_NONE does not mean an immutable server origin: a glow
-  // sprite can be repositioned every snapshot without client physics. Keep
-  // other static assets discrete and brush carry under its separate D4 owner.
-  // Public generic movetypes: fly/toss/flymissile/bounce/bouncemissile.
-  std::vector<std::uint32_t> ordinary;
-  ordinary.reserve(current_entities_->packet_entities.size());
-  for(const auto& entity:current_entities_->packet_entities) if(!entity.player_movement_schema && entity.model_index) {
-    const auto binding=bindings_.find(*entity.model_index);
-    if(binding==bindings_.end()) continue;
-    const bool kinetic_studio=binding->second.status==ReplayLocalVisualStatus::ready_studio &&
-        entity.brush_move_type && (*entity.brush_move_type==5U || *entity.brush_move_type==6U ||
-        *entity.brush_move_type==9U || *entity.brush_move_type==10U || *entity.brush_move_type==11U);
-    const bool glow_sprite=binding->second.status==ReplayLocalVisualStatus::ready_sprite &&
-        entity.render_mode==3U && (entity.render_effect.value_or(0U)==0U || entity.render_effect==14U);
-    if(kinetic_studio || glow_sprite) ordinary.push_back(entity.entity_number);
-  }
-  std::sort(ordinary.begin(),ordinary.end());
   std::vector<std::uint32_t> players;
   std::vector<g::RuntimePlayerContinuityBoundary> boundaries;
-  for(const auto& entity:current_entities_->packet_entities) {
-    if(!entity.player_movement_schema || entity.entity_number>maximum_clients_ ||
-        entity.entity_number==receiving_entity)continue;
+  for(const auto number:player_entity_candidates_) {
+    if(number==receiving_entity)continue;
     if(players.size()>=policy.maximum_players)break;
+    const auto* candidate=find_sorted_packet_entity(current_entities_->packet_entities,number);
+    if(!candidate)continue; // Candidate and source are committed together.
+    const auto& entity=*candidate;
     players.push_back(entity.entity_number);
     std::size_t floor{};
     const client::RuntimePacketEntityObservation* before=nullptr;
     std::optional<double> before_seconds;
     for(const auto& source:player_presentation_.observations()) {
-      const auto row=std::ranges::find(source->packet_entities,entity.entity_number,
-          &client::RuntimePacketEntityObservation::entity_number);
-      if(row!=source->packet_entities.end()) {
+      const auto* row=find_sorted_packet_entity(source->packet_entities,entity.entity_number);
+      if(row) {
         const auto approved=studio_model_data(row->model_index.value_or(0U));
         const auto intent=game.world_entity({*row,before,source->packet_entities,maximum_clients_,
             approved.get(),before_seconds,source->server_time_seconds});
@@ -1320,7 +1318,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
             g::RuntimePlayerSnapshotPresentation::maximum_history*g::RuntimePlayerSnapshotPresentation::maximum_players)
           sampled_motion_exceptions_.push_back({entity.entity_number,source->entity_metadata.source->record_ordinal,
               intent.animation_only_effect_mask});
-        before=&*row;
+        before=row;
         before_seconds=source->server_time_seconds;
       } else {before=nullptr;before_seconds.reset();}
     }
@@ -1331,7 +1329,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
       policy.interpolation_delay_seconds,players,boundaries);
   if(!buffered)return {false,false,visual_error(buffered.presentation.error->context)};
   auto& sampled=buffered.presentation;
-  options.ordinary_entities=ordinary;
+  options.ordinary_entities=ordinary_entity_candidates_;
   // Kinetic models can cover 200 units per 100 ms authoritative interval.
   // Do not misclassify them with a player teleport threshold. Keep a separate
   // finite displacement guard, the same bounded gap, and no extrapolation.
@@ -1364,7 +1362,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
       if(cached!=remote_support_contexts_.end() && cached->generation==generation_ && cached->scene &&
           cached->scene->model_library()==sampled_brush_scene_->model_library())contexts.push_back(std::move(*cached));
       else contexts.push_back(g::build_reference_brush_collision(sampled_brush_scene_->model_library(),
-          summary_.model_names,*source,generation_));
+          summary_->model_names,*source,generation_));
     };
     for(const auto& source:player_presentation_.observations())append(source);
     append(current_entities_);
@@ -1389,9 +1387,7 @@ void RuntimeReplayLocalAssets::capture_remote_movement(
     const auto actor=[](const client::RuntimeClientObservationState* source,std::uint32_t number)
         -> const client::RuntimePacketEntityObservation* {
       if(!source)return nullptr;
-      const auto row=std::ranges::find(source->packet_entities,number,
-          &client::RuntimePacketEntityObservation::entity_number);
-      return row==source->packet_entities.end() ? nullptr : &*row;
+      return find_sorted_packet_entity(source->packet_entities,number);
     };
     const auto origin=[](const client::RuntimePacketEntityObservation* row)
         -> std::optional<std::array<double,3>> {
@@ -1439,8 +1435,8 @@ void RuntimeReplayLocalAssets::capture_remote_movement(
         row.selected_main=selected->sequence;row.selected_gait=selected->gait_sequence;
         row.selected_weapon=selected->weapon_model_index;
       }
-      for(std::size_t i=0U;i<summary_.remote_player_count;++i) {
-        const auto& diagnostic=summary_.remote_players[i];
+      for(std::size_t i=0U;i<summary_->remote_player_count;++i) {
+        const auto& diagnostic=summary_->remote_players[i];
         if(diagnostic.entity!=anchor.entity)continue;
         row.support_entity=diagnostic.support_entity;row.support_model=diagnostic.support_model;
         row.support_offset_z=diagnostic.support_offset_z;break;
@@ -1649,14 +1645,33 @@ RuntimeReplayLocalAssets::stage_authoritative_observation(
     stage.ordinary->observe(stage.retained);
     stage.players=player_presentation_;
     stage.players->observe(stage.retained);
+    stage.ordinary_entity_candidates.reserve(observation.packet_entities.size());
+    stage.player_entity_candidates.reserve(std::min<std::size_t>(
+        maximum_clients_,observation.packet_entities.size()));
     for(const auto& value:observation.packet_entities) {
-      if(!value.player_movement_schema || value.entity_number>maximum_clients_)
-        continue;
-      const auto old=player_lifetimes_.find(value.entity_number);
-      stage.lifetimes.emplace(value.entity_number,
-          old!=player_lifetimes_.end() && old->second.model==value.model_index
-              ? old->second
-              : PlayerLifetime{++stage.lifetime_identity,value.model_index});
+      if(value.player_movement_schema && value.entity_number<=maximum_clients_) {
+        // Keep every source candidate, including the local player. The
+        // receiving slot and mutable module policy are evaluated each render.
+        stage.player_entity_candidates.push_back(value.entity_number);
+        const auto old=player_lifetimes_.find(value.entity_number);
+        stage.lifetimes.emplace(value.entity_number,
+            old!=player_lifetimes_.end() && old->second.model==value.model_index
+                ? old->second
+                : PlayerLifetime{++stage.lifetime_identity,value.model_index});
+      }
+      // Ready kinetic Studio slots and supported server-controlled glow
+      // sprites opt in. MOVETYPE_NONE can still move a glow each snapshot.
+      // Other static assets stay discrete; brush carry has its own owner.
+      if(value.player_movement_schema || !value.model_index)continue;
+      const auto binding=bindings_.find(*value.model_index);
+      if(binding==bindings_.end())continue;
+      const bool kinetic_studio=binding->second.status==ReplayLocalVisualStatus::ready_studio &&
+          value.brush_move_type && (*value.brush_move_type==5U || *value.brush_move_type==6U ||
+          *value.brush_move_type==9U || *value.brush_move_type==10U || *value.brush_move_type==11U);
+      const bool glow_sprite=binding->second.status==ReplayLocalVisualStatus::ready_sprite &&
+          value.render_mode==3U && (value.render_effect.value_or(0U)==0U || value.render_effect==14U);
+      if(kinetic_studio || glow_sprite)
+        stage.ordinary_entity_candidates.push_back(value.entity_number);
     }
   }
   // Keep the complete trail owner off the Win32 stack.  All allocation and
@@ -1683,14 +1698,14 @@ void RuntimeReplayLocalAssets::commit_authoritative_observation(
   if(stage.retain) {
     previous_entities_=std::move(current_entities_);
     current_entities_=std::move(stage.retained);
+    ordinary_entity_candidates_=std::move(stage.ordinary_entity_candidates);
+    player_entity_candidates_=std::move(stage.player_entity_candidates);
     ordinary_animation_.retain_entities(current_entities_->packet_entities);
     // A committed removal is a lifetime boundary even if no render frame
     // samples that gap before this slot is reused by the next RX record.
     std::erase_if(beam_endpoint_bindings_,[&](const auto& entry) {
-      return std::ranges::none_of(current_entities_->packet_entities,
-          [&](const auto& entity) {
-            return entity.entity_number==entry.first && entity.custom_beam;
-          });
+      const auto* entity=find_sorted_packet_entity(current_entities_->packet_entities,entry.first);
+      return !entity || !entity->custom_beam;
     });
     ordinary_presentation_=std::move(*stage.ordinary);
     player_presentation_=std::move(*stage.players);
@@ -1700,15 +1715,11 @@ void RuntimeReplayLocalAssets::commit_authoritative_observation(
     // application skips the discrete render frame. Do not let a later reuse
     // of the same entity number inherit the removed body's frozen appearance.
     std::erase_if(corpse_appearances_,[&](const auto& item) {
-      return std::ranges::none_of(current_entities_->packet_entities,
-          [&](const auto& entity) {return entity.entity_number==item.first;});
+      return !find_sorted_packet_entity(current_entities_->packet_entities,item.first);
     });
     std::erase_if(light_cache_,[&](const auto& value) {
       if(value.first==0U || value.first>=0xe0000000U) return false;
-      const auto& entities=current_entities_->packet_entities;
-      const auto found=std::ranges::lower_bound(entities,value.first,{},
-          &client::RuntimePacketEntityObservation::entity_number);
-      return found==entities.end() || found->entity_number!=value.first;
+      return !find_sorted_packet_entity(current_entities_->packet_entities,value.first);
     });
   }
   server_decal_lifetimes_=std::move(stage.decal_lifetimes);
@@ -1780,7 +1791,41 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         if (built) { frustum=std::move(built.frustum); input.view_frustum=&*frustum; }
       }
     }
-    auto next = summary_;
+    auto& next = *staged_summary_;
+    // The public summary is committed only after the render target succeeds.
+    // Its resource metadata is identical in both buffers. Remote entries
+    // overwritten by this frame need no deep copy; preserve only the unused
+    // tail at the publication boundary for exact historical summary output.
+    next.remote_previous_seconds = summary_->remote_previous_seconds;
+    next.remote_current_seconds = summary_->remote_current_seconds;
+    next.remote_sample_seconds = summary_->remote_sample_seconds;
+    next.remote_alpha = summary_->remote_alpha;
+    next.remote_snapshot_mode = summary_->remote_snapshot_mode;
+    next.projected_frames = summary_->projected_frames;
+    next.unchanged_records = summary_->unchanged_records;
+    next.brush_transform_changes = summary_->brush_transform_changes;
+    next.last_changed_brush_entity = summary_->last_changed_brush_entity;
+    next.last_changed_brush_model = summary_->last_changed_brush_model;
+    constexpr auto status_count =
+        static_cast<std::size_t>(ReplayLocalVisualStatus::import_failed) + 1U;
+    std::array<std::size_t, status_count> coverage_counts{};
+    std::vector<std::pair<std::uint32_t, std::size_t>> model_slot_counts;
+    model_slot_counts.reserve(bindings_.size());
+    for (const auto& [slot, binding] : bindings_) {
+      (void)binding;
+      model_slot_counts.emplace_back(slot, 0U);
+    }
+    const auto add_coverage = [&](ReplayLocalVisualStatus status) {
+      ++coverage_counts[static_cast<std::size_t>(status)];
+    };
+    const auto add_rendered_slot = [&](std::uint32_t slot) {
+      const auto found = std::lower_bound(model_slot_counts.begin(), model_slot_counts.end(), slot,
+          [](const auto& item, std::uint32_t value) { return item.first < value; });
+      if (found != model_slot_counts.end() && found->first == slot)
+        ++found->second;
+      else
+        ++next.rendered_model_slots[slot]; // Preserve unbound diagnostic slots.
+    };
     next.ordinary_pose_evaluations=next.ordinary_pose_reuses=0U;
     std::vector<OrdinaryFramePose> ordinary_poses;
     std::size_t ordinary_pose_bytes{};
@@ -1810,11 +1855,10 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
     std::optional<client::RenderCameraState> camera;
     const auto unavailable = [&](std::uint32_t number,
                                  ReplayLocalVisualStatus reason) {
-      ++next.coverage[reason];
+      add_coverage(reason);
       ++next.unsupported_instances;
-      const auto entity = std::ranges::find(observation.packet_entities, number,
-          &client::RuntimePacketEntityObservation::entity_number);
-      if (!next.first_brush_rejection && entity != observation.packet_entities.end() && entity->model_index) {
+      const auto* entity=find_sorted_packet_entity(observation.packet_entities,number);
+      if (!next.first_brush_rejection && entity && entity->model_index) {
         const auto name = next.model_names.find(*entity->model_index);
         const auto binding = bindings_.find(*entity->model_index);
         if (name != next.model_names.end() && name->second.starts_with('*'))
@@ -1839,9 +1883,8 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
       }
       const client::RuntimePacketEntityObservation* selection_previous=nullptr;
       if(sampled_game_ && previous_entities_) {
-        const auto old=std::ranges::find(previous_entities_->packet_entities,entity.entity_number,
-            &client::RuntimePacketEntityObservation::entity_number);
-        if(old!=previous_entities_->packet_entities.end()) selection_previous=&*old;
+        selection_previous=find_sorted_packet_entity(previous_entities_->packet_entities,
+            entity.entity_number);
       }
       auto selection=sampled_game_ ? sampled_game_->world_entity(
           {entity,selection_previous,current_entities_->packet_entities,maximum_clients_}) : game_api::WorldEntityPresentationIntent{};
@@ -1935,8 +1978,8 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
           brush_frame.instances.back().touched_leaf_indices = membership.result->leaf_indices;
         ++next.submitted_brushes;
         ++next.rendered_instances;
-        ++next.coverage[ReplayLocalVisualStatus::ready_brush];
-        ++next.rendered_model_slots[*entity.model_index];
+        add_coverage(ReplayLocalVisualStatus::ready_brush);
+        add_rendered_slot(*entity.model_index);
         continue;
       }
       if (!binding.library_index || !binding.render_index) {
@@ -1991,10 +2034,10 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         auto visual_render_index=*binding.render_index;
         auto visual_model=record.model_asset();
         if(sampled_game_ && (entity.player_movement_schema || proxy)) {
-          const auto model_name=summary_.model_names.find(*model_slot);
+          const auto model_name=summary_->model_names.find(*model_slot);
           if(corpse!=corpse_appearances_.end())appearance=corpse->second.appearance;
           else appearance=sampled_game_->player_appearance(proxy ? selection.source_player.value_or(0U) : entity.entity_number,
-              model_name!=summary_.model_names.end() ? model_name->second : std::string_view{});
+              model_name!=summary_->model_names.end() ? model_name->second : std::string_view{});
           if(proxy && corpse==corpse_appearances_.end() && corpse_appearances_.size()<64U)
             corpse_appearances_.emplace(entity.entity_number,CorpseAppearance{entity,selection,appearance});
           appearance_index=resolve_player_appearance(appearance,*record.model_asset(),visual_identity,visual_fingerprint,entity);
@@ -2072,16 +2115,14 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
               sampled_anchor->previous : previous_entities_;
           if(current_source==current_entities_ && previous_source==current_source)
             previous_source=previous_entities_; // Preserve real held/gap raw anchors at the API.
-          const auto current=std::ranges::find(current_source->packet_entities,
-              entity.entity_number,&client::RuntimePacketEntityObservation::entity_number);
+          const auto* current=find_sorted_packet_entity(current_source->packet_entities,
+              entity.entity_number);
           const client::RuntimePacketEntityObservation* previous=nullptr;
           if (previous_source && previous_source!=current_source) {
-            const auto found_previous=std::ranges::find(previous_source->packet_entities,
-                entity.entity_number,&client::RuntimePacketEntityObservation::entity_number);
-            if (found_previous!=previous_source->packet_entities.end()) previous=&*found_previous;
+            previous=find_sorted_packet_entity(previous_source->packet_entities,entity.entity_number);
           }
           const auto lifetime=player_lifetimes_.find(entity.entity_number);
-          if (current==current_source->packet_entities.end() || (!proxy && lifetime==player_lifetimes_.end())) {
+          if (!current || (!proxy && lifetime==player_lifetimes_.end())) {
             unavailable(entity.entity_number,ReplayLocalVisualStatus::unsupported_pose); continue;
           }
           const auto source_record=current_source->entity_metadata.source ? current_source->entity_metadata.source->record_ordinal : 0U;
@@ -2127,9 +2168,9 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
             auto& diagnostic=next.remote_players[next.remote_player_count++];
             diagnostic={}; diagnostic.entity=entity.entity_number; diagnostic.model_slot=*model_slot;
             diagnostic.appearance=appearance;diagnostic.visual_model_resource_id=visual_identity.resource_id;
-            const auto base_name=summary_.model_names.find(*model_slot);
+            const auto base_name=summary_->model_names.find(*model_slot);
             diagnostic.resolved_visual_model=appearance_index && !appearance_variants_[*appearance_index].virtual_name.empty()
-                ? appearance_variants_[*appearance_index].virtual_name : base_name!=summary_.model_names.end() ? base_name->second : "";
+                ? appearance_variants_[*appearance_index].virtual_name : base_name!=summary_->model_names.end() ? base_name->second : "";
             diagnostic.palette_remapped=appearance_index && appearance_variants_[*appearance_index].remapped;
             diagnostic.status=intent.status; diagnostic.intent=intent;
             diagnostic.server_owned_proxy=proxy;diagnostic.source_player=selection.source_player;
@@ -2151,10 +2192,10 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
           if (intent.status!=game_api::RemotePlayerPresentationStatus::ready) {
             unavailable(entity.entity_number,ReplayLocalVisualStatus::unsupported_pose); continue;
           }
-          const auto latest_socket_entity=std::ranges::find(current_entities_->packet_entities,
-              entity.entity_number,&client::RuntimePacketEntityObservation::entity_number);
+          const auto* latest_socket_entity=find_sorted_packet_entity(current_entities_->packet_entities,
+              entity.entity_number);
           const bool matching_socket_weapon=!intent.attachment_model_index ||
-              (latest_socket_entity!=current_entities_->packet_entities.end() &&
+              (latest_socket_entity &&
                latest_socket_entity->weapon_model_index==intent.attachment_model_index &&
                current->weapon_model_index==intent.attachment_model_index);
           // A delayed old p-model cannot supply a socket for a new weapon's
@@ -2200,9 +2241,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
           if(sampled_game_ && sampled_player_current_) {
             const auto find_raw=[&](const auto& source)->const client::RuntimePacketEntityObservation* {
               if(!source)return nullptr;
-              const auto found=std::ranges::find(source->packet_entities,entity.entity_number,
-                  &client::RuntimePacketEntityObservation::entity_number);
-              return found==source->packet_entities.end() ? nullptr : &*found;
+              return find_sorted_packet_entity(source->packet_entities,entity.entity_number);
             };
             auto raw_current=find_raw(sampled_player_current_);
             auto raw_previous=find_raw(sampled_player_previous_);
@@ -2375,9 +2414,9 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
             if(!support || *support==r::StudioEntityMaterialSupportStatus::unsupported_material)
               return ReplayAttachmentStatus::material_rejected;
             if(weapon_sample) {
-              const auto named=summary_.model_names.find(*attachment_slot);
+              const auto named=summary_->model_names.find(*attachment_slot);
               const auto plan=sampled_game_->remote_weapon_socket_plan({child_record.resource_id(),
-                  child_record.source_fingerprint(),named==summary_.model_names.end() ? std::string_view{} : named->second,child});
+                  child_record.source_fingerprint(),named==summary_->model_names.end() ? std::string_view{} : named->second,child});
               weapon_sample->semantic_known=true;weapon_sample->semantic_match=plan.semantic_match;
               weapon_sample->semantic_key=plan.semantic_key;
               weapon_sample->resource_id=child_record.resource_id();weapon_sample->revision=child_record.source_fingerprint();
@@ -2406,7 +2445,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
             child_instance.interpolated_bounds=bounds({posed.bounds->minimum,posed.bounds->maximum},transform);
             input.studio_poses.push_back(std::move(child_pose));
             input.studio_instances.push_back(std::move(child_instance));
-            ++next.rendered_model_slots[*attachment_slot];
+            add_rendered_slot(*attachment_slot);
             return ReplayAttachmentStatus::submitted;
           };
           const auto status=attach();
@@ -2454,8 +2493,8 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         input.sprite_instances.push_back(instance);
       }
       ++next.rendered_instances;
-      ++next.coverage[binding.status];
-      ++next.rendered_model_slots[*entity.model_index];
+      add_coverage(binding.status);
+      add_rendered_slot(*entity.model_index);
     }
     auto frame =
         r::EntityRenderFrameBuilder{}.build(*package_, std::move(input));
@@ -2510,9 +2549,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
       std::erase_if(next_effect_entities,[&](const auto& entity) {
       const client::RuntimePacketEntityObservation* previous=nullptr;
       if(previous_entities_) {
-        const auto found=std::ranges::find(previous_entities_->packet_entities,entity.entity_number,
-            &client::RuntimePacketEntityObservation::entity_number);
-        if(found!=previous_entities_->packet_entities.end()) previous=&*found;
+        previous=find_sorted_packet_entity(previous_entities_->packet_entities,entity.entity_number);
       }
       const auto& current=current_entities_ ? current_entities_->packet_entities : observation.packet_entities;
       // Copy the selected module's source-availability decision while its
@@ -2525,6 +2562,13 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
       return unavailable;
       });
     }
+    for (std::size_t status=0; status<coverage_counts.size(); ++status)
+      if (coverage_counts[status])
+        next.coverage.emplace(static_cast<ReplayLocalVisualStatus>(status), coverage_counts[status]);
+    for (const auto& [slot, count] : model_slot_counts)
+      if (count) next.rendered_model_slots[slot] += count;
+    for (std::size_t index=next.remote_player_count; index<next.remote_players.size(); ++index)
+      next.remote_players[index]=summary_->remote_players[index];
     target = std::move(candidate);
     if (camera_policy_ == ReplayLocalCameraPolicy::offline_spectator &&
         camera) {
@@ -2533,7 +2577,8 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
     }
     ++frame_revision_;
     ++next.projected_frames;
-    summary_ = std::move(next);
+    static_assert(std::is_nothrow_swappable_v<decltype(summary_)>);
+    std::swap(summary_, staged_summary_);
     if(sampled_game_) {
       remote_weapon_poses_=next_weapon_poses;remote_weapon_pose_count_=next_weapon_pose_count;
       sampled_game_->remote_weapon_poses(remote_weapon_poses());
@@ -2566,8 +2611,8 @@ RuntimeReplayLocalAssets::presentation_model(
     const std::uint64_t generation, const std::uint32_t index) {
   if (!library_ || !package_ || generation != generation_) return {};
   const auto bound = bindings_.find(index);
-  const auto named = summary_.model_names.find(index);
-  if (bound == bindings_.end() || named == summary_.model_names.end() ||
+  const auto named = summary_->model_names.find(index);
+  if (bound == bindings_.end() || named == summary_->model_names.end() ||
       bound->second.status != ReplayLocalVisualStatus::ready_studio ||
       !bound->second.library_index || !bound->second.render_index) return {};
   if (auto cached = presentation_models_.find(index); cached != presentation_models_.end()) {
@@ -2602,6 +2647,8 @@ RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent&
     std::optional<assets::AssetVector3> world_light_origin) {
   first_person_status_ = ReplayLocalVisualStatus::absent_model;
   viewmodel_attachment_zero_.reset();
+  viewmodel_pose_intent_.reset();
+  viewmodel_pose_.reset();
   if (intent.status == game_api::ViewmodelStatus::unsupported_asset) {
     first_person_status_ = ReplayLocalVisualStatus::unsupported_asset;
     const auto unavailable = bindings_.find(intent.model_index);
@@ -2646,6 +2693,7 @@ RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent&
     first_person_status_ = ReplayLocalVisualStatus::unsupported_pose;
     return std::nullopt;
   }
+  std::optional<assets::AssetVector3> attachment_zero;
   if (!model.attachments.empty()) {
     const auto& attachment = model.attachments.front();
     if (attachment.bone_index < pose.pose->world_bones().size()) {
@@ -2656,7 +2704,7 @@ RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent&
           m[4]*p.x+m[5]*p.y+m[6]*p.z+m[7]+intent.camera_local_origin[1],
           m[8]*p.x+m[9]*p.y+m[10]*p.z+m[11]+intent.camera_local_origin[2]};
       if (std::isfinite(location.x)&&std::isfinite(location.y)&&std::isfinite(location.z))
-        viewmodel_attachment_zero_=location;
+        attachment_zero=location;
     }
   }
   const auto material = r::studio_entity_material_support(
@@ -2710,10 +2758,16 @@ RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent&
     first_person_status_ = ReplayLocalVisualStatus::unsupported_pose;
     return std::nullopt;
   }
-  first_person_status_ = ReplayLocalVisualStatus::ready_studio;
-  return renderer::RenderDynamicEntities{
+  // Finish all allocations before publishing same-frame socket state. A
+  // failed frame allocation must leave attachments unavailable as well.
+  renderer::RenderDynamicEntities materialized{
       package_, std::make_shared<const r::EntityRenderFrame>(std::move(*frame.frame)),
       {1U, 1U, 1U, 0U, 0U}};
+  viewmodel_pose_.emplace(std::move(*pose.pose));
+  viewmodel_pose_intent_.emplace(intent);
+  viewmodel_attachment_zero_=attachment_zero;
+  first_person_status_ = ReplayLocalVisualStatus::ready_studio;
+  return materialized;
 }
 
 std::optional<assets::AssetVector3>
@@ -2734,17 +2788,26 @@ RuntimeReplayLocalAssets::viewmodel_attachment_at_frame(
   if (attachment_index >= model.attachments.size() ||
       intent.sequence >= model.sequences.size()) return {};
   const auto& attachment = model.attachments[attachment_index];
-  g::studio::StudioPoseInput pose_input;
-  pose_input.compatibility_profile =
-      g::studio::StudioPoseCompatibilityProfile::public_goldsrc48_discrete_local_asset_v1;
-  pose_input.sequence_index = intent.sequence;
-  pose_input.body_value = intent.body;
-  pose_input.frame_coordinate = frame_coordinate;
-  const auto pose = g::studio::StudioPoseEvaluator{}.evaluate(
-      {std::to_string(record.resource_id()), record.source_fingerprint()},
-      model, pose_input);
-  if (!pose || attachment.bone_index >= pose.pose->world_bones().size()) return {};
-  const auto& m = pose.pose->world_bones()[attachment.bone_index].transform.values;
+  const g::studio::StudioPoseState* pose_state=nullptr;
+  std::optional<g::studio::StudioPoseEvaluationResult> historical;
+  if (viewmodel_pose_intent_ && *viewmodel_pose_intent_ == intent &&
+      frame_coordinate == intent.frame_coordinate && viewmodel_pose_) {
+    pose_state=&*viewmodel_pose_;
+  } else {
+    g::studio::StudioPoseInput pose_input;
+    pose_input.compatibility_profile =
+        g::studio::StudioPoseCompatibilityProfile::public_goldsrc48_discrete_local_asset_v1;
+    pose_input.sequence_index = intent.sequence;
+    pose_input.body_value = intent.body;
+    pose_input.frame_coordinate = frame_coordinate;
+    historical.emplace(g::studio::StudioPoseEvaluator{}.evaluate(
+        {std::to_string(record.resource_id()), record.source_fingerprint()},
+        model, pose_input));
+    if (!*historical) return {};
+    pose_state=&*historical->pose;
+  }
+  if (attachment.bone_index >= pose_state->world_bones().size()) return {};
+  const auto& m = pose_state->world_bones()[attachment.bone_index].transform.values;
   const auto p = attachment.local_origin;
   const assets::AssetVector3 location{
       m[0]*p.x+m[1]*p.y+m[2]*p.z+m[3]+intent.camera_local_origin[0],
@@ -2756,8 +2819,8 @@ RuntimeReplayLocalAssets::viewmodel_attachment_at_frame(
 }
 
 bool RuntimeReplayLocalAssets::has_shell_model(std::string_view name) const noexcept {
-  const auto named=std::ranges::find_if(summary_.model_names,[&](const auto& entry) {return entry.second==name;});
-  if(named==summary_.model_names.end()) return false;
+  const auto named=std::ranges::find_if(summary_->model_names,[&](const auto& entry) {return entry.second==name;});
+  if(named==summary_->model_names.end()) return false;
   const auto found=bindings_.find(named->first);
   return found!=bindings_.end() && found->second.status==ReplayLocalVisualStatus::ready_studio &&
       found->second.library_index && found->second.render_index;
@@ -2794,8 +2857,8 @@ RuntimeReplayLocalAssets::materialize_shells(
     }
     auto index=shell_model_index_; // compatibility for existing unnamed neutral fixtures
     if(!name.empty()) {
-      const auto named=std::ranges::find_if(summary_.model_names,[&](const auto& entry) {return entry.second==name;});
-      index=named!=summary_.model_names.end() ? std::optional{named->first} : std::nullopt;
+      const auto named=std::ranges::find_if(summary_->model_names,[&](const auto& entry) {return entry.second==name;});
+      index=named!=summary_->model_names.end() ? std::optional{named->first} : std::nullopt;
     }
     if(!index) continue;
     const auto found=bindings_.find(*index);
@@ -3008,7 +3071,7 @@ RuntimeReplayLocalAssets::impact_brush_scene() const noexcept {
     // Defaults intentionally omit player/entity boxes. Only explicitly
     // committed inline BSP solidity participates in this presentation query.
     impact_brush_scene_=goldsrc::build_reference_brush_collision(placement_collision_library_,
-        summary_.model_names,*observed,generation_).scene;
+        summary_->model_names,*observed,generation_).scene;
   } catch(...) {impact_brush_scene_.reset();}
   return impact_brush_scene_;
 }
@@ -3028,7 +3091,7 @@ game_api::PlacementTraceResult RuntimeReplayLocalAssets::placement_trace(
       placement_collision_library_=built.library;
     }
     const auto context=goldsrc::build_reference_brush_collision(placement_collision_library_,
-        summary_.model_names,*observed,generation_,request.server_box_solid_code,
+        summary_->model_names,*observed,generation_,request.server_box_solid_code,
         request.ignore_entity,false);
     if(!context.scene) return out;
     auto boxes=context.boxes;
@@ -3114,12 +3177,12 @@ void RuntimeReplayLocalAssets::consume_follow(const client::CommittedTemporaryEf
     const game_api::GameClientHost* game) noexcept {
   std::optional<game_api::EntityTrailProfile> profile;
   if(game && current_entities_) {
-    const auto entity=std::ranges::find(current_entities_->packet_entities,event.entity_attachment&0xfffU,
-        &client::RuntimePacketEntityObservation::entity_number);
-    if(entity!=current_entities_->packet_entities.end() && entity->model_index) {
-      const auto model=summary_.model_names.find(*entity->model_index);
-      const auto sprite=summary_.model_names.find(event.sprite_index);
-      if(model!=summary_.model_names.end() && sprite!=summary_.model_names.end())
+    const auto* entity=find_sorted_packet_entity(current_entities_->packet_entities,
+        event.entity_attachment&0xfffU);
+    if(entity && entity->model_index) {
+      const auto model=summary_->model_names.find(*entity->model_index);
+      const auto sprite=summary_->model_names.find(event.sprite_index);
+      if(model!=summary_->model_names.end() && sprite!=summary_->model_names.end())
         profile=game->entity_trail_profile(model->second,sprite->second);
     }
   }
@@ -3127,8 +3190,8 @@ void RuntimeReplayLocalAssets::consume_follow(const client::CommittedTemporaryEf
   if(profile && profile->head_sprite[0]) {
     const auto end=std::find(profile->head_sprite.begin(),profile->head_sprite.end(),'\0');
     const std::string_view name{profile->head_sprite.data(),static_cast<std::size_t>(end-profile->head_sprite.begin())};
-    const auto named=std::ranges::find_if(summary_.model_names,[&](const auto& item){return item.second==name;});
-    if(named!=summary_.model_names.end() && named->first<=1023) head_slot=static_cast<std::uint16_t>(named->first);
+    const auto named=std::ranges::find_if(summary_->model_names,[&](const auto& item){return item.second==name;});
+    if(named!=summary_->model_names.end() && named->first<=1023) head_slot=static_cast<std::uint16_t>(named->first);
     else ++follow_resource_stats_.absent; // Independent optional head, not a smoke rejection.
   }
   entity_follow_.consume(event,now,profile,head_slot);
@@ -3143,8 +3206,8 @@ void RuntimeReplayLocalAssets::present_entity_effects(renderer::RenderScene& sce
   const auto observed_point=[](const client::RuntimeVector3Observation& v)->std::optional<assets::AssetVector3>{
     if(!v.complete())return {};return assets::AssetVector3{static_cast<float>(*v.x),static_cast<float>(*v.y),static_cast<float>(*v.z)};};
   const auto resolve=[&](const client::RuntimeBeamEndpoint& ref)->std::optional<assets::AssetVector3> {
-    const auto owner=std::ranges::find(presented_effect_entities_,ref.entity,&client::RuntimePacketEntityObservation::entity_number);
-    if(!ref.entity || owner==presented_effect_entities_.end() || (owner->effects.value_or(0)&128))return {};
+    const auto* owner=find_sorted_packet_entity(presented_effect_entities_,ref.entity);
+    if(!ref.entity || !owner || (owner->effects.value_or(0)&128))return {};
     if(ref.attachment==0)return observed_point(owner->origin); // explicit attachment-zero semantics only
     if(ref.attachment>4)return {};
     if(receiving_entity==ref.entity && receiving_muzzle)return receiving_muzzle;
@@ -3161,11 +3224,14 @@ void RuntimeReplayLocalAssets::present_entity_effects(renderer::RenderScene& sce
   std::size_t server_count=0;
   std::erase_if(beam_endpoint_bindings_,[&](const auto& entry) {
     const auto& live=current_entities_ ? current_entities_->packet_entities : presented_effect_entities_;
-    return std::ranges::none_of(live,[&](const auto& e) {return e.entity_number==entry.first && e.custom_beam;});
+    const auto* entity=find_sorted_packet_entity(live,entry.first);
+    return !entity || !entity->custom_beam;
   });
   for(const auto& e:presented_effect_entities_)if(e.custom_beam) {
-    if(current_entities_ && std::ranges::none_of(current_entities_->packet_entities,
-        [&](const auto& live){return live.entity_number==e.entity_number && live.custom_beam;})) continue;
+    if(current_entities_) {
+      const auto* live=find_sorted_packet_entity(current_entities_->packet_entities,e.entity_number);
+      if(!live || !live->custom_beam)continue;
+    }
     const auto& b=*e.custom_beam;
     if(!b.supported || (b.flags&0xe0) || server_count==64){++follow_resource_stats_.unsupported;continue;}
     auto binding=beam_endpoint_bindings_.find(e.entity_number);
@@ -3180,8 +3246,8 @@ void RuntimeReplayLocalAssets::present_entity_effects(renderer::RenderScene& sce
     }
     lifetime.point=e.origin;lifetime.sprite=b.sprite_model_index;
     const auto endpoint_alive=[&](const auto& ref,bool& bound,std::optional<std::uint32_t>& model,std::uint64_t& player_life) {
-      const auto owner=std::ranges::find(presented_effect_entities_,ref.entity,&client::RuntimePacketEntityObservation::entity_number);
-      if(!ref.entity || owner==presented_effect_entities_.end() || !owner->model_index || !*owner->model_index ||
+      const auto* owner=find_sorted_packet_entity(presented_effect_entities_,ref.entity);
+      if(!ref.entity || !owner || !owner->model_index || !*owner->model_index ||
           (owner->effects.value_or(0)&128)) {
         // A selected module's explicit rejection retires even an unbound
         // receipt. Merely missing initial source data still waits for loading.
@@ -3342,9 +3408,9 @@ void RuntimeReplayLocalAssets::present_entity_effects(renderer::RenderScene& sce
     }
     const auto end=std::find(beam.virtual_sprite.begin(),beam.virtual_sprite.end(),'\0');
     const std::string_view name{beam.virtual_sprite.data(),static_cast<std::size_t>(end-beam.virtual_sprite.begin())};
-    const auto named=std::ranges::find_if(summary_.model_names,[&](const auto& pair){return pair.second==name;});
-    if(!beam.sprite_model_slot && named==summary_.model_names.end()) {++follow_resource_stats_.absent;continue;}
-    const auto binding=bindings_.find(beam.sprite_model_slot.value_or(named!=summary_.model_names.end() ? named->first : 0));
+    const auto named=std::ranges::find_if(summary_->model_names,[&](const auto& pair){return pair.second==name;});
+    if(!beam.sprite_model_slot && named==summary_->model_names.end()) {++follow_resource_stats_.absent;continue;}
+    const auto binding=bindings_.find(beam.sprite_model_slot.value_or(named!=summary_->model_names.end() ? named->first : 0));
     if(binding==bindings_.end() || !binding->second.render_index || binding->second.status!=ReplayLocalVisualStatus::ready_sprite) {++follow_resource_stats_.absent;continue;}
     const auto& asset=*package_->sprite_assets()[*binding->second.render_index];
     if(asset.frames().empty() || asset.frames()[0].profile==r::SpriteRenderTextureProfile::unsupported) {++follow_resource_stats_.unsupported;continue;}

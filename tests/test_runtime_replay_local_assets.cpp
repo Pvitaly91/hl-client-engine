@@ -1010,7 +1010,7 @@ TEST_CASE("B080 owned warmed decode commit and Studio paths retain exact output 
   constexpr std::array<std::string_view,5> names{"parse_commit","authoritative_materialization", "sampled_materialization","capture_collection","owned_update_subset"};
   LocalContext context;
   context.root.write("valve","sprites/b080_trail.spr",fixture::sprite_fixture::literal_single_sprite(1));
-  for(const auto actors:{2U,16U,32U}) {
+  for(const auto actors:{2U,4U,8U,16U,32U}) {
     std::array<B080Cost,2> modes;
     for(unsigned order=0;order<2;++order) {
       const auto mode=(order+(actors==16U ? 1U : 0U))%2U;
@@ -1652,6 +1652,88 @@ TEST_CASE("Viewmodel held origin moves geometry and both socket samplers exactly
   CHECK_FALSE(assets.viewmodel_attachment_at_frame(intent,0,0));
   intent.camera_local_origin[2]=65.F;
   CHECK_FALSE(assets.materialize_viewmodel(intent));CHECK_FALSE(assets.viewmodel_attachment_at_frame(intent,0,0));
+}
+
+TEST_CASE("Same-frame viewmodel socket reuse preserves historical and invalidated requests",
+          "[stock-viewmodel][local-capture-assets][first-person][pose-reuse]") {
+  LocalContext context;auto created=context.create();REQUIRE(created.projection);
+  auto& assets=*created.projection;client::ClientWorldState world;
+  REQUIRE(assets.reset_generation(observation(),world));
+  hlclient::game_api::ViewmodelIntent intent;
+  intent.status=hlclient::game_api::ViewmodelStatus::ready;
+  intent.generation=1U;intent.publication_revision=7U;intent.model_index=7U;
+  intent.frame_coordinate=.375;intent.local_time_seconds=.125;
+  REQUIRE(assets.materialize_viewmodel(intent));
+  const auto same=assets.viewmodel_attachment_at_frame(intent,0U,intent.frame_coordinate);
+  REQUIRE(same);
+  const auto zero=assets.viewmodel_attachment_zero();REQUIRE(zero);
+  const auto exact=[](const auto& left,const auto& right) {
+    return std::bit_cast<std::uint32_t>(left.x)==std::bit_cast<std::uint32_t>(right.x) &&
+        std::bit_cast<std::uint32_t>(left.y)==std::bit_cast<std::uint32_t>(right.y) &&
+        std::bit_cast<std::uint32_t>(left.z)==std::bit_cast<std::uint32_t>(right.z);
+  };
+  CHECK(exact(*same,*zero));
+  auto fresh=intent;++fresh.publication_revision;
+  const auto independently_evaluated=assets.viewmodel_attachment_at_frame(
+      fresh,0U,intent.frame_coordinate);
+  REQUIRE(independently_evaluated);
+  CHECK(exact(*same,*independently_evaluated));
+  const auto historical=assets.viewmodel_attachment_at_frame(intent,0U,.625);
+  const auto historical_fresh=assets.viewmodel_attachment_at_frame(fresh,0U,.625);
+  REQUIRE(historical);REQUIRE(historical_fresh);
+  CHECK(exact(*historical,*historical_fresh));
+  auto invalid=intent;invalid.status=hlclient::game_api::ViewmodelStatus::hidden;
+  CHECK_FALSE(assets.materialize_viewmodel(invalid));
+  CHECK_FALSE(assets.viewmodel_attachment_zero());
+  const auto after_invalidation=assets.viewmodel_attachment_at_frame(
+      intent,0U,intent.frame_coordinate);
+  REQUIRE(after_invalidation);
+  CHECK(exact(*same,*after_invalidation));
+}
+
+TEST_CASE("Opt-in same-frame viewmodel and muzzle attachment work retains exact output",
+          "[optimization-studio-frame][benchmark][first-person][no-stock]") {
+  LocalContext context;auto created=context.create();REQUIRE(created.projection);
+  auto& assets=*created.projection;client::ClientWorldState world;
+  REQUIRE(assets.reset_generation(observation(),world));
+  hlclient::game_api::ViewmodelIntent intent;
+  intent.status=hlclient::game_api::ViewmodelStatus::ready;
+  intent.generation=1;intent.model_index=7;
+  constexpr std::size_t warm=48U,samples=256U;
+  std::array<double,samples> durations{};
+  std::uint64_t signature=14695981039346656037ULL;
+  const auto mix=[&](std::uint32_t value) {
+    for(unsigned byte=0;byte<4U;++byte) {
+      signature^=(value>>(byte*8U))&255U;signature*=1099511628211ULL;
+    }
+  };
+  for(std::size_t i=0;i<warm+samples;++i) {
+    intent.publication_revision=i+1U;
+    intent.frame_coordinate=double(i%4U)*.25;
+    intent.local_time_seconds=double(i)*.01;
+    const auto begin=std::chrono::steady_clock::now();
+    const auto rendered=assets.materialize_viewmodel(intent);
+    const auto attachment=assets.viewmodel_attachment_at_frame(intent,0U,intent.frame_coordinate);
+    const auto end=std::chrono::steady_clock::now();
+    REQUIRE(rendered);REQUIRE(rendered->frame);REQUIRE(attachment);
+    const auto current=assets.viewmodel_attachment_zero();REQUIRE(current);
+    CHECK(std::bit_cast<std::uint32_t>(attachment->x)==std::bit_cast<std::uint32_t>(current->x));
+    CHECK(std::bit_cast<std::uint32_t>(attachment->y)==std::bit_cast<std::uint32_t>(current->y));
+    CHECK(std::bit_cast<std::uint32_t>(attachment->z)==std::bit_cast<std::uint32_t>(current->z));
+    if(i<warm)continue;
+    durations[i-warm]=std::chrono::duration<double,std::micro>(end-begin).count();
+    mix(std::bit_cast<std::uint32_t>(attachment->x));
+    mix(std::bit_cast<std::uint32_t>(attachment->y));
+    mix(std::bit_cast<std::uint32_t>(attachment->z));
+    for(const auto& pose:rendered->frame->studio_poses())
+      for(const auto& matrix:pose.bone_matrices)
+        for(const auto component:matrix)mix(std::bit_cast<std::uint32_t>(component));
+  }
+  std::sort(durations.begin(),durations.end());
+  std::cout<<"[optimization-viewmodel] {\"samples\":"<<samples
+      <<",\"p50_us\":"<<durations[127U]<<",\"p95_us\":"<<durations[242U]
+      <<",\"p99_us\":"<<durations[252U]<<",\"max_us\":"<<durations.back()
+      <<",\"output_signature\":\""<<signature<<"\"}\n";
 }
 
 TEST_CASE("Studio viewmodel and transient models sample world light without moving local geometry",
@@ -6260,6 +6342,70 @@ TEST_CASE("E16 approved ordinary kinetic Studio entities interpolate without gam
   CHECK(e10_instance(world,40).transform.origin.y==Catch::Approx(35.0F));
   CHECK(world.entity_frame()->interpolation().previous_state_identity==
       world.entity_frame()->interpolation().current_state_identity);
+}
+
+TEST_CASE("Sorted source candidates refresh only with committed authoritative observations",
+    "[e16][e10][local-capture-assets][game-api][runtime-presentation][source-candidates]") {
+  LocalContext context;
+  // The live receiving-client profile enables the same ordinary RX-clock
+  // interpolation path exercised by the E16 grenade smoothing regression.
+  auto created=app::RuntimeReplayLocalAssets::create(context.resources(),
+      readiness::parse_server_info("maps/test_map.bsp"),context.root.path(),"valve",
+      app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(created.projection);
+  hlclient::game_api::GameClientHost host{std::make_unique<E10TestGameClientModule>()};host.reset({1,1,1});
+  client::ClientWorldState world;world.set_camera({{40,0,24},{0,0,24},{0,0,1}});
+  const auto ready=[](std::uint64_t record,double time,double offset) {
+    auto state=e16_projectiles(record,time,offset);
+    state.packet_entities[1].model_index=7U; // Both candidates use the fixture's ready Studio slot.
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    return state;
+  };
+  const auto first=ready(1U,1.0,0.0);
+  REQUIRE(created.projection->reset_generation(first,world));
+  // Anchor the application-to-server clock before the second RX record, as
+  // normal gameplay does. A first-ever render after both RXs holds newest.
+  REQUIRE(e10_present(*created.projection,host,99.0,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==Catch::Approx(-5.0F));
+  CHECK(e10_instance(world,41U).transform.origin.y==Catch::Approx(5.0F));
+  const auto second=ready(2U,1.1,8.0);
+  REQUIRE(created.projection->project_entities(second,world));
+  REQUIRE(e10_present(*created.projection,host,99.1,1U,world,{320,240}));
+  REQUIRE(e10_present(*created.projection,host,99.15,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==Catch::Approx(-1.0F).margin(.002F));
+  CHECK(e10_instance(world,41U).transform.origin.y==Catch::Approx(9.0F).margin(.002F));
+  for(unsigned frame=0;frame<3;++frame) {
+    REQUIRE(e10_present(*created.projection,host,99.15,1U,world,{320,240}));
+    CHECK(e10_instance(world,40U).transform.origin.y==Catch::Approx(-1.0F).margin(.002F));
+    CHECK(e10_instance(world,41U).transform.origin.y==Catch::Approx(9.0F).margin(.002F));
+  }
+
+  auto changed=ready(3U,1.2,12.0);
+  changed.packet_entities[0].brush_move_type.reset(); // 40 becomes discrete, 41 stays kinetic.
+  changed.canonical_state_hash=client::runtime_observation_canonical_hash(changed);
+  REQUIRE(created.projection->project_entities(changed,world));
+  REQUIRE(e10_present(*created.projection,host,99.2,1U,world,{320,240}));
+  REQUIRE(e10_present(*created.projection,host,99.25,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==Catch::Approx(7.0F).margin(.002F));
+  CHECK(e10_instance(world,41U).transform.origin.y==Catch::Approx(15.0F).margin(.002F));
+
+  auto invalid=ready(4U,1.3,20.0);
+  std::swap(invalid.packet_entities[0],invalid.packet_entities[1]);
+  invalid.canonical_state_hash=client::runtime_observation_canonical_hash(invalid);
+  CHECK_FALSE(client::valid_runtime_observation(invalid));
+  CHECK_FALSE(created.projection->project_entities(invalid,world));
+  REQUIRE(e10_present(*created.projection,host,99.25,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==Catch::Approx(7.0F).margin(.002F));
+  CHECK(e10_instance(world,41U).transform.origin.y==Catch::Approx(15.0F).margin(.002F));
+
+  auto removed=ready(5U,1.4,24.0);
+  removed.packet_entities.erase(removed.packet_entities.begin());
+  removed.canonical_state_hash=client::runtime_observation_canonical_hash(removed);
+  REQUIRE(created.projection->project_entities(removed,world));
+  REQUIRE(e10_present(*created.projection,host,99.3,1U,world,{320,240}));
+  REQUIRE(world.entity_frame());
+  REQUIRE(world.entity_frame()->studio_instances().size()==1U);
+  CHECK(world.entity_frame()->studio_instances()[0].entity_number==41U);
 }
 
 TEST_CASE("E16 ordinary server projectile produces localized OpenGL pixels and immediate removal",

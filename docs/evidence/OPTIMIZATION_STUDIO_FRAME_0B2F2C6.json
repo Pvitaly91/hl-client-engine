@@ -1,0 +1,412 @@
+{
+  "schema": "hlclient.optimization-studio-frame.0b2f2c6.v1",
+  "status": "offline_complete_manual_not_run",
+  "repository": "Pvitaly91/hl-client-engine",
+  "branch": "main",
+  "active_checkout": "D:\\DEV\\CPP\\HL-Client-engine",
+  "reviewed_source_sha": "0b2f2c6653957e7220a55f62ef2411935d128985",
+  "baseline": {
+    "production_source": "clean_reviewed_source_sha",
+    "release_exe_sha256": "F934A4A527B47216D181B32EEEC6E5FD84ACB7B5C0664B740C9B4F3D28D48116",
+    "release_exe_bytes": 5509632,
+    "test_binary_sha256": "D7C39135CA01D0B6640C01B5D9B57D81FA34A50908E2B2D30F43F0AAF83DF271",
+    "benchmark_test_binary_sha256": "62CD8BCC12B0A26B93436881261C0F8F4431DF314D12E72EEC6A4DB78FA38FA6",
+    "benchmark_test_source": "reviewed production source plus test-only benchmark harness",
+    "preserved_exe": "manual-artifacts/task-records/optimization-studio-frame-0b2f2c6-20261020/baseline-hlclient.exe",
+    "previous_delivery_exe_sha256": "3412571C7D0EA863BC3CE06DD8D4FA5A17071369B5AD19B817E45BFA97B7D846"
+  },
+  "candidate": {
+    "source_identity": "reviewed HEAD plus 11 production/test file contents identified by SHA-256, independent of later repository integration",
+    "modified_tracked_paths": [
+      "include/hlclient/app/multiplayer_presentation_diagnostics.hpp",
+      "include/hlclient/app/runtime_replay_local_assets.hpp",
+      "include/hlclient/goldsrc/studio/goldsrc_studio_pose.hpp",
+      "src/app/multiplayer_presentation_diagnostics.cpp",
+      "src/app/multiplayer_timeline.cpp",
+      "src/app/runtime_replay_local_assets.cpp",
+      "src/goldsrc/studio/goldsrc_studio_pose.cpp",
+      "tests/test_multiplayer_presentation_diagnostics.cpp",
+      "tests/test_multiplayer_timeline.cpp",
+      "tests/test_runtime_replay_local_assets.cpp",
+      "tests/test_studio_pose_evaluator.cpp"
+    ],
+    "modified_file_sha256": {
+      "include/hlclient/app/multiplayer_presentation_diagnostics.hpp": "9683FCDCB97A272F91754E569D1872B36C3EA76C7D7F4090CE47B82B2F405B37",
+      "include/hlclient/app/runtime_replay_local_assets.hpp": "DADA236805D9D209239D4FDEF8BA55A78C05B386C3E57DC13E1BA6CE7DE25DF1",
+      "include/hlclient/goldsrc/studio/goldsrc_studio_pose.hpp": "C79921250548E68F3EBBB7DFB98E0E238B204778880F1946CCB5A54F5EA3E015",
+      "src/app/multiplayer_presentation_diagnostics.cpp": "96E98F36A923A12EB54F93E1579F95FC787F281EBA33348F95F3FE02902C7699",
+      "src/app/multiplayer_timeline.cpp": "543D9C0CB0A0C876E86F0480A1218EA163966086E6212957A355ECC488C41312",
+      "src/app/runtime_replay_local_assets.cpp": "6E09E43359A418280AEF7B03C532E544793A39D38379CBB049F9AAB0F9D1E47F",
+      "src/goldsrc/studio/goldsrc_studio_pose.cpp": "D2F3A3A22048C61E5F42243F8738823EB5041CF28883312D6C18D9F54B9003F5",
+      "tests/test_multiplayer_presentation_diagnostics.cpp": "23602BF0B7BB1ABBFEB3C1278C0B41D5A7B3A11996CC07C34A5D8AB03AF1FBBF",
+      "tests/test_multiplayer_timeline.cpp": "89B26355C50A96835BD8A6821937F32631CB9A71F226D9F02E7D06E7D9F71894",
+      "tests/test_runtime_replay_local_assets.cpp": "9A1087DEEA566A5FF8366900B8AEC86DBC1E638E2EECF5E3406A7C68FE789582",
+      "tests/test_studio_pose_evaluator.cpp": "A9DDD61E40CC0B286CA5368B4327ED5704F3741EB667546AD783F751505157FB"
+    },
+    "release_exe_sha256": "2CDABD38864B511F07BDE5869DD2628812311409CE74295FD63BB5A4958AC74D",
+    "delivered_exe_sha256": "2CDABD38864B511F07BDE5869DD2628812311409CE74295FD63BB5A4958AC74D",
+    "delivered_exe_path": "D:\\DEV\\CPP\\HLC-steamcfg-5e48b7c1\\build\\bin\\Release\\hlclient.exe",
+    "launcher_target_verified": "source_static_sibling_path_and_target_offline_ui_check_passed; no_live_launch",
+    "unchanged_launcher_sha256": "5F3A4BDDEE4DCE1D051CC418BF876405369A83016EFFFE3E12D8528F4142466C",
+    "launcher_source_target": "apps/hlclient_launcher/main.cpp:646 GetModuleFileNameW(...).parent_path()/L\"hlclient.exe\""
+  },
+  "packages": {
+    "A1": {
+      "status": "implemented",
+      "finding": "const selector results prevented vector moves",
+      "operation_before": "selection vector copies into retained pose",
+      "operation_after": "nonconst owned selections moved into retained pose",
+      "correctness": "selection-ownership 96 assertions passed",
+      "allocation_delta": "not_measured"
+    },
+    "A2": {
+      "status": "implemented",
+      "finding": "same-frame viewmodel attachment reevaluated completed pose",
+      "operation_before_full_pose_evaluations": 2,
+      "operation_after_full_pose_evaluations": 1,
+      "cache_owner": "successful frame-local Studio pose plus exact ViewmodelIntent",
+      "historical_frame": "independent evaluation",
+      "failed_materialization": "no pose or attachment publication",
+      "correctness": "pose-reuse 19 assertions passed; six paired benchmark runs retained exact signature 10285793085417190181 with 2134 assertions each",
+      "allocation_delta": "not_measured"
+    },
+    "A3": {
+      "status": "implemented",
+      "finding": "per-frame deep summary metadata copy",
+      "operation_before": "copy full summary each frame",
+      "operation_after": "two owning summaries, one-time immutable metadata copy, indexed/sparse dynamic counts, no-throw publish swap",
+      "publication": "render-target success before pointer swap",
+      "steady_state_memory_delta": "not_measured_per_object; whole-process peak working set increased by 819200 bytes in B080 controls"
+    },
+    "B": {
+      "status": "implemented",
+      "finding": "compose sampled 1-3 complete world poses then built final world",
+      "normal_main_only_world_build_calls_before": 2,
+      "normal_main_only_world_build_calls_after": 1,
+      "normal_combined_world_build_calls_before": 4,
+      "normal_combined_world_build_calls_after": 1,
+      "extreme_input_fallback": "full sampled-world validation retained",
+      "operation_telemetry": [
+        "world_build_calls_v2",
+        "world_matrices_built_v2",
+        "retained_pose_vector_capacity_bytes_v2"
+      ],
+      "end_to_end_speedup": "not_established; calm paired combined composition p50 decreased but full-game and GPU outcomes did not"
+    },
+    "C": {
+      "status": "implemented_with_policy_cache_deferred",
+      "lookup_before": "linear scans of sorted immutable snapshot entities",
+      "lookup_after": "exact lower_bound on validated unique ascending entity numbers",
+      "candidate_owner": "sorted numeric candidate IDs committed with authoritative observation",
+      "candidate_rebuild": "on accepted source revision",
+      "policy_decision_cache": "deferred_world_entity_mutability_not_proven",
+      "per_render_sampling": "unchanged",
+      "per_render_project_entities_iteration": "still_iterates_all_presented_entities",
+      "per_render_player_history_policy_scan": "retained_P_by_H_world_entity_decisions"
+    },
+    "D1": {
+      "status": "implemented",
+      "geometry_preparations_before_per_two_ray_action": 2,
+      "geometry_preparations_after_per_two_ray_action": 1,
+      "source_cache_owner": "shared immutable EntitySceneRenderPackage",
+      "ray_hits_and_world_queries": "independent",
+      "budget_and_provenance": "retained"
+    },
+    "D2": {
+      "status": "implemented",
+      "baseline_protected_capacity": 512,
+      "baseline_recent_capacity": 1280,
+      "membership_before": "nested recent-by-protected comparisons",
+      "membership_after": "sort bounded 512 exact keys then binary_search for each recent",
+      "key_fields": [
+        "producer",
+        "producer_event_id",
+        "network_generation",
+        "map_generation"
+      ],
+      "scratch_owner": "heap-owned timeline storage"
+    },
+    "E1": {
+      "status": "deferred",
+      "finding": "external and sampled runtime observations still require validation and canonical hashing",
+      "reason": "no scoped validator bottleneck measurement or immutable owner/version contract for a narrower fast path",
+      "validation_moved_to_weaker_boundary": false,
+      "control": "validator-specific cost not measured; public checks unchanged"
+    },
+    "E2": {
+      "status": "deferred",
+      "finding": "OpenGL pass constants, pose UBO, mesh selection and state queries are profile candidates",
+      "reason": "no pass-level CPU/GPU evidence isolating a redundant bottleneck independently of A-D",
+      "production_change": false,
+      "actual_assets_gl_msaa_control": "passed four hidden no-swap MSAA8 runs with 14 identical scene signatures; no stable independent GPU saving"
+    },
+    "E3": {
+      "status": "already_fixed_gate_optional_publisher_deferred",
+      "finding": "ApplicationSessionReceipts::external_render revision gate already precedes cached video-state work",
+      "reason": "no measured encode/write/wait cost supporting async optional output",
+      "required_receipts_changed": false,
+      "control": "optional encode/write/wait cost not measured; baseline revision gate verified present"
+    }
+  },
+  "correctness": {
+    "final_release_suite": {
+      "passed_cases": 4015,
+      "skipped_cases": 75,
+      "passed_assertions": 4939904,
+      "after_both_late_A_fixes": true,
+      "after_A_through_D_production_changes": true,
+      "skip_reasons": "not_recorded_per_test"
+    },
+    "package_A_local_capture": {
+      "included_in_final_release_suite": true,
+      "final_focused_assertion_count": "not_recorded_separately"
+    },
+    "package_B_studio": {
+      "final_goldsrc_studio_passed_assertions": 8129,
+      "local_evaluation_checkpoint_assertions": 60,
+      "local_evaluation_checkpoint_cases": 2
+    },
+    "source_candidates_fixture_retry": {
+      "initial_failure": "fixture omitted first render clock and placed source samples more than 0.2 seconds apart",
+      "resolution": "fixture anchored first render and used intended interpolation interval",
+      "production_change_for_retry": false
+    },
+    "initial_viewmodel_filter_retry": {
+      "initial_result": "Catch filter matched no cases",
+      "resolution": "reran with correct tag; six paired runs passed",
+      "production_change_for_retry": false
+    },
+    "final_debug_focused": {
+      "filters": ["[goldsrc-studio]", "[source-candidates]", "[pose-reuse]", "[comprehensive][geometry]", "[multiplayer-timeline]"],
+      "passed_cases": 108,
+      "passed_assertions": 230922
+    },
+    "actual_assets": "passed_actual_assets_hidden_opengl_fixture; see benchmarks.opengl_actual_assets",
+    "null_renderer": { "status": "passed", "configuration": "Release", "filter": "[null-renderer]", "reporter": "compact", "passed_cases": 3, "passed_assertions": 178, "exit_code": 0 },
+    "opengl": "passed_four_hidden_actual_assets_runs_msaa8; no_swap_or_scanout",
+    "core_only": {
+      "status": "passed_after_environment_sensitive_retry",
+      "build_directory": "build-core-only-opt-0b2f2c6",
+      "configure": { "HLCLIENT_BUILD_GAME_HALFLIFE": "OFF", "BUILD_TESTING": "ON", "generator": "Visual Studio 17 2022", "platform": "Win32", "configuration": "Release" },
+      "build_targets": ["hlclient", "hlclient_core_api_tests", "hlclient_launcher"],
+      "build_exit_code": 0,
+      "initial_sandboxed_ctest": { "passed": 3, "total": 4, "failed_control": "core_api", "observed_failure": "secure receipt temporary-file cases under filesystem sandbox" },
+      "approved_outside_filesystem_sandbox_ctest": { "passed": 4, "total": 4, "elapsed_seconds": 5.24, "controls": ["core_api", "game_boundary_guard", "external_launcher_ui_offline", "console_idle_no_assets_e33"] },
+      "focused_core_only_filter": { "filter": "[core-only]", "passed_cases": 86, "passed_assertions": 75669, "exit_code": 0, "includes_alternate_module_cases": true },
+      "new_live_game_or_network_sessions": 0
+    },
+    "alternate_module": "passed_in_focused_core_only_filter",
+    "architecture_guard": "passed_named_release_and_core_only_ctest_controls",
+    "launcher_check_only": {
+      "source_only_check_only": "passed",
+      "offline_fake_runner_h2_manual_launch": "passed",
+      "launcher_delivery_path_verified": "sibling path source contract confirmed; target launcher --offline-ui-check exit 0; live launch not run",
+      "target_launcher_offline_ui_check": { "status": "passed", "exit_code": 0, "hidden": true, "child_game_process": false }
+    },
+    "ctest_release_controls": {
+      "passed": 7,
+      "total": 7,
+      "names": [
+        "core_api_offline",
+        "game_boundary_guard",
+        "external_launcher_ui_offline",
+        "application_deferred_handshake_startup",
+        "gentest_multiplayer_map_no_stock",
+        "movement_session_analysis_no_stock",
+        "console_idle_no_assets_e33"
+      ]
+    },
+    "diff_check": "passed_exit_0",
+    "asan_runtime": "not_run"
+  },
+  "benchmarks": {
+    "method": "Release binaries, deterministic fixture, warm-up; latest viewmodel 3 paired runs, Studio/B080/diagnostics 2 paired runs, actual-assets GL order baseline-candidate-candidate-baseline",
+    "viewmodel": {
+      "warmup": 48,
+      "samples": 256,
+      "baseline_us": { "p50": 7.2, "p95": 7.4, "p99": 9.7, "max": 17.1 },
+      "baseline_and_initial_candidate_signature": "10285793085417190181",
+      "paired_p50_us": [
+        { "baseline": 7.1, "candidate": 3.6 },
+        { "baseline": 5.0, "candidate": 3.5 },
+        { "baseline": 5.0, "candidate": 3.7 }
+      ],
+      "assertions_per_correctly_filtered_run": 2134,
+      "candidate_final_signature": "10285793085417190181",
+      "paired_quantiles_us": [
+        { "baseline": { "p50": 7.1, "p95": 7.6, "p99": 7.7, "max": 18.7 }, "candidate": { "p50": 3.6, "p95": 3.8, "p99": 5.1, "max": 6.9 } },
+        { "baseline": { "p50": 5.0, "p95": 5.2, "p99": 6.8, "max": 14.4 }, "candidate": { "p50": 3.5, "p95": 3.6, "p99": 3.7, "max": 4.7 } },
+        { "baseline": { "p50": 5.0, "p95": 5.3, "p99": 7.4, "max": 7.7 }, "candidate": { "p50": 3.7, "p95": 3.8, "p99": 3.9, "max": 18.6 } }
+      ],
+      "per_object_allocation_count_or_bytes": "not_measured"
+    },
+    "studio_synthetic_64bone_4blend": {
+      "warmup": 64,
+      "samples": 256,
+      "evaluate_baseline_us": { "p50": 223.4, "p95": 316.2, "p99": 401.1, "max": 523.9 },
+      "compose_main_baseline_us": { "p50": 192.7, "p95": 409.5, "p99": 529.6, "max": 709.8 },
+      "compose_combined_baseline_us": { "p50": 619.0, "p95": 1670.3, "p99": 1929.9, "max": 2216.3 },
+      "fingerprints": { "evaluate_and_main": "9572c8d29f3a27e1", "combined": "868ce9503336bbac" },
+      "calm_paired_p50_us": [
+        { "baseline": { "evaluate": 125.8, "main": 134.0, "combined": 385.9 }, "candidate": { "evaluate": 125.9, "main": 125.3, "combined": 370.9 } },
+        { "baseline": { "evaluate": 125.5, "main": 130.3, "combined": 387.9 }, "candidate": { "evaluate": 127.7, "main": 128.2, "combined": 376.6 } }
+      ],
+      "calm_paired_quantiles_us": [
+        {
+          "baseline": { "evaluate": [125.8, 133.8, 155.5, 970.8], "main": [134.0, 146.1, 251.4, 946.3], "combined": [385.9, 416.5, 520.0, 1145.8] },
+          "candidate": { "evaluate": [125.9, 132.6, 154.7, 234.6], "main": [125.3, 129.7, 145.6, 147.0], "combined": [370.9, 398.0, 422.4, 549.9] }
+        },
+        {
+          "baseline": { "evaluate": [125.5, 135.5, 151.7, 1100.2], "main": [130.3, 139.4, 163.6, 231.2], "combined": [387.9, 407.3, 467.9, 538.1] },
+          "candidate": { "evaluate": [127.7, 134.6, 149.0, 242.3], "main": [128.2, 136.7, 162.6, 173.4], "combined": [376.6, 399.3, 413.7, 528.4] }
+        }
+      ],
+      "calm_paired_quantile_order": ["p50", "p95", "p99", "max"],
+      "candidate_final_operation_counters": "world build path structurally 2-to-1 main-only and 4-to-1 combined; exact numeric v2 benchmark samples not recorded",
+      "time_gain_conclusion": "calm combined scope lower in two pairs; earlier interleaved runs variable; full-game speedup not established"
+    },
+    "b080_actor_sweep": {
+      "actors": [2, 4, 8, 16, 32],
+      "baseline_signatures": [
+        "11394295913685558476",
+        "18419539180533980370",
+        "16944449469464955310",
+        "11437521764814824922",
+        "9242046286920687160"
+      ],
+      "baseline_events_per_case": 1008,
+      "baseline_ordinary_pose_evaluations_per_case": 1,
+      "baseline_ordinary_pose_reuses_per_case": 63,
+      "assertions_per_run": 45631,
+      "capture_off_owned_update_subset_p50_us_by_actor": [
+        { "actors": [2, 4, 8, 16, 32], "baseline": [964.5, 989.1, 1046.3, 1182.0, 1472.6], "candidate": [921.4, 948.6, 1015.3, 1129.6, 1421.8] },
+        { "actors": [2, 4, 8, 16, 32], "baseline": [959.4, 989.8, 1060.3, 1195.8, 1474.4], "candidate": [913.4, 968.0, 996.0, 1142.9, 1409.3] }
+      ],
+      "latest_capture_off_owned_update_subset_quantiles_us_by_actor": {
+        "quantile_order": ["p50", "p95", "p99", "max"],
+        "baseline": { "2": [959.4, 1015.9, 1077.2, 1835.0], "4": [989.8, 1053.8, 1421.3, 1781.7], "8": [1060.3, 1171.8, 1510.5, 1636.1], "16": [1195.8, 1347.9, 2057.2, 2322.7], "32": [1474.4, 1579.3, 1851.3, 2243.1] },
+        "candidate": { "2": [913.4, 986.6, 1173.6, 1651.7], "4": [968.0, 1075.0, 1709.0, 1814.2], "8": [996.0, 1079.7, 1176.2, 1856.3], "16": [1142.9, 1244.8, 2005.5, 2571.5], "32": [1409.3, 1538.2, 1649.8, 2286.6] }
+      },
+      "candidate_final_signatures": [
+        "11394295913685558476",
+        "18419539180533980370",
+        "16944449469464955310",
+        "11437521764814824922",
+        "9242046286920687160"
+      ],
+      "candidate_events_per_case": 1008,
+      "candidate_ordinary_pose_evaluations_per_case": 1,
+      "candidate_ordinary_pose_reuses_per_case": 63,
+      "whole_process_peak_working_set_bytes": { "baseline": 37183488, "candidate": 38002688, "delta": 819200 },
+      "per_object_allocation_count_or_bytes": "not_measured"
+    },
+    "diagnostic_two_ray_32_actor": {
+      "samples": 1000,
+      "baseline_off_p50_us": 0.1,
+      "baseline_on_us": { "p50": 27.0, "p95": 37.5, "p99": 79.7, "max": 316.5 },
+      "baseline_output_identity_hash": "5259508267501693645",
+      "baseline_counts": {
+        "events": 5000,
+        "view_rays": 1000,
+        "command_rays": 1000,
+        "source_models_logical_per_ray_provenance": 2000,
+        "proxy_hits": 3000,
+        "incomplete": 0,
+        "exhausted": 0
+      },
+      "physical_proxy_preparations_per_action": { "baseline": 2, "candidate": 1 },
+      "paired_on_p50_us": [
+        { "baseline": 9.4, "candidate": 5.8 },
+        { "baseline": 9.3, "candidate": 5.6 }
+      ],
+      "candidate_final_counts_and_hash": "exactly_equal_to_baseline_counts_and_hash",
+      "paired_quantiles_on_us": [
+        { "baseline": [9.4, 9.8, 12.2, 743.9], "candidate": [5.8, 7.9, 8.4, 38.8] },
+        { "baseline": [9.3, 9.7, 11.1, 20.5], "candidate": [5.6, 5.8, 5.9, 9.9] }
+      ],
+      "paired_quantile_order": ["p50", "p95", "p99", "max"]
+    },
+    "f8_full_ring": {
+      "samples": 128,
+      "baseline_ring": { "action_exact": 384, "chain_exact": 128, "recent": 1280 },
+      "baseline_us": { "p50": 2948.0, "p95": 6486.9, "p99": 7553.5, "max": 8063.5 },
+      "baseline_retained_identity_hash": "4467890395871575199",
+      "baseline_counts": {
+        "accepted": 1512,
+        "recent_evictions": 232,
+        "exact_evictions": 0,
+        "manual_omissions": 1448
+      },
+      "paired_p50_us": [
+        { "baseline": 1656.4, "candidate": 996.5 },
+        { "baseline": 1665.3, "candidate": 999.2 }
+      ],
+      "candidate_final_counts_and_hash": "exactly_equal_to_baseline_counts_and_hash",
+      "paired_quantiles_us": [
+        { "baseline": [1656.4, 1691.3, 1746.7, 2885.2], "candidate": [996.5, 1029.8, 1156.5, 1210.1] },
+        { "baseline": [1665.3, 1718.5, 2399.9, 12045.5], "candidate": [999.2, 1032.8, 1099.4, 1479.5] }
+      ],
+      "paired_quantile_order": ["p50", "p95", "p99", "max"]
+    },
+    "opengl_actual_assets": {
+      "run_order": ["baseline", "candidate", "candidate", "baseline"],
+      "runs": 4,
+      "assertions_per_run": 13756,
+      "scene_signatures_per_run": 14,
+      "scene_signatures_exactly_equal_across_runs": true,
+      "gpu_samples_per_scope": 192,
+      "msaa_samples": 8,
+      "gpu_capacity_drops": 0,
+      "gpu": "Intel RaptorLake-S Mobile Graphics Controller",
+      "opengl_version": "3.3",
+      "target_pixels": [1920, 1080],
+      "target_visibility": "hidden",
+      "swap_or_present": false,
+      "diagnostic_capture": false,
+      "studio_prepare_p50_ms": { "baseline": [0.952, 0.9378], "candidate": [0.9013, 0.9555] },
+      "render_submit_p50_ms": { "baseline": [0.7402, 0.7410], "candidate": [0.7691, 0.7616] },
+      "gpu_total_reported_ms": { "baseline": [7.244172, 7.318948], "candidate": [7.342036, 7.34838] },
+      "gpu_studio_plus_viewmodel_reported_ms": { "baseline": [0.765596, 0.776256], "candidate": [0.776464, 0.779012] },
+      "shotgun_ramp_fixture": "not_verified; sloped map-derived control is not a confirmed Shotgun ramp capture",
+      "conclusion": "visual parity passed; no stable independent GL saving demonstrated; no live present or scanout measurement"
+    },
+    "cpu_full_game_fps": "not_measured",
+    "gpu_submission_or_present_delta": "hidden GL render-submit and GPU scopes measured above; live present/scanout not measured",
+    "memory_high_water_delta": { "scope": "B080 whole-process peak working set", "bytes": 819200 }
+  },
+  "build_and_commands": {
+    "generator": "Visual Studio 17 2022",
+    "platform": "Win32",
+    "configuration": "Release",
+    "executed_release_build_normalized": "cmake --build build --config Release --target hlclient_tests --parallel 1",
+    "recorded_focused_filters": [
+      "[selection-ownership]",
+      "[pose-reuse]",
+      "[local-evaluation]",
+      "[goldsrc-studio]",
+      "[local-capture-assets]",
+      "[source-candidates]"
+    ],
+    "recorded_benchmark_scopes": [
+      "viewmodel",
+      "synthetic Studio evaluate/compose",
+      "B080 2/4/8/16/32 actors",
+      "two-ray diagnostics",
+      "F8 full ring",
+      "actual-assets hidden OpenGL MSAA8"
+    ],
+    "unfiltered_release_suite": "executed_after_final_A_D_source",
+    "focused_debug_union": "108 cases and 230922 assertions passed",
+    "ctest_release_7_of_7": "passed",
+    "explicit_release_null_renderer": "passed_3_cases_178_assertions_exit_0",
+    "core_only_build_and_ctest": "build_exit_0; initial sandboxed 3/4 secure-receipt temp-file failure; approved outside-sandbox rerun 4/4 in 5.24s",
+    "source_only_check_only": "passed",
+    "offline_fake_runner_test_h2_manual_launch": "passed_no_live_sessions",
+    "exact_full_argv_and_exit_codes": "not_retained_for_every_test; normalized build command and pass outcomes recorded",
+    "optional_fixture_skip_reasons": "not_recorded_per_test",
+    "target_launcher_offline_ui_check": "passed_exit_0_hidden_no_child"
+  },
+  "manual": "not_run",
+  "agent_live_sessions": 0,
+  "repository_integration": "outside benchmark measurement; inspect Git history for commit and push state"
+}
