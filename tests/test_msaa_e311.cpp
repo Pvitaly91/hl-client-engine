@@ -1,5 +1,6 @@
 #include "entity_render/entity_opengl_test_support.hpp"
 #include "world_render_test_fixture.hpp"
+#include <hlclient/app/external_p1_branch_observation.hpp>
 #include <hlclient/core/presentation_settings.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
@@ -455,4 +456,96 @@ TEST_CASE("E31.1 scene target restores caller framebuffer MRT and texture state"
     CHECK(glIsEnabled(GL_MULTISAMPLE)==GL_FALSE);
     glBindFramebuffer(GL_FRAMEBUFFER,0);glBindRenderbuffer(GL_RENDERBUFFER,0);glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0);
     glBindTexture(GL_TEXTURE_2D,0);glDeleteTextures(1,&texture);glDeleteBuffers(1,&unpack);glDeleteRenderbuffers(3,colors.data());glDeleteFramebuffers(2,fbos.data());
+}
+
+TEST_CASE("P1 branch evidence attributes Off to 8x to Off and resize without frame publication", "[e311][msaa][branch-report][no-stock]") {
+    hlclient::app::ExternalP1BranchObservation observation;
+    const auto unknown=observation.encode("attempt-1");
+    CHECK(unknown.find("\"observation_status\":\"unknown\"")!=std::string::npos);
+    CHECK(unknown.find("\"totals\":null")!=std::string::npos);
+
+    render::opengl::OpenGlSceneTargetStatistics scene;
+    render::opengl::OpenGlImageAdjustmentStatistics image;
+    scene.scene_extent=extent;scene.resolve_extent=extent;image.last_extent=extent;
+    image.framebuffer_color_copies=1;image.adjusted_frames=1;
+    observation.observe(scene,image);
+    image.framebuffer_color_copies=2;image.adjusted_frames=2;
+    observation.observe(scene,image);
+
+    scene.requested_samples=8;scene.actual_samples=8;scene.resolved_frames=1;
+    scene.direct_adjustment_frames=1;scene.cached_default_back_output_compatible=true;
+    image.resolved_texture_reads=1;image.adjusted_frames=3;
+    observation.observe(scene,image);
+
+    scene.scene_extent={640,480};scene.resolve_extent={640,480};image.last_extent={640,480};
+    scene.resolved_frames=2;scene.direct_adjustment_frames=2;
+    image.resolved_texture_reads=2;image.adjusted_frames=4;
+    observation.observe(scene,image);
+
+    scene.requested_samples=0;scene.actual_samples=0;
+    scene.output_color_blits=1;scene.cached_default_back_output_compatible=false;
+    image.framebuffer_color_copies=3;image.adjusted_frames=5;
+    observation.observe(scene,image);
+
+    const auto report=observation.encode("attempt-1");
+    CHECK(report.find("\"observation_status\":\"observed\"")!=std::string::npos);
+    CHECK(report.find("\"observed_render_calls\":5")!=std::string::npos);
+    CHECK(report.find("\"direct_adjustment_frames\":2,\"output_color_blits\":1,\"resolved_texture_reads\":2,\"framebuffer_copies\":3")!=std::string::npos);
+    CHECK(report.find("\"cached_default_back_output_compatible\":null")!=std::string::npos);
+    CHECK(report.find("\"cached_default_back_output_compatible\":true")!=std::string::npos);
+    CHECK(report.find("\"cached_default_back_output_compatible\":false")!=std::string::npos);
+    CHECK(report.find("\"postprocess_width\":640,\"postprocess_height\":480")!=std::string::npos);
+    CHECK(report.find("\"segment_limit\":16,\"omitted_segments\":0")!=std::string::npos);
+    CHECK(observation.encode("attempt-1",false).find("\"segments\"")==std::string::npos);
+
+    // An internal renderer reset is a new counter epoch, not negative deltas.
+    scene={};image={};scene.scene_extent={640,480};scene.resolve_extent={640,480};image.last_extent={640,480};
+    observation.observe(scene,image);
+    image.framebuffer_color_copies=1;
+    observation.observe(scene,image);
+    const auto after_reset=observation.encode("attempt-1");
+    CHECK(after_reset.find("\"counter_reset_epoch\":1,\"resets_observed\":1")!=std::string::npos);
+    CHECK(after_reset.find("\"direct_adjustment_frames\":2,\"output_color_blits\":1,\"resolved_texture_reads\":2,\"framebuffer_copies\":4")!=std::string::npos);
+
+    // Same extent and sample count still split when cached output capability flips.
+    hlclient::app::ExternalP1BranchObservation capability;
+    scene={};image={};scene.scene_extent=extent;scene.resolve_extent=extent;image.last_extent=extent;
+    capability.observe(scene,image);
+    scene.cached_default_back_output_compatible=true;
+    capability.observe(scene,image);
+    scene.cached_default_back_output_compatible=false;
+    capability.observe(scene,image);
+    const auto capability_report=capability.encode("attempt-2");
+    std::size_t capability_segments{};
+    for(std::size_t offset=capability_report.find("\"segments\":[");
+        (offset=capability_report.find("\"cached_default_back_output_compatible\":",offset))!=std::string::npos;++offset)
+        ++capability_segments;
+    CHECK(capability_segments==3U);
+
+    hlclient::app::ExternalP1BranchObservation reconnect;
+    scene.cached_default_back_output_compatible.reset();
+    image.framebuffer_color_copies=1;
+    reconnect.observe(scene,image,1U,1U);
+    image.framebuffer_color_copies=2;
+    reconnect.observe(scene,image,2U,1U);
+    const auto reconnect_report=reconnect.encode("attempt-3");
+    CHECK(reconnect_report.find("\"network_generation\":1,\"map_generation\":1")!=std::string::npos);
+    CHECK(reconnect_report.find("\"network_generation\":2,\"map_generation\":1")!=std::string::npos);
+    CHECK(reconnect_report.find("\"framebuffer_copies\":2")!=std::string::npos);
+
+    const auto movement_full=hlclient::app::external_p1_movement_metadata(
+        observation,"attempt-1","[]",16384U);
+    CHECK(movement_full.find("\"segments\":[")!=std::string::npos);
+    CHECK(movement_full.find("\"game_diagnostic_capabilities\":[]")!=std::string::npos);
+    const auto large_capabilities="[\""+std::string(2048U,'x')+"\"]";
+    const auto without_capabilities=hlclient::app::external_p1_movement_metadata(
+        observation,"attempt-1",large_capabilities,movement_full.size()+128U);
+    CHECK(without_capabilities.find("\"segments\":[")!=std::string::npos);
+    CHECK(without_capabilities.find("\"game_diagnostic_capabilities_omitted\":")!=std::string::npos);
+    const auto compact_budget=observation.encode("attempt-1",false).size()+160U;
+    const auto movement_compact=hlclient::app::external_p1_movement_metadata(
+        observation,"attempt-1","",compact_budget);
+    CHECK(movement_compact.find("\"p1_branch_counters\":{")!=std::string::npos);
+    CHECK(movement_compact.find("\"segments\":[")==std::string::npos);
+    CHECK(movement_compact.find("\"p1_branch_segments_omitted\":")!=std::string::npos);
 }

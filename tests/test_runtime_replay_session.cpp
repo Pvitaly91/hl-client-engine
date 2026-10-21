@@ -21,11 +21,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -199,6 +201,37 @@ void delta(
     writer.write(0U, 6U);
     writer.align_zero();
     return writer.bytes();
+}
+
+// Synthetic mechanism fixture: a 78-entity snapshot followed by eight
+// ordered delta records. It is not a reconstruction of the archived wire.
+[[nodiscard]] std::shared_ptr<const goldsrc::EntityBaselineRegistryState>
+burst_baselines(const goldsrc::DeltaSchemaRegistryState& schemas)
+{
+    fixture::BitWriter writer;
+    for (std::uint32_t number = 2U; number < 80U; ++number) {
+        writer.write(number, 11U);
+        writer.write(0U, 2U);
+        delta(writer, 0U);
+    }
+    writer.write(0xffffU, 16U);
+    writer.write(0U, 6U);
+    writer.align_zero();
+    auto source = payload(writer.bytes(), 17U);
+    const auto cursor = goldsrc::StockRuntimeSourceCursor::create(
+        0U, 0U, source.bytes.size());
+    REQUIRE(cursor);
+    const auto decoded = goldsrc::GoldSrcEntityBaselineDecoder{}.decode(
+        goldsrc::EntityBaselineDecodeInput{
+            &source, *cursor, 1U, 1U, 1U,
+            "entity_state_t", "entity_state_t", "entity_state_t",
+            source.bytes.size() * 8U},
+        schemas);
+    REQUIRE(decoded);
+    REQUIRE(decoded.registry);
+    REQUIRE(decoded.entity_count == 78U);
+    return std::make_shared<const goldsrc::EntityBaselineRegistryState>(
+        std::move(*decoded.registry));
 }
 
 [[nodiscard]] std::shared_ptr<const goldsrc::EntityBaselineRegistryState>
@@ -475,6 +508,40 @@ void finish_entities(fixture::BitWriter& writer)
     return writer.bytes();
 }
 
+[[nodiscard]] std::vector<std::byte> burst_record_bytes(
+    const std::uint32_t index)
+{
+    fixture::BitWriter writer;
+    time_prefix(writer, 100.0F + static_cast<float>(index));
+    if (index == 0U) {
+        client_no_base(writer, 100U, 12U, 112U, 8U);
+        entity_header(writer, goldsrc::kGoldSrcSvcPacketEntitiesOpcode, 78U);
+    } else {
+        client_delta(writer, static_cast<std::uint8_t>(99U + index),
+            100U - index, static_cast<std::uint8_t>(8U - index));
+        entity_header(writer, goldsrc::kGoldSrcSvcDeltaPacketEntitiesOpcode,
+            78U, static_cast<std::uint8_t>(99U + index));
+    }
+    for (std::uint32_t entity_number = 2U; entity_number < 80U;
+         ++entity_number) {
+        const auto origin_x = 80U + entity_number + index;
+        const auto difference = entity_number == 2U ? 2U : 1U;
+        if (index == 0U) {
+            full_entity(writer, difference, origin_x);
+        } else {
+            delta_entity(writer, difference, origin_x);
+        }
+    }
+    finish_entities(writer);
+    auto bytes = writer.bytes();
+    // Two independently owned sound events cross intermediate commits even
+    // when no presentation frame occurs between the eight records.
+    if (index == 3U || index == 6U)
+        bytes.insert(bytes.end(), event_fixture::kSound.begin(),
+            event_fixture::kSound.end());
+    return bytes;
+}
+
 [[nodiscard]] std::vector<std::byte> entity_full_recovery()
 {
     fixture::BitWriter writer;
@@ -541,6 +608,130 @@ void finish_entities(fixture::BitWriter& writer)
         [number](const auto& item) { return item.entity_number == number; });
     REQUIRE(found != state.packet_entities.end());
     return *found;
+}
+
+TEST_CASE("Synthetic post-pause eight-record burst keeps each transaction and order",
+          "[rx-burst-22ad3a5][runtime-replay][no-stock]")
+{
+    struct CountingDiagnosticSink final : hlclient::core::MultiplayerDiagnosticSink {
+        std::size_t events{};
+        [[nodiscard]] bool enabled() const noexcept override { return true; }
+        [[nodiscard]] bool observe(
+            const hlclient::core::MultiplayerDiagnosticEvent&) noexcept override
+        {
+            ++events;
+            return true;
+        }
+    };
+    const auto environment_enabled = [](const char* name) {
+#ifdef _WIN32
+        char* value = nullptr;
+        std::size_t length = 0U;
+        const auto error = _dupenv_s(&value, &length, name);
+        const bool enabled = error == 0 && value != nullptr &&
+            std::string_view{value} == "1";
+        std::free(value);
+        return enabled;
+#else
+        const char* value = std::getenv(name);
+        return value != nullptr && std::string_view{value} == "1";
+#endif
+    };
+    auto schemas = make_schemas();
+    auto baselines = burst_baselines(*schemas);
+    std::vector<goldsrc::RuntimeReplayRecord> records;
+    records.reserve(9U);
+    std::size_t wire_bytes = 0U;
+    const goldsrc::SoundTime seed_received{};
+    for (std::uint32_t index = 0U; index <= 8U; ++index) {
+        records.push_back(record(burst_record_bytes(index),
+            100U + index, 50'001U + index, index + 1U));
+        records.back().received_at = seed_received +
+            std::chrono::milliseconds{index == 0U ? 0U : 500U + index - 1U};
+        if (index != 0U) wire_bytes += records.back().payload.bytes.size();
+    }
+
+    const auto run_burst = [&](const bool diagnostics,
+                               std::array<double, 8U>* sample_us,
+                               std::size_t* diagnostic_events) {
+        CountingDiagnosticSink sink;
+        goldsrc::RuntimeReplayInitialization init;
+        init.generation = 1U;
+        init.max_clients = 1U;
+        init.schemas = schemas;
+        init.baselines = baselines;
+        init.game_client = std::make_shared<hlclient::game_api::GameClientHost>(
+            hlclient::games::halflife::make_half_life_client_module());
+        if (diagnostics) init.game_client->set_diagnostic_sink(&sink);
+        auto sounds = std::make_shared<goldsrc::CommittedSoundQueue>();
+        init.sound_events = sounds;
+        client::ClientWorldState world;
+        auto replay = goldsrc::RuntimeReplaySession::initialize(
+            std::move(init), world);
+        REQUIRE(replay);
+        // Seed the snapshot before the modeled 500 ms receive gap. The eight
+        // subsequent deltas are the timed burst, with no intermediate render.
+        const auto seed = replay.session->apply_record(records.front());
+        REQUIRE(seed);
+        for (std::size_t index = 1U; index < records.size(); ++index) {
+            const auto begin = std::chrono::steady_clock::now();
+            const auto applied = replay.session->apply_record(records[index]);
+            const auto end = std::chrono::steady_clock::now();
+            REQUIRE(applied);
+            REQUIRE(applied.event);
+            CHECK(applied.event->record_ordinal == index + 1U);
+            CHECK(applied.event->record_identity == 50'001U + index);
+            CHECK(applied.event->server_time_observed);
+            CHECK(applied.event->clientdata_observed);
+            CHECK(applied.event->entities_observed);
+            goldsrc::CommittedSound delivered;
+            if (index == 3U || index == 6U) {
+                REQUIRE(sounds->pop(delivered));
+                CHECK(delivered.record == 50'001U + index);
+                CHECK(delivered.ordinal == index + 1U);
+                CHECK(delivered.opcode == goldsrc::RuntimeControlOpcode::svc_sound);
+                CHECK(delivered.sound.entity_reference == 19U);
+                CHECK(delivered.sound.sound_reference == 5U);
+            }
+            CHECK_FALSE(sounds->pop(delivered));
+            if (sample_us) {
+                (*sample_us)[index - 1U] =
+                    std::chrono::duration<double, std::micro>(end - begin).count();
+            }
+        }
+        const auto observation = world.runtime_observation();
+        REQUIRE(observation);
+        CHECK(observation->packet_entities.size() == 78U);
+        CHECK(sounds->starts == 2U);
+        if (diagnostic_events) *diagnostic_events = sink.events;
+        return observation->canonical_state_hash;
+    };
+
+    const auto expected_hash = run_burst(false, nullptr, nullptr);
+    std::size_t on_events = 0U;
+    CHECK(run_burst(true, nullptr, &on_events) == expected_hash);
+    CHECK(on_events >= 2U);
+    // Explicit opt-in timing runs identical records without rendering or
+    // network I/O; initialization and the 500 ms modeled receive pause are
+    // outside the timed per-record commit intervals.
+    const bool timing_enabled = environment_enabled("HLC_RX_BURST_BENCHMARK");
+    const bool diagnostics = environment_enabled("HLC_RX_BURST_DIAGNOSTICS");
+    if (timing_enabled) {
+        for (std::size_t warmup = 0U; warmup < 12U; ++warmup)
+            REQUIRE(run_burst(diagnostics, nullptr, nullptr) == expected_hash);
+        std::cout << "rx_burst_fixture=synthetic entities=78 seed_records=1"
+                     " burst_records=8 modeled_receive_gap_ms=500 wire_bytes=" << wire_bytes
+                  << " expected_hash=" << expected_hash
+                  << " diagnostics=" << (diagnostics ? "on" : "off")
+                  << " diagnostic_events_on=" << on_events << '\n';
+        for (std::size_t iteration = 0U; iteration < 80U; ++iteration) {
+            std::array<double, 8U> sample_us{};
+            REQUIRE(run_burst(diagnostics, &sample_us, nullptr) == expected_hash);
+            std::cout << "rx_burst_sample_us=" << iteration;
+            for (const auto value : sample_us) std::cout << ',' << value;
+            std::cout << '\n';
+        }
+    }
 }
 
 TEST_CASE("Normal replay weapon diagnostics join canonical map identity without changing module epochs",

@@ -1,0 +1,323 @@
+{
+  "schema": "hlclient.world-gpu-rx-burst.22ad3a5.v1",
+  "status": "offline_verification_complete_manual_not_run",
+  "repository": "Pvitaly91/hl-client-engine",
+  "branch": "main",
+  "source_checkout": "D:\\DEV\\CPP\\HL-Client-engine",
+  "reviewed_head": "22ad3a5bf98ff5213ea8e6992d94d07fe9a9a130",
+  "environment": {
+    "generator": "Visual Studio 17 2022",
+    "platform": "Win32",
+    "configuration": "Release",
+    "actual_assets_root": "D:\\DEV\\HLCLIENT-RESEARCH\\Half-Life",
+    "new_agent_live_steam_hlds_game_sessions": 0,
+    "manual_acceptance": "not_run",
+    "staging_commit_push": "none"
+  },
+  "primary_archives": {
+    "off": {
+      "run_id": "2c4b676fe03c8374c802b34d47204f4f",
+      "filename": "no-mass.zip",
+      "sha256": "934370C58083C7D24539951044BA9C9272B7F79BF3CCB8E9A583A07C4EF8F454",
+      "controlled_alive_mean_fps_equivalent": 143.064697852903,
+      "controlled_alive_frames": 15116
+    },
+    "msaa8": {
+      "run_id": "f0932b723d99eff1b45b5e6be3e858d7",
+      "filename": "8x mass.zip",
+      "sha256": "F2710ECC14A682C3B788F57147AE4BEDC80F4667869E4F31A65D67534CC5E351",
+      "controlled_alive_mean_fps_equivalent": 116.867039798738,
+      "controlled_alive_frames": 8735,
+      "retained_f8_gpu_world_mean_ms": 6.7637,
+      "retained_f8_gpu_total_mean_ms": 8.4147,
+      "frame_3538": {
+        "time_s": 28.616653,
+        "gpu_world_ms": 10.065276,
+        "gpu_total_ms": 11.700052,
+        "cpu_update_ms": 2.7844
+      },
+      "frame_3210": {
+        "time_s": 26.047558,
+        "committed_records": 8,
+        "bytes": 8569,
+        "replayed_commands": 26,
+        "frame_interval_ms": 34.5232,
+        "cpu_update_ms": 32.928,
+        "parse_commit_ms": 17.7353,
+        "prediction_ms": 6.0583
+      }
+    },
+    "source_limitations": [
+      "Two matches have different cameras and loads; not a same-scene MSAA A/B.",
+      "F8 GPU pass means cover retained sparse frames, not all frames.",
+      "CPU, GPU and inclusive intervals overlap and must not be summed.",
+      "Archive EXE SHA values were not recomputed from archive bytes; archives contain no EXE.",
+      "Launch-config target 5.231.120.14:27017 differs from console requested_endpoint 192.168.0.104:27016; neither independently proves the UDP peer."
+    ],
+    "comparison_files_provided_for_these_runs": false
+  },
+  "baseline": {
+    "production_source": "git archive of reviewed HEAD; test-only harness explicitly separate",
+    "preserved_root": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020",
+    "source_archive_sha256": "4FD91E2059653F0E274C6483879FDCC26BC04B1C8565E1493B6EE54A7A2033E5",
+    "client_exe_sha256": "F84AE4973760C0BC6FCD813843247562A4CBAA4C0F6596346FED2E504AD874C7",
+    "client_exe_bytes": 5530624,
+    "tests_exe_sha256": "654CFD7AAB0CE42B8768A956AB2692BC0872979AD701A65E638DED32182476F3",
+    "launcher_exe_sha256": "5F3A4BDDEE4DCE1D051CC418BF876405369A83016EFFFE3E12D8528F4142466C",
+    "initial_actual_assets_gl_control": {
+      "filter": "[gauss-71b97-camera]",
+      "assertions": 13756,
+      "cases": 1,
+      "exit_code": 0,
+      "log": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/baseline-gl-b1.log"
+    }
+  },
+  "world_gpu": {
+    "status": "operations_reduced_speedup_not_established",
+    "source_baseline": "reviewed HEAD plus byte-identical test-only W/N harness",
+    "fixture_harness_sha256": "571CAA8F68F7E13950BFED0D158EBF870D1BF2F6C610424F036BE2FF07CE830C",
+    "fixture_harness_sha256_scope": "historical benchmark harness before later test-only Debug C4702 else; production code unchanged",
+    "benchmark_manifest": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/w-benchmark-manifest.md",
+    "benchmark_manifest_sha256": "87263206A0A12D4CE6A25B755AD98BF08AE9FE5E93E9DD08AF65BA8C21CBA8B1",
+    "primary_final_run_count": 8,
+    "primary_repeats_per_view_msaa_version": 1,
+    "sensitivity_repeat_pooled_with_primary": false,
+    "warmup_frames_per_run": 48,
+    "timed_frames_per_condition": 192,
+    "raw_rows_per_log_including_synthetic_remote_capture": 384,
+    "gpu_aggregate_valid_mask": 63,
+    "candidate_world_subpass_valid_mask": 15,
+    "gpu_sample_gaps": 0,
+    "query_capacity_drops": 0,
+    "query_budget": "8 aggregate slots; 16 timestamp boundaries per slot",
+    "memory_high_water": "not_measured",
+    "present_interval": "not_applicable_hidden_no_swap_fixture",
+    "diagnostics_off_benchmark": "not_measured",
+    "results": [
+      {
+        "view": "f093_f8_marker_camera_fixed_fixture",
+        "msaa": 8,
+        "gpu_world_p95_ms_baseline": 3.071,
+        "gpu_world_p95_ms_candidate": 3.142,
+        "cpu_render_submit_p95_ms_baseline": 0.6364,
+        "cpu_render_submit_p95_ms_candidate": 0.6614,
+        "base_binds_baseline": 5952,
+        "base_binds_candidate": 1728,
+        "lightmap_binds_baseline": 5952,
+        "lightmap_binds_candidate": 576,
+        "color_signature_equal": true,
+        "world_depth_signature": "unavailable_msaa_private_depth"
+      },
+      {
+        "view": "f093_f8_marker_camera_fixed_fixture",
+        "msaa": 0,
+        "gpu_world_p95_ms_baseline": 2.992,
+        "gpu_world_p95_ms_candidate": 2.996,
+        "cpu_render_submit_p95_ms_baseline": 0.5174,
+        "cpu_render_submit_p95_ms_candidate": 0.5029,
+        "base_binds_baseline": 5952,
+        "base_binds_candidate": 1728,
+        "lightmap_binds_baseline": 5952,
+        "lightmap_binds_candidate": 576,
+        "color_signature_equal": true,
+        "world_depth_signature_equal": true,
+        "world_depth_signature": "9953348411912562341"
+      },
+      {
+        "view": "f093_frame3538_camera_fixed_fixture",
+        "msaa": 8,
+        "gpu_world_p95_ms_baseline": 4.828,
+        "gpu_world_p95_ms_candidate": 4.581,
+        "cpu_render_submit_p95_ms_baseline": 0.5075,
+        "cpu_render_submit_p95_ms_candidate": 0.4600,
+        "base_binds_baseline": 32064,
+        "base_binds_candidate": 3840,
+        "lightmap_binds_baseline": 32064,
+        "lightmap_binds_candidate": 576,
+        "color_signature_equal": true,
+        "world_depth_signature": "unavailable_msaa_private_depth"
+      },
+      {
+        "view": "f093_frame3538_camera_fixed_fixture",
+        "msaa": 0,
+        "gpu_world_p95_ms_baseline": 3.962,
+        "gpu_world_p95_ms_candidate": 3.997,
+        "cpu_render_submit_p95_ms_baseline": 0.3780,
+        "cpu_render_submit_p95_ms_candidate": 0.4594,
+        "base_binds_baseline": 32064,
+        "base_binds_candidate": 3840,
+        "lightmap_binds_baseline": 32064,
+        "lightmap_binds_candidate": 576,
+        "color_signature_equal": true,
+        "world_depth_signature_equal": true,
+        "world_depth_signature": "2568539212682528011"
+      }
+    ],
+    "correctness": "exact color signatures in four conditions; exact isolated Off world depth in two; unchanged draw and triangle counts; alternate brush bank fixture passed 250 assertions",
+    "limits": [
+      "Hidden no-swap fixture does not prove live FPS or display smoothness.",
+      "GPU timing plus glFlush includes diagnostic overhead; W diagnostics Off A/B was not measured.",
+      "Baseline has aggregate world only, so candidate subpass timings have no baseline subpass comparator.",
+      "First full-frame depth hash was superseded because first-person draw clears depth; final oracle renders isolated static world after timed samples."
+    ]
+  },
+  "rx_burst": {
+    "status": "redundant_scans_removed_speedup_not_established_upstream_pause_unknown",
+    "fixture_kind": "synthetic_mechanism_not_archived_wire",
+    "benchmark_manifest": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/n-benchmark-manifest.md",
+    "benchmark_manifest_sha256": "1966BEACA9B3AACCC7C45D5B7AFB9BB738DA7547AD065F26019F08C072099737",
+    "pre_n_test_exe_sha256": "679F3C8C41A8E37F3B46D93C2243474367C8239DD9AC8A22332B3BDA1D9A7037",
+    "candidate_test_exe_sha256": "7E2CB89C9AEAC9498EFF85D4D8B80E517FA68E82EA79514DD2E5D4E0441CCC4A",
+    "pre_n_source_sha256": "68E2E6DFBBEFACA41D44F265B0E8225887024945A967CC8F3CB13B60F9BC7B51",
+    "candidate_source_sha256": "20D7769AB7B6AB04C4F3E448964E55FA4009D2DAA16E9979D40EF45DA1653BF3",
+    "ordered_seed_records": 1,
+    "ordered_timed_records": 8,
+    "entities": 78,
+    "synthetic_burst_wire_bytes": 2980,
+    "modeled_receive_gap_ms": 500,
+    "mid_burst_svc_sound_count": 2,
+    "diagnostic_sink_on_events": 2,
+    "canonical_state_hash": "15026093827131519465",
+    "separate_matched_boundary_replay_commands": 26,
+    "warmup_bursts_per_process": 12,
+    "timed_bursts_per_process": 80,
+    "repeats_per_mode_and_version": 5,
+    "timed_bursts_pooled_per_mode_and_version": 400,
+    "timing_unit": "microseconds; sum of eight per-record apply_record intervals per burst, not full frame time",
+    "pooled_burst_timing": {
+      "diagnostics_off": {
+        "baseline": {"p50": 3085.2, "p95": 3576.9, "p99": 3921.0, "max": 4128.2},
+        "candidate": {"p50": 3033.3, "p95": 4238.7, "p99": 4688.8, "max": 7328.4}
+      },
+      "diagnostics_on": {
+        "baseline": {"p50": 3097.6, "p95": 3443.7, "p99": 3883.9, "max": 4592.0},
+        "candidate": {"p50": 3017.6, "p95": 3916.3, "p99": 4629.5, "max": 5023.3}
+      }
+    },
+    "reduced_work": "second DeltaObjectState::find_exact linear scan removed at eight validated semantic projection sites",
+    "focused_candidate": {"cases": 2, "assertions": 367, "exit_code": 0},
+    "negative_controls": [
+      {"filter": "[goldsrc][runtime-replay]", "cases": 45, "assertions": 21487, "exit_code": 0},
+      {"filter": "[prediction][reconciliation]", "cases": 24, "assertions": 132003, "exit_code": 0},
+      {"test": "E32 buffered player boundaries cannot resurrect a removed or reused slot", "cases": 1, "assertions": 76, "exit_code": 0},
+      {"test": "Snark source removal same commit reuse hidden entities and reset have bounded sound ownership", "cases": 1, "assertions": 16, "exit_code": 0}
+    ],
+    "limits": [
+      "Pooled candidate tails are worse, but concentrated in two of five runs; neither stable speedup nor stable regression established.",
+      "Allocation/copy reduction and memory high-water were not separately measured.",
+      "Eight-record fixture does not itself contain DeathMsg/respawn, projectile or multiple-shot events.",
+      "Exact timed-process shell argv and exit-code transcript were not separately retained; retained Catch2 logs show successful completion.",
+      "Fixture does not identify the cause or peer of the archived upstream no-new-source interval."
+    ]
+  },
+  "p1_branch_reporting": {
+    "status": "focused_release_test_passed",
+    "focused_filter": "[branch-report],[71b97][movement-diagnostics]",
+    "focused_cases": 2,
+    "focused_assertions": 52,
+    "focused_exit_code": 0
+  },
+  "regressions": {
+    "status": "release_safe_subset_debug_core_only_and_non_ui_launcher_controls_passed",
+    "manifest": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-verification-manifest.md",
+    "release_build": {
+      "configuration": "Win32 Release",
+      "hlclient_exe_bytes": 5541376,
+      "hlclient_exe_sha256": "F97074BF4BF1131A8AD48074F9330E0BB065A21C5B1517ED4D9081B4F776FA50",
+      "exit_code": 0
+    },
+    "focused_release": [
+      {"filter": "[world-bind-cache],[e311][msaa],[movement-diagnostics]", "cases": 52, "assertions": 678393, "exit_code": 0},
+      {"filter": "[rx-burst-22ad3a5]", "cases": 2, "assertions": 367, "exit_code": 0},
+      {"filter": "[selection-ownership],[pose-reuse],[local-evaluation],[source-candidates],[comprehensive][geometry],[multiplayer-timeline],[optimization-p1],[p2-metadata],[optimization-p3],[optimization-p5],[optimization-p6]", "cases": 41, "assertions": 847802, "exit_code": 0}
+    ],
+    "final_test_only_relink": {
+      "source_change": "test_gauss_frame_cost_71b97.cpp C4702 else after if constexpr; no production-code change",
+      "release_test_target_build_exit_code": 0,
+      "focused_groups_repeated": 3,
+      "all_focused_exit_code_zero": true,
+      "full_safe_subset_not_repeated_after_test_only_change": true
+    },
+    "initial_sandbox_ctest": {
+      "registered": 4233,
+      "completed_before_interrupt": 3135,
+      "passed": 2923,
+      "skipped": 96,
+      "failed": 115,
+      "secondary_exception": 1,
+      "not_run": 1098,
+      "exit_code": 1,
+      "verdict": "interrupted_not_full_suite_result",
+      "causes_observed": "sandbox loopback UDP delivery and temporary hardlink/junction/atomic file operations blocked; two representative failures also reproduced on preserved baseline test executable",
+      "log": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-release-ctest.log"
+    },
+    "escalated_offline_sentinels": {
+      "tests": [539, 1505, 1671, 2330, 2831],
+      "all_exit_code_zero": true,
+      "loopback_only": true,
+      "live_endpoints_contacted": false
+    },
+    "release_safe_ctest": {
+      "registered": 4233,
+      "selected": 4229,
+      "passed": 4154,
+      "skipped": 75,
+      "failed": 0,
+      "exit_code": 0,
+      "wall_time_seconds": 484.68,
+      "excluded_app_startups": [
+        "hlclient_application_deferred_handshake_startup",
+        "hlclient_console_idle_no_assets_e33",
+        "hlclient_null_renderer_smoke",
+        "hlclient_external_launcher_ui_offline"
+      ],
+      "log": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-release-safe-ctest-escalated.log"
+    },
+    "debug": {
+      "configuration": "isolated offline Win32 Debug; embedded /Z7 after shared /Zi /FS PDB C1902",
+      "first_build_failure": "test-only C4702 unreachable return under Debug Werror; corrected with else, no production-code change",
+      "final_build_exit_code": 0,
+      "test_exe_sha256": "C1CE43E032BA1FC1C9A6AB036C1F1248A7966FC405011A292B6C6E181853373C",
+      "focused": [
+        {"filter": "[world-bind-cache],[e311][msaa],[movement-diagnostics]", "cases": 52, "assertions": 678393, "exit_code": 0},
+        {"filter": "[rx-burst-22ad3a5]", "cases": 2, "assertions": 367, "exit_code": 0},
+        {"filter": "[selection-ownership],[pose-reuse],[local-evaluation],[source-candidates],[comprehensive][geometry],[multiplayer-timeline],[optimization-p1],[p2-metadata],[optimization-p3],[optimization-p5],[optimization-p6]", "cases": 41, "assertions": 847802, "exit_code": 0}
+      ],
+      "logs": [
+        "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-debug-z7-build.log",
+        "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-debug-z7-rebuild.log",
+        "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-debug-focused-w-p1.log",
+        "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-debug-focused-n.log",
+        "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-debug-focused-controls.log"
+      ]
+    },
+    "core_only_no_halflife": {
+      "configuration": "isolated offline Win32 Release; HLCLIENT_BUILD_GAME_HALFLIFE=OFF; local pinned dependencies; disconnected FetchContent",
+      "configure_exit_code": 0,
+      "hlclient_core_api_tests_build_exit_code": 0,
+      "ctest_selected": 2,
+      "ctest_passed": 2,
+      "ctest_failed": 0,
+      "ctest_exit_code": 0,
+      "log": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/final-core-only-ctest.log"
+    },
+    "non_ui_launcher_controls": {
+      "fake_fixture_contract_exit_code": 0,
+      "checkonly_sourceonly_exit_code": 0,
+      "hlclient_version_exit_code": 0,
+      "checkonly_external_game_and_steam_files": "not_checked_by_source_only_mode",
+      "launcher_ui_startup": "not_run_zero_new_ui_sessions_constraint"
+    },
+    "asan": "not_run_separate_configuration"
+  },
+  "delivery": {
+    "status": "normal_release_delivered_manual_not_run",
+    "source": "D:\\DEV\\CPP\\HL-Client-engine\\build\\bin\\Release\\hlclient.exe",
+    "launcher_selected_sibling": "D:\\DEV\\CPP\\HLC-steamcfg-5e48b7c1\\build\\bin\\Release\\hlclient.exe",
+    "source_and_delivery_bytes": 5541376,
+    "source_and_delivery_sha256": "F97074BF4BF1131A8AD48074F9330E0BB065A21C5B1517ED4D9081B4F776FA50",
+    "launcher_sha256_unchanged": "5F3A4BDDEE4DCE1D051CC418BF876405369A83016EFFFE3E12D8528F4142466C",
+    "previous_delivery_rollback": "manual-artifacts/task-records/world-gpu-rx-burst-22ad3a5-20261020/previous-delivery-hlclient.exe",
+    "previous_delivery_rollback_sha256": "F84AE4973760C0BC6FCD813843247562A4CBAA4C0F6596346FED2E504AD874C7"
+  }
+}

@@ -34,6 +34,10 @@ struct MovementGpuPassRecord final {
     std::array<float,6> milliseconds{};
     std::uint8_t valid_mask{};
     MovementGpuPassStatus status{MovementGpuPassStatus::not_observed};
+    // Optional detail of the world interval, not a replacement for its
+    // aggregate pass or mask. Delayed results retain their source frame.
+    std::array<float,4> world_subpass_milliseconds{};
+    std::uint8_t valid_world_subpass_mask{};
 };
 // Exact adapter output which was accepted by command history, not sampled
 // keys reconstructed after a shot. Sample time uses the receipt clock in us.

@@ -10,6 +10,8 @@ WorldRenderPackage::WorldRenderPackage(
     std::vector<WorldRenderMaterial> materials,
     std::vector<WorldDrawBatch> draw_batches,
     std::vector<WorldRenderSurfaceRange> surface_ranges,
+    std::vector<WorldPreparedDrawBatch> prepared_draw_batches,
+    std::vector<WorldPreparedDrawBlock> prepared_draw_blocks,
     const assets::WorldBounds bounds,
     const WorldRenderCoordinateMetadata coordinate_metadata,
     const WorldRenderStatistics statistics,
@@ -22,6 +24,8 @@ WorldRenderPackage::WorldRenderPackage(
       materials_{std::move(materials)},
       draw_batches_{std::move(draw_batches)},
       surface_ranges_{std::move(surface_ranges)},
+      prepared_draw_batches_{std::move(prepared_draw_batches)},
+      prepared_draw_blocks_{std::move(prepared_draw_blocks)},
       bounds_{bounds},
       coordinate_metadata_{coordinate_metadata},
       statistics_{statistics},
@@ -64,6 +68,18 @@ std::span<const WorldRenderSurfaceRange> WorldRenderPackage::surface_ranges()
     const noexcept
 {
     return surface_ranges_;
+}
+
+std::span<const WorldPreparedDrawBatch>
+WorldRenderPackage::prepared_draw_batches() const noexcept
+{
+    return prepared_draw_batches_;
+}
+
+std::span<const WorldPreparedDrawBlock>
+WorldRenderPackage::prepared_draw_blocks() const noexcept
+{
+    return prepared_draw_blocks_;
 }
 
 const assets::WorldBounds& WorldRenderPackage::bounds() const noexcept

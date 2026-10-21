@@ -77,6 +77,21 @@ struct WorldRenderSurfaceRange {
     std::optional<std::size_t> lightmap_atlas_page_index;
 };
 
+// Consecutive ranges within one original material batch. Their bounds come
+// from the actual indexed render vertices during immutable package creation.
+struct WorldPreparedDrawBlock {
+    std::uint32_t first_index{0U};
+    std::uint32_t index_count{0U};
+    assets::WorldBounds bounds{};
+};
+
+struct WorldPreparedDrawBatch {
+    std::size_t first_block{0U};
+    std::size_t block_count{0U};
+    assets::WorldBounds bounds{};
+};
+
+
 enum class WorldRenderBaseTextureCoordinateSpace {
     normalized_source_rows_no_cpu_flip,
 };
@@ -111,6 +126,9 @@ struct WorldRenderStatistics {
     std::size_t lightmap_rgba_byte_count{0U};
     std::size_t output_geometry_byte_count{0U};
     std::size_t total_cpu_render_byte_count{0U};
+    std::size_t prepared_draw_block_count{0U};
+    // Retained vector-capacity bytes, included in total_cpu_render_byte_count.
+    std::size_t prepared_draw_byte_count{0U};
 };
 
 struct WorldRendererResourceIdentity {
@@ -151,6 +169,10 @@ public:
     [[nodiscard]] std::span<const WorldDrawBatch> draw_batches() const noexcept;
     [[nodiscard]] std::span<const WorldRenderSurfaceRange> surface_ranges()
         const noexcept;
+    [[nodiscard]] std::span<const WorldPreparedDrawBatch> prepared_draw_batches()
+        const noexcept;
+    [[nodiscard]] std::span<const WorldPreparedDrawBlock> prepared_draw_blocks()
+        const noexcept;
     [[nodiscard]] const assets::WorldBounds& bounds() const noexcept;
     [[nodiscard]] const WorldRenderCoordinateMetadata& coordinate_metadata() const noexcept;
     [[nodiscard]] const WorldRenderStatistics& statistics() const noexcept;
@@ -171,6 +193,8 @@ private:
         std::vector<WorldRenderMaterial> materials,
         std::vector<WorldDrawBatch> draw_batches,
         std::vector<WorldRenderSurfaceRange> surface_ranges,
+        std::vector<WorldPreparedDrawBatch> prepared_draw_batches,
+        std::vector<WorldPreparedDrawBlock> prepared_draw_blocks,
         assets::WorldBounds bounds,
         WorldRenderCoordinateMetadata coordinate_metadata,
         WorldRenderStatistics statistics,
@@ -184,6 +208,8 @@ private:
     std::vector<WorldRenderMaterial> materials_;
     std::vector<WorldDrawBatch> draw_batches_;
     std::vector<WorldRenderSurfaceRange> surface_ranges_;
+    std::vector<WorldPreparedDrawBatch> prepared_draw_batches_;
+    std::vector<WorldPreparedDrawBlock> prepared_draw_blocks_;
     assets::WorldBounds bounds_{};
     WorldRenderCoordinateMetadata coordinate_metadata_{};
     WorldRenderStatistics statistics_{};

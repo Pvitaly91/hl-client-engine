@@ -1,0 +1,194 @@
+{
+  "schema": "hlclient.general-frame-static-world.51beb30e.v1",
+  "status": "offline_release_suite_passed_delivery_complete_performance_not_established_manual_not_run",
+  "source": {
+    "checkout": "D:\\DEV\\CPP\\HL-Client-engine",
+    "branch": "main",
+    "head": "22ad3a5bf98ff5213ea8e6992d94d07fe9a9a130",
+    "head_is_complete_baseline_identity": false,
+    "preexisting_dirty_world_rx_preserved": true,
+    "preserved_head_source_zip_sha256": "4FD91E2059653F0E274C6483879FDCC26BC04B1C8565E1493B6EE54A7A2033E5",
+    "preserved_baseline_build_and_delivery_hlclient_sha256": "F97074BF4BF1131A8AD48074F9330E0BB065A21C5B1517ED4D9081B4F776FA50",
+    "candidate_g2_production_source_set": {
+      "scope": "five_files_only_not_whole_dirty_checkout",
+      "algorithm": "sort_repo_relative_slash_paths_ordinal;each_line_utf8_no_bom_path_TAB_uppercase_sha256_of_file_bytes_LF;sha256_of_concatenated_lines",
+      "manifest_sha256": "9BBB94095CD68630FCD1BC76F8AA06BCFAB810D5E48DF3417C20FA3B296B6700",
+      "files": [
+        {"path": "include/hlclient/renderer/opengl/opengl_renderer.hpp", "sha256": "DE92DD6D7908D6E2A42A6578FBE6C0EE6CFF656CB2D711D11BFF8BC7F49C2F2A"},
+        {"path": "include/hlclient/world_render/world_render_types.hpp", "sha256": "2101E5B282B771879CFC2B12D9760AEC832CEBE31E8A95E71DAC70236C68364A"},
+        {"path": "src/renderer/opengl/opengl_renderer.cpp", "sha256": "AB86D656D8C699AAB6B2B953652FFB306A06E33746BED265776DB9AE2F01FA99"},
+        {"path": "src/world_render/world_render_package_builder.cpp", "sha256": "B8F9BDD80766E0A5D9DAC356FD57B901EBCC23A8DD258765EBE426ACAF87B7AE"},
+        {"path": "src/world_render/world_render_types.cpp", "sha256": "AD79C8A641A92232944CE8F7C51ACD46D309E0D50ED189CC4F76726EABB63CCE"}
+      ]
+    },
+    "candidate_release_build": {
+      "source_build_hlclient_exe_bytes": 5547520,
+      "source_build_hlclient_exe_sha256": "6EF226EE86A04C4A2F948B2B9C19C806721BCD263B3C19A1259EA4D8F296B63D",
+      "launcher_selected_delivery_path": "D:\\DEV\\CPP\\HLC-steamcfg-5e48b7c1\\build\\bin\\Release\\hlclient.exe",
+      "delivery_hlclient_exe_sha256": "6EF226EE86A04C4A2F948B2B9C19C806721BCD263B3C19A1259EA4D8F296B63D",
+      "previous_delivery_backup_sha256": "F97074BF4BF1131A8AD48074F9330E0BB065A21C5B1517ED4D9081B4F776FA50"
+    }
+  },
+  "historical_run": {
+    "run_id": "51beb30eba1678572ffa9ee25dfc1f94",
+    "archive_sha256": "0881ded0e7de7d4ea1b7cba50a3ad45065df1911be3336e8f1aea6cd7b2f6f77",
+    "client_sha256_reported_and_baseline_bytes_verified": "F97074BF4BF1131A8AD48074F9330E0BB065A21C5B1517ED4D9081B4F776FA50",
+    "manual_performance_improvement": "passed_user_report_only",
+    "full_gameplay_acceptance": "not_established",
+    "last_session_reported_settings": "MSAA8, 1920x1080 borderless, VSync On, 144 Hz display, software cap 0",
+    "full_gameplay_second_bins_above_100_fps": "122/129",
+    "mean_fps_equivalent": 119.59,
+    "minimum_full_gameplay_second_bin_fps_equivalent": 94.99,
+    "existing_p1_direct_adjustment_frames_and_resolved_texture_reads": 17302,
+    "existing_p1_output_color_blits_and_copies": 0,
+    "limited_active_frame_sample": {
+      "n": 146,
+      "static_world_ms": 6.484,
+      "world_ms": 7.049,
+      "sky_ms": 0.547,
+      "runtime_brushes_ms": 0.017
+    }
+  },
+  "g1": {
+    "status": "implemented_old_selector_rejected",
+    "normal_runtime_static_world_path": "scene_package_without_visible_draw_list_full_material_batches",
+    "historical_old_selector_image_mismatch_groups": "10/14",
+    "historical_old_selector_yaw_sweep_visibility_cpu_p50_ms_approx": 5.23,
+    "expanded_old_selector_control": {
+      "actual_msaa": 0,
+      "groups": 18,
+      "color_signature_mismatch_groups": 12,
+      "depth_signature_mismatch_groups": 10,
+      "color_and_depth_readback_diff_per_unique_camera": [
+        {"view": "f8", "color_pixels": 163, "depth_pixels": 10098},
+        {"view": "f8_yaw90", "color_pixels": 207, "depth_pixels": 1973},
+        {"view": "f8_yaw180", "color_pixels": 0, "depth_pixels": 0},
+        {"view": "approach_128", "color_pixels": 959584, "depth_pixels": 959576},
+        {"view": "adjacent_128", "color_pixels": 556, "depth_pixels": 6203},
+        {"view": "f8_yaw_sweep", "color_pixels": 283, "depth_pixels": 14132},
+        {"view": "f093_frame3538_camera_fixed_fixture", "color_pixels": 5, "depth_pixels": 0},
+        {"view": "f093_f8_marker_camera_fixed_fixture", "color_pixels": 0, "depth_pixels": 0},
+        {"view": "sloped_surface_not_verified_shotgun", "color_pixels": 0, "depth_pixels": 0}
+      ],
+      "capture_modes": 2,
+      "per_camera_counts_identical_across_capture_modes": true,
+      "frame3538_equal_depth_color_mismatch_hypothesis": "possible_equal_depth_or_order_tie_not_proven_general_cause",
+      "raw_logs": [
+        "manual-artifacts/task-records/general-frame-51beb30e-20261021/baseline-negative-all-off.log",
+        "manual-artifacts/task-records/general-frame-51beb30e-20261021/baseline-negative-selected-off.log",
+        "manual-artifacts/task-records/general-frame-51beb30e-20261021/candidate-old-negative-diff-off.log"
+      ]
+    }
+  },
+  "g2": {
+    "status": "implemented_candidate_pixel_safe_in_tested_scope",
+    "prepared_owner": "immutable_WorldRenderPackage_per_resource_revision",
+    "changed_functions": [
+      "WorldRenderPackageBuilder::build and private prepare_draw_data",
+      "WorldRenderPackage immutable prepared spans",
+      "OpenGlRenderer::render static world no-visible-list branch"
+    ],
+    "block_surface_limit": 16,
+    "crossfire_prepared_block_count": 272,
+    "crossfire_prepared_retained_bytes": 11008,
+    "cold_preparation_latency": "not_isolated",
+    "memory_high_water": "not_measured",
+    "selection": "final_view_projection_conservative_AABB_frustum_source_index_order",
+    "max_deterministic_probe_blocks_per_frame": 16,
+    "minimum_outside_probes_for_detailed_selection": 2,
+    "max_contiguous_runs_per_batch_before_full_batch_fallback": 4,
+    "fallback": "original_full_material_batches_on_probe_ineligible_invalid_frustum_invalid_prepared_owner_fragmentation_or_budget_failure",
+    "pvs_restriction": "deferred_old_selector_mismatch_unresolved",
+    "per_frame_prepared_rebuild": false,
+    "per_frame_selector_allocation": false,
+    "visible_draw_list_branch_preserved": true,
+    "actual_assets_fixture": {
+      "map": "crossfire",
+      "gpu_vendor": "Intel",
+      "gpu_device": "Intel(R) RaptorLake-S Mobile Graphics Controller",
+      "gl_version": "3.3.0 - Build 32.0.101.7026",
+      "extent": [1920, 1080],
+      "hidden_context": true,
+      "swaps": false,
+      "camera_views": 9,
+      "capture_modes": 2,
+      "timed_frames_per_group": 192,
+      "synthetic_players": 8,
+      "synthetic_pickups": 12,
+      "effects": 0,
+      "decals": 0,
+      "dynamic_lights": 0,
+      "off_color_signature_matches": "18/18",
+      "off_world_only_depth_signature_matches": "18/18",
+      "msaa2_color_signature_matches": "18/18",
+      "msaa4_color_signature_matches": "18/18",
+      "msaa8_color_signature_matches": "18/18",
+      "fixture_test_binary_oracle": "preserved_baseline_all_world_log_versus_adaptive_candidate",
+      "synthetic_full_buffer_oracle": "original_no_scene_package_all_batch_branch_against_candidate_scene_package_branch;_RGBA8_and_depth_exact;_33_and_288_surface_plus_two_material_layouts;_96x96_48x48_96x48;_five_projection_FOV_near_far_variants;_two_poses"
+    },
+    "all_mode_operation_counts": [
+      {"actual_msaa": 0, "color_groups_equal": "18/18", "world_depth_groups_equal": "18/18", "world_draws_before": 248832, "world_draws_after": 178176, "world_triangles_before": 34649856, "world_triangles_after": 22663296, "base_binds_before": 248832, "base_binds_after": 168960, "lightmap_binds_before": 10368, "lightmap_binds_after": 10368, "material_uniform_uploads_before": 24192, "material_uniform_uploads_after": 24192, "studio_draws_before": 439410, "studio_draws_after": 439410},
+      {"actual_msaa": 2, "color_groups_equal": "18/18", "world_depth_groups_equal": "not_captured", "world_draws_before": 248832, "world_draws_after": 178176, "world_triangles_before": 34649856, "world_triangles_after": 22663296, "base_binds_before": 248832, "base_binds_after": 168960, "lightmap_binds_before": 10368, "lightmap_binds_after": 10368, "material_uniform_uploads_before": 24192, "material_uniform_uploads_after": 24192, "studio_draws_before": 439410, "studio_draws_after": 439410},
+      {"actual_msaa": 4, "color_groups_equal": "18/18", "world_depth_groups_equal": "not_captured", "world_draws_before": 248832, "world_draws_after": 178176, "world_triangles_before": 34649856, "world_triangles_after": 22663296, "base_binds_before": 248832, "base_binds_after": 168960, "lightmap_binds_before": 10368, "lightmap_binds_after": 10368, "material_uniform_uploads_before": 24192, "material_uniform_uploads_after": 24192, "studio_draws_before": 439410, "studio_draws_after": 439410},
+      {"actual_msaa": 8, "color_groups_equal": "18/18", "world_depth_groups_equal": "not_captured", "world_draws_before": 248832, "world_draws_after": 178176, "world_triangles_before": 34649856, "world_triangles_after": 22663296, "base_binds_before": 248832, "base_binds_after": 168960, "lightmap_binds_before": 10368, "lightmap_binds_after": 10368, "material_uniform_uploads_before": 24192, "material_uniform_uploads_after": 24192, "studio_draws_before": 439410, "studio_draws_after": 439410}
+    ],
+    "candidate_aggregated_selector_counts_per_mode": {"selected_blocks": 178944, "rejected_blocks": 343296, "full_batch_fallbacks": 110592},
+    "timed_uploads_and_target_allocations_per_mode": 0,
+    "raw_all_view_log_name_pattern": "manual-artifacts/task-records/general-frame-51beb30e-20261021/{baseline-negative-all-off,baseline-all-msaa2,baseline-all-msaa4,baseline-all-msaa8,candidate-adaptive-all-off,candidate-adaptive-all-msaa2,candidate-adaptive-all-msaa4,candidate-adaptive-all-msaa8}.log"
+  },
+  "timing": {
+    "status": "robust_speedup_not_established",
+    "scope": "hidden_no_swap_fixed_F8_192_frames_each_B1_C1_C2_B2_per_actual_msaa",
+    "values_are_ranges_of_two_independent_p50_ms_not_pooled_percentiles": true,
+    "abba_f8": [
+      {"msaa": 0, "cpu_render_submit_baseline_p50_ms_range": [0.5269, 0.5442], "cpu_render_submit_candidate_p50_ms_range": [0.5680, 0.5813], "gpu_static_world_baseline_p50_ms_range": [4.2303, 4.2308], "gpu_static_world_candidate_p50_ms_range": [4.2339, 4.2455]},
+      {"msaa": 2, "cpu_render_submit_baseline_p50_ms_range": [0.5990, 0.8106], "cpu_render_submit_candidate_p50_ms_range": [0.6495, 0.6714], "gpu_static_world_baseline_p50_ms_range": [4.7000, 4.7326], "gpu_static_world_candidate_p50_ms_range": [4.7080, 4.7160]},
+      {"msaa": 4, "cpu_render_submit_baseline_p50_ms_range": [0.8804, 0.9048], "cpu_render_submit_candidate_p50_ms_range": [0.7572, 1.1725], "gpu_static_world_baseline_p50_ms_range": [5.1906, 5.1907], "gpu_static_world_candidate_p50_ms_range": [5.1791, 5.2007]},
+      {"msaa": 8, "cpu_render_submit_baseline_p50_ms_range": [0.7238, 0.9090], "cpu_render_submit_candidate_p50_ms_range": [0.7961, 0.8005], "gpu_static_world_baseline_p50_ms_range": [6.1271, 6.3054], "gpu_static_world_candidate_p50_ms_range": [6.1937, 6.2076]}
+    ],
+    "msaa_off_owned_subset_baseline_p50_ms_range": [1.5689, 1.6028],
+    "msaa_off_owned_subset_candidate_p50_ms_range": [1.6962, 1.7376],
+    "msaa8_gpu_total_max_ms_baseline_pair": [10.018632, 10.075104],
+    "msaa8_gpu_total_max_ms_candidate_pair": [14.16402, 14.165996],
+    "tail_causality": "not_established_preserve_outliers",
+    "raw_logs_pattern": "manual-artifacts/task-records/general-frame-51beb30e-20261021/adaptive-abba-*.log",
+    "live_fps_or_present_latency": "not_measured_hidden_no_swap_fixture"
+  },
+  "g3": {"status": "already_fixed_and_not_established_deferred", "prior_world_rx_reuse_preserved": true, "candidate_frame_local_gl_state_reuse": true, "new_shader_specialization": false, "shader_bottleneck_established": false, "isolated_g3_speedup": "not_established"},
+  "g4": {"status": "not_established_deferred", "independent_expensive_repeated_cpu_operation_isolated": false, "speculative_cpu_cache_added": false},
+  "g5": {
+    "status": "offline_release_suite_passed_delivery_complete_manual_not_run",
+    "actual_assets_color_matrix_off_2_4_8": "passed_in_captured_scope",
+    "off_world_depth_matrix": "passed_in_captured_scope",
+    "aa_off_performance_gate": "not_passed_speedup_not_established_and_cpu_submit_regression_signal",
+    "focused_release": "passed_1501_assertions_2_cases_after_projection_aspect_tests",
+    "normal_release_build": "passed",
+    "normal_release_version_check": "passed",
+    "focused_debug": {
+      "abi_dependent_libraries_rebuilt": 12,
+      "hlclient_tests_exe_exit_code": 0,
+      "prepared_blocks_and_prepared_world": {"assertions": 1501, "cases": 2, "status": "passed"},
+      "runtime_visibility": {"assertions": 71, "cases": 3, "status": "passed"}
+    },
+    "full_release_ctest_unsandboxed": {"exit_code": 0, "junit_cases": 4208, "failures": 0, "skips": 75, "duration_seconds": 205},
+    "previously_omitted_ctest_registrations": {"prefixes": ["Wrong", "Yaw", "Zero", "model"], "separate_ctest_exit_code": 0, "passed": 23, "total": 23},
+    "total_registered_tests_covered": 4231,
+    "first_restricted_sandbox_ctest": {"failures": 154, "cause": "denied_file_operations_and_loopback_not_production_regression", "provenance_retained": true},
+    "core_only_hl_disabled_release": {
+      "built_targets": ["world_render_api", "package", "core_api_tests"],
+      "build_exit_code": 0,
+      "prepared_blocks": {"assertions": 1218, "cases": 1, "status": "passed"},
+      "architecture_guard_ctest": {"passed": 1, "total": 1},
+      "alternate_filter": {"assertions": 473, "cases": 21, "skips": 0, "exit_code": 0, "status": "passed"}
+    },
+    "windowed_borderless_present": "not_run",
+    "diagnostics_off_on": "not_run",
+    "source_only_check_only_after_delivery": "passed",
+    "no_stock_manual_launch_script": "passed_exit_0_not_human_gameplay_acceptance",
+    "launcher_offline_ui_check": "passed_exit_0",
+    "final_build_delivery_sha_parity": "passed",
+    "new_manual_gameplay_acceptance": "not_run",
+    "new_agent_live_steam_hlds_game_sessions": 0,
+    "staging_commit_push": "none"
+  }
+}

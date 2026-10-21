@@ -1113,6 +1113,7 @@ struct FrameDrawCounters {
     std::uint64_t triangles{0U};
     std::uint64_t base_texture_binds{0U};
     std::uint64_t lightmap_binds{0U};
+    std::uint64_t material_uniform_uploads{0U};
     std::uint64_t program_binds{},vertex_array_binds{},sky_texture_binds{};
     std::uint64_t transform_uploads{},camera_uploads{},light_uploads{};
 };
@@ -1130,7 +1131,75 @@ struct FrameDrawState {
     RenderMatrix4 model_view_projection;
     RenderMatrix4 model_transform;
     bool transforms_valid{};
+    // GL texture names and program-local material uniforms are valid only
+    // inside this contiguous section. Resource/program changes clear all
+    // cached values; no render-pass, context or frame boundary is crossed.
+    GLuint base_texture{},lightmap_texture{};
+    bool base_texture_valid{},lightmap_texture_valid{};
+    std::optional<GLint> sky_surface{},lightmap_enabled{},masked_alpha{};
 };
+
+enum class PreparedBlockFrustumRelation {
+    outside,
+    intersecting,
+    inside,
+};
+
+// The AABBs were built from the exact indexed vertices. Use a deliberately
+// wider-than-roundoff reject margin: uncertain near/far/side-plane cases are
+// submitted and clipped by OpenGL rather than becoming missing geometry.
+[[nodiscard]] PreparedBlockFrustumRelation classify_prepared_world_bounds(
+    const world_visibility::WorldViewFrustum& frustum,
+    const assets::WorldBounds& bounds) noexcept
+{
+    bool entirely_inside = true;
+    for (const auto& plane : frustum.planes()) {
+        const auto positive_x = plane.normal.x >= 0.0F
+            ? bounds.maximum.x : bounds.minimum.x;
+        const auto positive_y = plane.normal.y >= 0.0F
+            ? bounds.maximum.y : bounds.minimum.y;
+        const auto positive_z = plane.normal.z >= 0.0F
+            ? bounds.maximum.z : bounds.minimum.z;
+        const auto negative_x = plane.normal.x >= 0.0F
+            ? bounds.minimum.x : bounds.maximum.x;
+        const auto negative_y = plane.normal.y >= 0.0F
+            ? bounds.minimum.y : bounds.maximum.y;
+        const auto negative_z = plane.normal.z >= 0.0F
+            ? bounds.minimum.z : bounds.maximum.z;
+        const auto distance = [&](const double x, const double y,
+                                  const double z) noexcept {
+            return static_cast<double>(plane.normal.x) * x +
+                static_cast<double>(plane.normal.y) * y +
+                static_cast<double>(plane.normal.z) * z +
+                static_cast<double>(plane.signed_offset);
+        };
+        const auto positive_distance = distance(
+            positive_x, positive_y, positive_z);
+        const auto negative_distance = distance(
+            negative_x, negative_y, negative_z);
+        const auto magnitude =
+            std::abs(static_cast<double>(plane.normal.x) * positive_x) +
+            std::abs(static_cast<double>(plane.normal.y) * positive_y) +
+            std::abs(static_cast<double>(plane.normal.z) * positive_z) +
+            std::abs(static_cast<double>(plane.signed_offset));
+        const auto tolerance = 1.0 + 64.0 *
+            static_cast<double>(std::numeric_limits<float>::epsilon()) *
+            magnitude;
+        if (!std::isfinite(positive_distance) ||
+            !std::isfinite(negative_distance) ||
+            !std::isfinite(tolerance)) {
+            return PreparedBlockFrustumRelation::intersecting;
+        }
+        if (positive_distance < -tolerance) {
+            return PreparedBlockFrustumRelation::outside;
+        }
+        if (negative_distance < tolerance) {
+            entirely_inside = false;
+        }
+    }
+    return entirely_inside ? PreparedBlockFrustumRelation::inside
+                           : PreparedBlockFrustumRelation::intersecting;
+}
 
 void draw_package_range(
     GpuWorldResources& resources,
@@ -1185,8 +1254,18 @@ void draw_package_range(
         glUniform1i(resources.program.lightmap_layer,0);
         state.bound_resources=&resources;
         state.transforms_valid=false;
+        state.base_texture_valid=false;
+        state.lightmap_texture_valid=false;
+        state.sky_surface.reset();
+        state.lightmap_enabled.reset();
+        state.masked_alpha.reset();
     }
-    glUniform1i(resources.program.sky_surface,state.sky_texture && material.sky_surface ? 1 : 0);
+    const GLint sky_surface=state.sky_texture && material.sky_surface ? 1 : 0;
+    if(state.sky_surface!=sky_surface) {
+        glUniform1i(resources.program.sky_surface,sky_surface);
+        state.sky_surface=sky_surface;
+        ++counters.material_uniform_uploads;
+    }
     if(!state.transforms_valid || state.model_view_projection!=model_view_projection) {
         glUniformMatrix4fv(resources.program.model_view_projection,1,GL_FALSE,
             model_view_projection.values.data());
@@ -1201,33 +1280,40 @@ void draw_package_range(
     }
     state.transforms_valid=true;
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(
-        GL_TEXTURE_2D,
-        alternate_texture ? alternate_texture : resources.base_textures[material.base_texture_asset_index].name());
-    ++counters.base_texture_binds;
-
-    glActiveTexture(GL_TEXTURE1);
-    if (material.lightmap_mode ==
-        world_render::WorldRenderLightmapMode::atlas) {
-        glBindTexture(
-            GL_TEXTURE_2D_ARRAY,
-            resources.lightmap_pages[*material.lightmap_atlas_page_index]
-                .name());
-        glUniform1i(resources.program.lightmap_enabled, 1);
-    } else {
-        glBindTexture(
-            GL_TEXTURE_2D_ARRAY,
-            resources.white_lightmap.name());
-        glUniform1i(resources.program.lightmap_enabled, 0);
+    const GLuint base_texture=alternate_texture ? alternate_texture :
+        resources.base_textures[material.base_texture_asset_index].name();
+    if(!state.base_texture_valid || state.base_texture!=base_texture) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,base_texture);
+        state.base_texture=base_texture;
+        state.base_texture_valid=true;
+        ++counters.base_texture_binds;
     }
-    ++counters.lightmap_binds;
-    glUniform1i(
-        resources.program.masked_alpha,
-        material.base_texture_alpha_mode ==
-                assets::WorldTextureAlphaMode::masked_index_255
-            ? 1
-            : 0);
+
+    const bool atlas=material.lightmap_mode==world_render::WorldRenderLightmapMode::atlas;
+    const GLuint lightmap_texture=atlas ?
+        resources.lightmap_pages[*material.lightmap_atlas_page_index].name() :
+        resources.white_lightmap.name();
+    if(!state.lightmap_texture_valid || state.lightmap_texture!=lightmap_texture) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D_ARRAY,lightmap_texture);
+        state.lightmap_texture=lightmap_texture;
+        state.lightmap_texture_valid=true;
+        ++counters.lightmap_binds;
+    }
+    const GLint lightmap_enabled=atlas ? 1 : 0;
+    if(state.lightmap_enabled!=lightmap_enabled) {
+        glUniform1i(resources.program.lightmap_enabled,lightmap_enabled);
+        state.lightmap_enabled=lightmap_enabled;
+        ++counters.material_uniform_uploads;
+    }
+    const GLint masked_alpha=material.base_texture_alpha_mode==
+        assets::WorldTextureAlphaMode::masked_index_255 ? 1 : 0;
+    if(state.masked_alpha!=masked_alpha) {
+        glUniform1i(resources.program.masked_alpha,masked_alpha);
+        state.masked_alpha=masked_alpha;
+        ++counters.material_uniform_uploads;
+    }
 
     const auto byte_offset = checked_index_byte_offset(first_index);
     glDrawElements(
@@ -1466,7 +1552,8 @@ void main() {
             gpu_timing_.last_submission_status=OpenGlGpuTimingStatus::pending;
             // glBeginQuery was just checked, so there is no prior render
             // operation whose error could be confused with this timestamp.
-            gpu_pass_boundary_query(OpenGlGpuPass::world);
+            gpu_pass_boundary_query(OpenGlGpuPass::world,
+                OpenGlWorldGpuSubpass::target_setup_clear);
             return true;
         }
         ++gpu_timing_.capacity_drops;
@@ -1483,17 +1570,31 @@ void main() {
             "Render pass before GPU timestamp");
         gpu_pass_boundary_query(next);
     }
-    void gpu_pass_boundary_query(const OpenGlGpuPass next) noexcept {
+    void gpu_world_subpass_boundary(const OpenGlWorldGpuSubpass next) {
+        if(!gpu_active_ || !gpu_timing_.pass_timestamps_supported || gpu_timing_failed_)return;
+        const auto& frame=gpu_pass_frames_[*gpu_active_];
+        if(!frame.count || frame.passes[frame.count-1U]!=OpenGlGpuPass::world ||
+            frame.world_subpasses[frame.count-1U]==next)return;
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+            "World subpass before GPU timestamp");
+        gpu_pass_boundary_query(OpenGlGpuPass::world,next);
+    }
+    void gpu_pass_boundary_query(const OpenGlGpuPass next,
+        const std::optional<OpenGlWorldGpuSubpass> world_subpass={}) noexcept {
         if(!gpu_active_ || !gpu_timing_.pass_timestamps_supported || gpu_timing_failed_)return;
         auto& frame=gpu_pass_frames_[*gpu_active_];
-        if(frame.count && frame.passes[frame.count-1U]==next)return;
+        if(frame.count && frame.passes[frame.count-1U]==next &&
+            frame.world_subpasses[frame.count-1U]==world_subpass)return;
         // Reserve the final timestamp. Overflow invalidates observations, not
-        // the frame or its rendering. The ordered production path uses <=10.
+        // the frame or its rendering. The ordered path uses <=14 including
+        // three optional world-detail boundaries, plus the final timestamp.
         if(frame.count>=kGpuPassBoundaryLimit-1U) {frame.invalid=true;return;}
         const auto index=*gpu_active_*kGpuPassBoundaryLimit+frame.count;
         glQueryCounter(gpu_pass_queries_[index],GL_TIMESTAMP);
         if(!gpu_call_succeeded()){frame.invalid=true;return;}
-        frame.passes[frame.count++]=next;
+        frame.passes[frame.count]=next;
+        frame.world_subpasses[frame.count]=world_subpass;
+        ++frame.count;
     }
     void end_gpu_timing(const bool frame_completed=true) noexcept {
         if(gpu_active_) {
@@ -1587,6 +1688,7 @@ void main() {
                         result.status=OpenGlGpuTimingStatus::disjoint;
                         result.elapsed_ms=std::numeric_limits<double>::quiet_NaN();
                         result.pass_elapsed_ms={};result.valid_pass_mask=0;
+                        result.world_subpass_elapsed_ms={};result.valid_world_subpass_mask=0;
                         ++gpu_timing_.disjoint_results;
                         gpu_pending_[i]=false;--gpu_timing_.pending;++gpu_timing_.completed;
                         return result;
@@ -1595,6 +1697,12 @@ void main() {
                     result.pass_elapsed_ms[pass]+=static_cast<float>(
                         static_cast<double>(timestamps[stamp]-timestamps[stamp-1U])/1'000'000.0);
                     result.valid_pass_mask|=static_cast<std::uint8_t>(1U<<pass);
+                    if(const auto subpass=passes.world_subpasses[stamp-1U]) {
+                        const auto detail=static_cast<std::size_t>(*subpass);
+                        result.world_subpass_elapsed_ms[detail]+=static_cast<float>(
+                            static_cast<double>(timestamps[stamp]-timestamps[stamp-1U])/1'000'000.0);
+                        result.valid_world_subpass_mask|=static_cast<std::uint8_t>(1U<<detail);
+                    }
                 }
             }
             gpu_pending_[i]=false;--gpu_timing_.pending;++gpu_timing_.completed;
@@ -3205,6 +3313,7 @@ private:
     static constexpr std::size_t kGpuPassBoundaryLimit=16U;
     struct GpuPassFrame {
         std::array<OpenGlGpuPass,kGpuPassBoundaryLimit> passes{};
+        std::array<std::optional<OpenGlWorldGpuSubpass>,kGpuPassBoundaryLimit> world_subpasses{};
         std::size_t count{};
         bool invalid{},disjoint{};
     };
@@ -3429,6 +3538,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         ++statistics.rendered_frame_count;
         return;
     }
+    implementation_->gpu_world_subpass_boundary(OpenGlWorldGpuSubpass::sky);
     const auto sky_texture=implementation_->prepare_sky(scene.skybox);
     implementation_->render_sky(sky_texture,view_camera,{width,height});
     // Unit2 and seamless cube filtering are owned for this frame. Portal sky
@@ -3535,6 +3645,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         ++statistics.rendered_frame_count;
         return;
     }
+    implementation_->gpu_world_subpass_boundary(OpenGlWorldGpuSubpass::static_world);
     if (!scene.static_world->package) {
         fail(OpenGlRendererErrorCode::invalid_world_package,
             "RenderScene contains a static-world entry without a package");
@@ -3703,20 +3814,135 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             statistics.rendered_command_count +=
                 static_cast<std::uint64_t>(commands.size());
         } else {
-            for (const auto& batch : world_package.draw_batches()) {
-                draw_package_range(
-                    resources.world,
-                    world_package,
-                    batch.first_index,
-                    batch.index_count,
-                    batch.render_material_index,
-                    *matrix.matrix,
-                    RenderMatrix4{},
-                    false,
-                    frame,draw_state);
+            const auto batches = world_package.draw_batches();
+            const auto prepared_batches =
+                world_package.prepared_draw_batches();
+            const auto prepared_blocks =
+                world_package.prepared_draw_blocks();
+            const auto prepared_frustum =
+                prepared_batches.size() == batches.size() &&
+                    !prepared_blocks.empty()
+                ? world_visibility::WorldViewFrustum::from_view_projection(
+                      *matrix.matrix)
+                : world_visibility::WorldViewFrustumCreateResult{};
+            // Near-all-visible views spend more CPU testing every block than
+            // the rejected geometry can repay. Probe fixed, evenly spaced
+            // immutable blocks; a positive probe only enables the detailed
+            // selector. A negative result submits the original full batches,
+            // so neither sampling nor camera motion can omit a triangle.
+            bool all_batch_bypass = false;
+            if (prepared_frustum.frustum) {
+                constexpr std::size_t maximum_probes = 16U;
+                const auto probe_count = std::min(
+                    maximum_probes, prepared_blocks.size());
+                std::size_t outside_probes = 0U;
+                for (std::size_t probe = 0U; probe < probe_count; ++probe) {
+                    const auto block_index =
+                        (probe * prepared_blocks.size()) / probe_count;
+                    ++statistics.prepared_world_probed_block_count;
+                    if (classify_prepared_world_bounds(
+                            *prepared_frustum.frustum,
+                            prepared_blocks[block_index].bounds) ==
+                        PreparedBlockFrustumRelation::outside) {
+                        ++outside_probes;
+                        if (outside_probes >= 2U) {
+                            break;
+                        }
+                    }
+                }
+                all_batch_bypass = outside_probes < 2U;
+                if (all_batch_bypass) {
+                    ++statistics.prepared_world_all_batch_bypass_frame_count;
+                }
+            }
+            constexpr std::size_t maximum_runs_per_batch = 4U;
+            for (std::size_t batch_index = 0U; batch_index < batches.size();
+                 ++batch_index) {
+                const auto& batch = batches[batch_index];
+                const auto draw_range = [&](const std::uint32_t first,
+                                            const std::uint32_t count) {
+                    draw_package_range(resources.world, world_package,
+                        first, count, batch.render_material_index,
+                        *matrix.matrix, RenderMatrix4{}, false,
+                        frame, draw_state);
+                };
+                if (!prepared_frustum.frustum || all_batch_bypass) {
+                    ++statistics.prepared_world_full_batch_fallback_count;
+                    draw_range(batch.first_index, batch.index_count);
+                    continue;
+                }
+                const auto& prepared = prepared_batches[batch_index];
+                if (prepared.block_count == 0U ||
+                    prepared.first_block > prepared_blocks.size() ||
+                    prepared.block_count >
+                        prepared_blocks.size() - prepared.first_block) {
+                    ++statistics.prepared_world_full_batch_fallback_count;
+                    draw_range(batch.first_index, batch.index_count);
+                    continue;
+                }
+                const auto relation = classify_prepared_world_bounds(
+                    *prepared_frustum.frustum, prepared.bounds);
+                if (relation == PreparedBlockFrustumRelation::outside) {
+                    statistics.prepared_world_rejected_block_count +=
+                        prepared.block_count;
+                    continue;
+                }
+                if (relation == PreparedBlockFrustumRelation::inside) {
+                    statistics.prepared_world_selected_block_count +=
+                        prepared.block_count;
+                    draw_range(batch.first_index, batch.index_count);
+                    continue;
+                }
+                const auto blocks = prepared_blocks.subspan(
+                    prepared.first_block, prepared.block_count);
+                std::size_t selected_blocks = 0U;
+                std::size_t run_count = 0U;
+                struct RetainedRun {
+                    std::uint32_t first_index;
+                    std::uint32_t end_index;
+                };
+                std::array<RetainedRun, maximum_runs_per_batch> runs{};
+                bool in_run = false;
+                for (const auto& block : blocks) {
+                    const bool selected = classify_prepared_world_bounds(
+                        *prepared_frustum.frustum, block.bounds) !=
+                        PreparedBlockFrustumRelation::outside;
+                    selected_blocks += static_cast<std::size_t>(selected);
+                    if (selected && !in_run) {
+                        ++run_count;
+                        if (run_count > maximum_runs_per_batch) {
+                            break;
+                        }
+                        runs[run_count - 1U].first_index = block.first_index;
+                    }
+                    if (selected) {
+                        runs[run_count - 1U].end_index =
+                            block.first_index + block.index_count;
+                    }
+                    in_run = selected;
+                }
+                if (run_count > maximum_runs_per_batch) {
+                    // Avoid trading one material submission for a large number
+                    // of tiny draws in a fragmented nearly-visible batch.
+                    ++statistics.prepared_world_full_batch_fallback_count;
+                    statistics.prepared_world_selected_block_count +=
+                        prepared.block_count;
+                    draw_range(batch.first_index, batch.index_count);
+                    continue;
+                }
+                statistics.prepared_world_selected_block_count +=
+                    selected_blocks;
+                statistics.prepared_world_rejected_block_count +=
+                    prepared.block_count - selected_blocks;
+                for (std::size_t run = 0U; run < run_count; ++run) {
+                    draw_range(runs[run].first_index,
+                        runs[run].end_index - runs[run].first_index);
+                }
             }
         }
         if (scene.static_world->runtime_brushes) {
+            implementation_->gpu_world_subpass_boundary(
+                OpenGlWorldGpuSubpass::runtime_brushes);
             const auto& runtime = *scene.static_world->runtime_brushes;
             const auto& map = *scene.static_world->scene_package;
             if (!world_scene_render::valid_runtime_brush_frame(runtime, map))
@@ -3788,6 +4014,10 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         }
     }
 
+    // The former per-range path always left unit 1 active. Preserve that
+    // observable state for the following passes without repeating the call
+    // for every draw command.
+    glActiveTexture(GL_TEXTURE1);
     require_no_gl_error(
         OpenGlRendererErrorCode::gl_operation_failed,
         "OpenGL static-world draw");
@@ -3883,6 +4113,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     statistics.program_bind_count += frame.program_binds;
     statistics.vertex_array_bind_count += frame.vertex_array_binds;
     statistics.sky_texture_bind_count += frame.sky_texture_binds;
+    statistics.material_uniform_upload_count += frame.material_uniform_uploads;
     statistics.transform_upload_count += frame.transform_uploads;
     statistics.camera_upload_count += frame.camera_uploads;
     statistics.light_upload_count += frame.light_uploads;
@@ -3909,6 +4140,16 @@ std::string_view to_string(const OpenGlGpuPass pass) noexcept {
     case OpenGlGpuPass::msaa_resolve:return "msaa_resolve";
     case OpenGlGpuPass::image_adjustments:return "image_adjustments";
     case OpenGlGpuPass::hud_console:return "hud_console";
+    }
+    return "invalid";
+}
+
+std::string_view to_string(const OpenGlWorldGpuSubpass pass) noexcept {
+    switch(pass) {
+    case OpenGlWorldGpuSubpass::target_setup_clear:return "target_setup_clear";
+    case OpenGlWorldGpuSubpass::sky:return "sky";
+    case OpenGlWorldGpuSubpass::static_world:return "static_world";
+    case OpenGlWorldGpuSubpass::runtime_brushes:return "runtime_brushes";
     }
     return "invalid";
 }

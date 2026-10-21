@@ -207,6 +207,7 @@ private:
         default_back_compatibility_=samples==0 && (encoding==GL_LINEAR || encoding==GL_SRGB) &&
             component==GL_UNSIGNED_NORMALIZED && red==8 && green==8 && blue==8 &&
             (alpha==0 || alpha==8);
+        statistics_.cached_default_back_output_compatible=default_back_compatibility_;
         return *default_back_compatibility_;
     }
     void blit() const {
@@ -218,6 +219,7 @@ private:
         storage_.reset();statistics_.actual_samples=0;statistics_.framebuffer_complete=false;
         statistics_.active_framebuffers=statistics_.active_attachments=0;
         default_back_compatibility_.reset();
+        statistics_.cached_default_back_output_compatible.reset();
     }
     [[nodiscard]] bool allocation_error() noexcept {
         bool error=false;

@@ -499,6 +499,23 @@ struct ExpectedField final {
     return found == schema.fields().end() ? nullptr : &*found;
 }
 
+[[nodiscard]] const DeltaFieldValue* field_at_validated_index(
+    const DeltaObjectState& object,
+    const DeltaFieldDefinition& definition,
+    const std::string_view name) noexcept
+{
+    // schema_for() already matched every field definition and its wire order.
+    // Retain a local bounds/name guard while avoiding a second linear scan of
+    // the same complete object for each projected semantic field.
+    const auto index = definition.wire_index();
+    const auto& fields = object.fields();
+    if (index >= fields.size() || fields[index].wire_index() != index ||
+        fields[index].name() != name) {
+        return nullptr;
+    }
+    return &fields[index];
+}
+
 [[nodiscard]] bool matches_expected(
     const DeltaFieldDefinition& field,
     const ExpectedField& expected) noexcept
@@ -533,7 +550,7 @@ struct OptionalDoubleResult final {
             "semantic field descriptor does not match the public reference binding: " +
                 std::string{name})};
     }
-    const auto* field = object.find_exact(name);
+    const auto* field = field_at_validated_index(object, *definition, name);
     if (field == nullptr || !std::holds_alternative<double>(field->value())) {
         return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
             "semantic field value is absent or has the wrong canonical type: " +
@@ -569,7 +586,7 @@ struct OptionalUnsignedResult final {
         return {{}, failure(RuntimeReplayErrorCode::semantic_schema_mismatch,
             "semantic unsigned-integer descriptor mismatch: " + std::string{name})};
     }
-    const auto* field = object.find_exact(name);
+    const auto* field = field_at_validated_index(object, *definition, name);
     if (field == nullptr ||
         !std::holds_alternative<std::uint32_t>(field->value())) {
         return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
@@ -593,7 +610,7 @@ struct OptionalUnsignedResult final {
             "semantic signed-integer descriptor mismatch: " +
                 std::string{name})};
     }
-    const auto* field = object.find_exact(name);
+    const auto* field = field_at_validated_index(object, *definition, name);
     if (field == nullptr ||
         !std::holds_alternative<std::int32_t>(field->value())) {
         return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
@@ -621,7 +638,7 @@ struct OptionalBoolResult final {
         return {{}, failure(RuntimeReplayErrorCode::semantic_schema_mismatch,
             "semantic boolean descriptor mismatch: " + std::string{name})};
     }
-    const auto* field = object.find_exact(name);
+    const auto* field = field_at_validated_index(object, *definition, name);
     if (field == nullptr ||
         !std::holds_alternative<std::uint32_t>(field->value())) {
         return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
@@ -681,7 +698,7 @@ struct ProjectionResult final {
         std::optional<std::uint32_t>& output) -> std::optional<RuntimeReplayError> {
         const auto* definition = find_definition(schema, name);
         if (!definition) { return {}; }
-        const auto* field = object.find_exact(name);
+        const auto* field = field_at_validated_index(object, *definition, name);
         if (!matches_expected(*definition, {type, false, {}, {}}) ||
             !field || !std::holds_alternative<std::uint32_t>(field->value())) {
             return failure(RuntimeReplayErrorCode::semantic_schema_mismatch,
@@ -738,7 +755,7 @@ struct ProjectionResult final {
             "velocity[2]", {DeltaFieldBaseType::float_value, true, {}, {}},
             target.velocity)) return error;
     if (const auto* definition = find_definition(schema, "skin")) {
-        const auto* field = object.find_exact("skin");
+        const auto* field = field_at_validated_index(object, *definition, "skin");
         if (!matches_expected(*definition, {DeltaFieldBaseType::short_value, true, {}, {}}) ||
             !field || !std::holds_alternative<std::int32_t>(field->value())) {
             return failure(RuntimeReplayErrorCode::semantic_schema_mismatch, "public visual skin schema/type mismatch");
@@ -906,7 +923,7 @@ struct ProjectionResult final {
                     const auto read=[&](std::string_view name,std::optional<std::uint32_t>& out) -> std::optional<RuntimeReplayError> {
                         if(name.starts_with("rendercolor.")) {
                             const auto* definition=find_definition(*schema,name);if(!definition)return {};
-                            const auto* field=entity.object().find_exact(name);
+                            const auto* field=field_at_validated_index(entity.object(),*definition,name);
                             if(!matches_expected(*definition,{DeltaFieldBaseType::byte_value,false,{},{}}) || !field || !std::holds_alternative<std::uint32_t>(field->value()))
                                 return failure(RuntimeReplayErrorCode::semantic_schema_mismatch,"custom beam color descriptor mismatch");
                             out=std::get<std::uint32_t>(field->value());return {};
@@ -1050,7 +1067,8 @@ struct ProjectionResult final {
             if (in_duck.error) return {{}, in_duck.error};
             receiving.in_duck = in_duck.value;
             if (const auto* definition = find_definition(*client_schema, "physinfo")) {
-                const auto* field = client_frame->client_data().find_exact("physinfo");
+                const auto* field = field_at_validated_index(
+                    client_frame->client_data(), *definition, "physinfo");
                 if (!matches_expected(*definition, {DeltaFieldBaseType::string, false, {}, {}}) ||
                     !field || !std::holds_alternative<std::string>(field->value()))
                     return {{}, failure(RuntimeReplayErrorCode::semantic_schema_mismatch,

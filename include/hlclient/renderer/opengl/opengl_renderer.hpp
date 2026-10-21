@@ -19,11 +19,18 @@ enum class OpenGlGpuPass : std::uint8_t {
     image_adjustments, hud_console
 };
 inline constexpr std::size_t kOpenGlGpuPassCount = 6U;
+// Optional detail of the existing world pass. These intervals do not change
+// the meaning or validity bits of OpenGlGpuPass::world.
+enum class OpenGlWorldGpuSubpass : std::uint8_t {
+    target_setup_clear, sky, static_world, runtime_brushes
+};
+inline constexpr std::size_t kOpenGlWorldGpuSubpassCount = 4U;
 enum class OpenGlGpuTimingStatus : std::uint8_t {
     not_observed, pending, ready, unsupported, disjoint, invalid, capacity_dropped
 };
 [[nodiscard]] std::string_view to_string(OpenGlGpuTimingStatus status) noexcept;
 [[nodiscard]] std::string_view to_string(OpenGlGpuPass pass) noexcept;
+[[nodiscard]] std::string_view to_string(OpenGlWorldGpuSubpass pass) noexcept;
 
 struct OpenGlGpuFrameTiming final {
     std::uint64_t frame_number{};
@@ -33,6 +40,10 @@ struct OpenGlGpuFrameTiming final {
     // pass is represented by a valid zero: consumers must check this mask.
     std::array<float, kOpenGlGpuPassCount> pass_elapsed_ms{};
     std::uint8_t valid_pass_mask{};
+    // A zero duration is meaningful only when the corresponding bit is set.
+    // Unsupported, pending, disjoint, and invalid samples leave this mask 0.
+    std::array<float, kOpenGlWorldGpuSubpassCount> world_subpass_elapsed_ms{};
+    std::uint8_t valid_world_subpass_mask{};
     OpenGlGpuTimingStatus status{OpenGlGpuTimingStatus::not_observed};
 };
 struct OpenGlGpuTimingStatistics final {
@@ -85,6 +96,13 @@ struct OpenGlWorldRendererStatistics {
     std::uint64_t brush_draw_call_count{0U};
     std::uint64_t runtime_brush_submitted_count{0U};
     std::uint64_t runtime_brush_culled_count{0U};
+    // Cumulative static-world block decisions. A full-batch fallback is one
+    // material batch, not a lost frame or a missing surface.
+    std::uint64_t prepared_world_selected_block_count{0U};
+    std::uint64_t prepared_world_rejected_block_count{0U};
+    std::uint64_t prepared_world_full_batch_fallback_count{0U};
+    std::uint64_t prepared_world_probed_block_count{0U};
+    std::uint64_t prepared_world_all_batch_bypass_frame_count{0U};
     std::uint64_t rendered_command_count{0U};
     std::uint64_t triangle_count{0U};
     std::uint64_t base_texture_bind_count{0U};
@@ -92,6 +110,7 @@ struct OpenGlWorldRendererStatistics {
     std::uint64_t program_bind_count{0U};
     std::uint64_t vertex_array_bind_count{0U};
     std::uint64_t sky_texture_bind_count{0U};
+    std::uint64_t material_uniform_upload_count{0U};
     std::uint64_t transform_upload_count{0U};
     std::uint64_t camera_upload_count{0U};
     std::uint64_t light_upload_count{0U};
@@ -191,6 +210,9 @@ struct OpenGlSceneTargetStatistics {
     OpenGlMsaaFallback fallback_reason{OpenGlMsaaFallback::disabled};
     std::uint64_t storage_allocations{}, storage_releases{}, resolved_frames{};
     std::uint64_t output_color_blits{}, direct_adjustment_frames{};
+    // Null until the existing one-time default-back-buffer capability check
+    // is needed. This is a cached observation, not an extra GL query.
+    std::optional<bool> cached_default_back_output_compatible{};
     std::size_t active_framebuffers{}, active_attachments{};
 };
 

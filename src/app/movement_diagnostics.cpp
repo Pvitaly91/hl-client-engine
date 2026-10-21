@@ -48,11 +48,17 @@ void bounded_value(std::optional<double>& value,double low,double high,std::uint
     if(value && (!std::isfinite(*value) || *value<low || *value>high)){value.reset();++invalid;}
 }
 bool valid_gpu_passes(const MovementGpuPassRecord& value) noexcept {
-    if(value.status>MovementGpuPassStatus::capacity_dropped || (value.valid_mask&0xc0U)!=0)return false;
-    if(value.status!=MovementGpuPassStatus::ready && value.valid_mask!=0)return false;
+    if(value.status>MovementGpuPassStatus::capacity_dropped || (value.valid_mask&0xc0U)!=0 ||
+        (value.valid_world_subpass_mask&0xf0U)!=0)return false;
+    if(value.status!=MovementGpuPassStatus::ready && (value.valid_mask!=0 || value.valid_world_subpass_mask!=0))return false;
+    if(value.valid_world_subpass_mask && !(value.valid_mask&1U))return false;
     for(std::size_t i=0;i<value.milliseconds.size();++i)
         if((value.valid_mask&(1U<<i))!=0 && (!std::isfinite(value.milliseconds[i]) ||
             value.milliseconds[i]<0 || value.milliseconds[i]>1e9F))return false;
+    for(std::size_t i=0;i<value.world_subpass_milliseconds.size();++i)
+        if((value.valid_world_subpass_mask&(1U<<i))!=0 &&
+            (!std::isfinite(value.world_subpass_milliseconds[i]) ||
+             value.world_subpass_milliseconds[i]<0 || value.world_subpass_milliseconds[i]>1e9F))return false;
     return true;
 }
 bool valid_prediction_work(const core::PredictionWorkDiagnostics& value) noexcept {
@@ -215,6 +221,12 @@ std::string encode_frame(const Record& value) {
         for(std::size_t i=0;i<names.size();++i)
             field(text,names[i],(value.gpu_passes.valid_mask&(1U<<i))!=0
                 ?std::optional<float>{value.gpu_passes.milliseconds[i]}:std::nullopt);
+        constexpr std::array world_names{"target_setup_clear","sky","static_world","runtime_brushes"};
+        text+=",\"world_subpasses\":{\"valid_mask\":"+scalar(value.gpu_passes.valid_world_subpass_mask);
+        for(std::size_t i=0;i<world_names.size();++i)
+            field(text,world_names[i],(value.gpu_passes.valid_world_subpass_mask&(1U<<i))!=0
+                ?std::optional<float>{value.gpu_passes.world_subpass_milliseconds[i]}:std::nullopt);
+        text+='}';
         text+='}';
     }
 #define E32_FIELD(name) field(text,#name,value.name)

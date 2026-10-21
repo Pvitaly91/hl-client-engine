@@ -154,6 +154,181 @@ struct PendingBatch {
     std::size_t source_surface_count{0U};
 };
 
+constexpr std::size_t kPreparedBlockSurfaceCount = 16U;
+
+struct PreparedDrawData {
+    std::vector<WorldPreparedDrawBatch> batches;
+    std::vector<WorldPreparedDrawBlock> blocks;
+    std::size_t retained_bytes{0U};
+};
+
+// Only the private-constructed immutable WorldRenderPackage may retain this
+// fast path. Generic visibility DTO builders continue to validate their own
+// input; a failed or over-budget preparation leaves full batches available.
+[[nodiscard]] std::optional<PreparedDrawData> prepare_draw_data(
+    const std::span<const WorldRenderVertex> vertices,
+    const std::span<const std::uint32_t> indices,
+    const std::span<const WorldDrawBatch> batches,
+    const std::span<const WorldRenderSurfaceRange> surfaces,
+    const std::size_t remaining_byte_budget) noexcept
+{
+    try {
+        std::size_t maximum_blocks = 0U;
+        for (const auto& batch : batches) {
+            const auto batch_blocks = batch.source_surface_count /
+                    kPreparedBlockSurfaceCount +
+                (batch.source_surface_count % kPreparedBlockSurfaceCount != 0U);
+            if (batch_blocks == 0U ||
+                !checked_add(maximum_blocks, batch_blocks, maximum_blocks)) {
+                return std::nullopt;
+            }
+        }
+        std::size_t estimated_bytes = 0U;
+        if (!checked_accumulate_bytes(batches.size(),
+                sizeof(WorldPreparedDrawBatch), estimated_bytes) ||
+            !checked_accumulate_bytes(maximum_blocks,
+                sizeof(WorldPreparedDrawBlock), estimated_bytes) ||
+            estimated_bytes > remaining_byte_budget) {
+            return std::nullopt;
+        }
+
+        std::vector<const WorldRenderSurfaceRange*> ordered;
+        ordered.reserve(surfaces.size());
+        for (const auto& surface : surfaces) {
+            ordered.push_back(&surface);
+        }
+        std::ranges::sort(ordered, {}, [](const auto* surface) {
+            return surface->first_index;
+        });
+
+        PreparedDrawData result;
+        result.batches.reserve(batches.size());
+        result.blocks.reserve(maximum_blocks);
+        std::size_t next_surface = 0U;
+        for (std::size_t batch_index = 0U; batch_index < batches.size();
+             ++batch_index) {
+            const auto& batch = batches[batch_index];
+            std::size_t batch_end = 0U;
+            if (batch.index_count == 0U ||
+                !checked_add(batch.first_index, batch.index_count, batch_end) ||
+                batch_end > indices.size()) {
+                return std::nullopt;
+            }
+            WorldPreparedDrawBatch prepared_batch;
+            prepared_batch.first_block = result.blocks.size();
+            std::size_t expected_index = batch.first_index;
+            std::size_t surfaces_in_batch = 0U;
+            std::size_t surfaces_in_block = 0U;
+            WorldPreparedDrawBlock block;
+            bool block_has_vertex = false;
+            bool batch_has_bounds = false;
+            while (next_surface < ordered.size() &&
+                ordered[next_surface]->first_index < batch_end) {
+                const auto& surface = *ordered[next_surface++];
+                if (surface.source_batch_index != batch_index ||
+                    surface.render_material_index != batch.render_material_index ||
+                    surface.index_count == 0U ||
+                    surface.first_index != expected_index ||
+                    surface.index_count > batch_end - expected_index) {
+                    return std::nullopt;
+                }
+                if (surfaces_in_block == 0U) {
+                    block = {};
+                    block.first_index = surface.first_index;
+                    block_has_vertex = false;
+                }
+                for (std::size_t index = surface.first_index;
+                     index < static_cast<std::size_t>(surface.first_index) +
+                         surface.index_count; ++index) {
+                    const auto vertex_index = indices[index];
+                    if (vertex_index >= vertices.size()) {
+                        return std::nullopt;
+                    }
+                    const auto position = vertices[vertex_index].position;
+                    if (!finite(position)) {
+                        return std::nullopt;
+                    }
+                    if (!block_has_vertex) {
+                        block.bounds = {position, position};
+                        block_has_vertex = true;
+                    } else {
+                        block.bounds.minimum.x = std::min(
+                            block.bounds.minimum.x, position.x);
+                        block.bounds.minimum.y = std::min(
+                            block.bounds.minimum.y, position.y);
+                        block.bounds.minimum.z = std::min(
+                            block.bounds.minimum.z, position.z);
+                        block.bounds.maximum.x = std::max(
+                            block.bounds.maximum.x, position.x);
+                        block.bounds.maximum.y = std::max(
+                            block.bounds.maximum.y, position.y);
+                        block.bounds.maximum.z = std::max(
+                            block.bounds.maximum.z, position.z);
+                    }
+                }
+                expected_index += surface.index_count;
+                ++surfaces_in_batch;
+                ++surfaces_in_block;
+                if (surfaces_in_block == kPreparedBlockSurfaceCount ||
+                    expected_index == batch_end) {
+                    if (!block_has_vertex ||
+                        expected_index - block.first_index >
+                            std::numeric_limits<std::uint32_t>::max()) {
+                        return std::nullopt;
+                    }
+                    block.index_count = static_cast<std::uint32_t>(
+                        expected_index - block.first_index);
+                    if (!batch_has_bounds) {
+                        prepared_batch.bounds = block.bounds;
+                        batch_has_bounds = true;
+                    } else {
+                        const auto& bounds = block.bounds;
+                        prepared_batch.bounds.minimum.x = std::min(
+                            prepared_batch.bounds.minimum.x, bounds.minimum.x);
+                        prepared_batch.bounds.minimum.y = std::min(
+                            prepared_batch.bounds.minimum.y, bounds.minimum.y);
+                        prepared_batch.bounds.minimum.z = std::min(
+                            prepared_batch.bounds.minimum.z, bounds.minimum.z);
+                        prepared_batch.bounds.maximum.x = std::max(
+                            prepared_batch.bounds.maximum.x, bounds.maximum.x);
+                        prepared_batch.bounds.maximum.y = std::max(
+                            prepared_batch.bounds.maximum.y, bounds.maximum.y);
+                        prepared_batch.bounds.maximum.z = std::max(
+                            prepared_batch.bounds.maximum.z, bounds.maximum.z);
+                    }
+                    result.blocks.push_back(block);
+                    ++prepared_batch.block_count;
+                    surfaces_in_block = 0U;
+                }
+            }
+            if (expected_index != batch_end || surfaces_in_block != 0U ||
+                surfaces_in_batch != batch.source_surface_count ||
+                !batch_has_bounds) {
+                return std::nullopt;
+            }
+            result.batches.push_back(prepared_batch);
+        }
+        if (next_surface != ordered.size() ||
+            result.blocks.size() != maximum_blocks) {
+            return std::nullopt;
+        }
+        std::size_t retained_bytes = 0U;
+        if (!checked_accumulate_bytes(result.batches.capacity(),
+                sizeof(WorldPreparedDrawBatch), retained_bytes) ||
+            !checked_accumulate_bytes(result.blocks.capacity(),
+                sizeof(WorldPreparedDrawBlock), retained_bytes) ||
+            retained_bytes > remaining_byte_budget) {
+            return std::nullopt;
+        }
+        result.retained_bytes = retained_bytes;
+        return result;
+    } catch (const std::bad_alloc&) {
+        return std::nullopt;
+    } catch (const std::length_error&) {
+        return std::nullopt;
+    }
+}
+
 [[nodiscard]] std::optional<WorldFlatSkyBackground> verified_flat_sky_background(
     const assets::TexturedWorldAsset& world,
     const std::span<const WorldRenderMaterial> materials) noexcept
@@ -868,6 +1043,21 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 std::nullopt,
                 "Aggregate retained CPU render storage exceeds the configured limit");
         }
+        // The optional acceleration structure is prepared once from the
+        // already validated, immutable render buffers. If its bounded build
+        // cannot complete, the package still retains its original batches.
+        auto prepared = prepare_draw_data(render_vertices, render_indices,
+            draw_batches, surface_ranges,
+            limits.maximum_total_cpu_render_bytes - total_cpu_bytes);
+        std::vector<WorldPreparedDrawBatch> prepared_batches;
+        std::vector<WorldPreparedDrawBlock> prepared_blocks;
+        if (prepared) {
+            statistics.prepared_draw_block_count = prepared->blocks.size();
+            statistics.prepared_draw_byte_count = prepared->retained_bytes;
+            total_cpu_bytes += prepared->retained_bytes;
+            prepared_batches = std::move(prepared->batches);
+            prepared_blocks = std::move(prepared->blocks);
+        }
         statistics.total_cpu_render_byte_count = total_cpu_bytes;
         const auto retained_bounds = world.bounds;
         const auto flat_sky_background = verified_flat_sky_background(
@@ -888,6 +1078,8 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 std::move(render_materials),
                 std::move(draw_batches),
                 std::move(surface_ranges),
+                std::move(prepared_batches),
+                std::move(prepared_blocks),
                 retained_bounds,
                 WorldRenderCoordinateMetadata{},
                 statistics,

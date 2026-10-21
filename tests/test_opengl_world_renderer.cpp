@@ -414,6 +414,49 @@ make_frame_package(
         std::move(*built.package));
 }
 
+[[nodiscard]] std::shared_ptr<const world_render::WorldRenderPackage>
+make_prepared_render_package(const std::size_t surface_count)
+{
+    auto world = fixture::make_world(surface_count);
+    for (auto& vertex : world.vertices) {
+        vertex.position.z = vertex.position.y - 8.0F;
+        vertex.position.y = 0.0F;
+        vertex.normal = {0.0F, -1.0F, 0.0F};
+    }
+    for (auto& surface : world.surfaces) {
+        surface.bounds = {
+            {surface.bounds.minimum.x, 0.0F, -8.0F},
+            {surface.bounds.maximum.x, 0.0F, 8.0F}};
+    }
+    world.bounds = {{0.0F, 0.0F, -8.0F},
+        {static_cast<float>(surface_count - 1U) * 32.0F + 16.0F,
+            0.0F, 8.0F}};
+    std::vector<assets::WorldSurfaceLightmapBinding> bindings;
+    bindings.reserve(surface_count);
+    for (std::size_t surface = 0U; surface < surface_count; ++surface) {
+        assets::WorldSurfaceLightmapBinding binding;
+        binding.surface_index = surface;
+        binding.status =
+            assets::WorldSurfaceLightmapBindingStatus::unlit_no_lightmap;
+        binding.sample_width = 2U;
+        binding.sample_height = 2U;
+        bindings.push_back(binding);
+    }
+    auto lightmaps = assets::WorldLightmapSet::create(
+        {}, std::move(bindings), surface_count);
+    if (!lightmaps || !lightmaps.lightmap_set) {
+        throw std::runtime_error{"Unable to create prepared render lightmaps"};
+    }
+    auto built = world_render::WorldRenderPackageBuilder{}.build(
+        {std::move(world), make_frame_texture_set(false, 0x74U)},
+        std::move(*lightmaps.lightmap_set));
+    if (!built || !built.package) {
+        throw std::runtime_error{"Unable to create prepared render package"};
+    }
+    return std::make_shared<const world_render::WorldRenderPackage>(
+        std::move(*built.package));
+}
+
 [[nodiscard]] renderer::RenderScene make_scene(
     std::shared_ptr<const world_render::WorldRenderPackage> package,
     const renderer::RenderCullMode cull_mode = renderer::RenderCullMode::none)
@@ -1289,6 +1332,7 @@ TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending 
     const auto check_passes=[](const renderer::opengl::OpenGlGpuFrameTiming& result) {
         CHECK(result.status==renderer::opengl::OpenGlGpuTimingStatus::ready);
         CHECK(result.valid_pass_mask==0x3fU);
+        CHECK(result.valid_world_subpass_mask==0x07U);
         double sum{};
         for(const auto elapsed:result.pass_elapsed_ms) {
             CHECK(std::isfinite(elapsed));CHECK(elapsed>=0.0F);sum+=elapsed;
@@ -1296,6 +1340,14 @@ TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending 
         // The total uses the pre-existing elapsed query; timestamp segments
         // begin/end inside it, with allowance only for float encoding error.
         CHECK(sum<=result.elapsed_ms+0.01);
+        double world_sum{};
+        for(std::size_t subpass=0;subpass<3U;++subpass) {
+            const auto elapsed=result.world_subpass_elapsed_ms[subpass];
+            CHECK(std::isfinite(elapsed));CHECK(elapsed>=0.0F);
+            world_sum+=elapsed;
+        }
+        CHECK(std::fabs(world_sum-result.pass_elapsed_ms[
+            static_cast<std::size_t>(renderer::opengl::OpenGlGpuPass::world)])<0.01);
     };
     if(first) {CHECK(first->frame_number==42U);CHECK(std::isfinite(first->elapsed_ms));CHECK(first->elapsed_ms>=0.0);check_passes(*first);}
     CHECK(gpu.gpu_timing_statistics().allocated_pass_queries==128U);
@@ -1381,6 +1433,7 @@ TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending 
     CHECK(unsupported->frame_number==300U);
     CHECK(unsupported->status==renderer::opengl::OpenGlGpuTimingStatus::unsupported);
     CHECK(unsupported->valid_pass_mask==0U);
+    CHECK(unsupported->valid_world_subpass_mask==0U);
     CHECK(std::isfinite(unsupported->elapsed_ms));
     CHECK(gpu.gpu_timing_statistics().allocated_pass_queries==0U);
     gpu.reset_session_resources();
@@ -1404,6 +1457,7 @@ TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending 
     CHECK(disjoint->frame_number==301U);
     CHECK(disjoint->status==renderer::opengl::OpenGlGpuTimingStatus::disjoint);
     CHECK(disjoint->valid_pass_mask==0U);
+    CHECK(disjoint->valid_world_subpass_mask==0U);
     CHECK_FALSE(std::isfinite(disjoint->elapsed_ms));
     CHECK(gpu.gpu_timing_statistics().disjoint_results==1U);
     CHECK(glGetError()==GL_NO_ERROR);
@@ -1422,11 +1476,15 @@ TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending 
     glad_glGetQueryObjectiv=original_available;
     REQUIRE(failed_first);CHECK(failed_first->frame_number==400U);
     CHECK(failed_first->status==renderer::opengl::OpenGlGpuTimingStatus::invalid);
-    CHECK(failed_first->valid_pass_mask==0U);CHECK_FALSE(std::isfinite(failed_first->elapsed_ms));
+    CHECK(failed_first->valid_pass_mask==0U);
+    CHECK(failed_first->valid_world_subpass_mask==0U);
+    CHECK_FALSE(std::isfinite(failed_first->elapsed_ms));
     const auto failed_second=gpu.poll_gpu_timing();
     REQUIRE(failed_second);CHECK(failed_second->frame_number==401U);
     CHECK(failed_second->status==renderer::opengl::OpenGlGpuTimingStatus::invalid);
-    CHECK(failed_second->valid_pass_mask==0U);CHECK_FALSE(std::isfinite(failed_second->elapsed_ms));
+    CHECK(failed_second->valid_pass_mask==0U);
+    CHECK(failed_second->valid_world_subpass_mask==0U);
+    CHECK_FALSE(std::isfinite(failed_second->elapsed_ms));
     CHECK_FALSE(gpu.poll_gpu_timing());CHECK(gpu.gpu_timing_statistics().pending==0U);
     CHECK(gpu.gpu_timing_statistics().invalid_results==2U);
     gpu.render_with_gpu_timing(scene,extent,402U);
@@ -1496,12 +1554,14 @@ TEST_CASE("World draw bindings reuse only immutable inputs inside one render fra
         const auto before=gpu.statistics();
         gpu.render(scene,extent);
         const auto& after=gpu.statistics();
-        // No triangles, material bindings or draws are suppressed. Only
-        // identical frame/program data stops being uploaded for each batch.
+        // No triangles or draws are suppressed. Both ranges use the same
+        // base texture but different atlas pages; only the redundant bind
+        // and unchanged program-local material uniforms may be omitted.
         CHECK(after.draw_call_count-before.draw_call_count==2U);
         CHECK(after.triangle_count-before.triangle_count==4U);
-        CHECK(after.base_texture_bind_count-before.base_texture_bind_count==2U);
+        CHECK(after.base_texture_bind_count-before.base_texture_bind_count==1U);
         CHECK(after.lightmap_bind_count-before.lightmap_bind_count==2U);
+        CHECK(after.material_uniform_upload_count-before.material_uniform_upload_count==3U);
         CHECK(after.program_bind_count-before.program_bind_count==1U);
         CHECK(after.vertex_array_bind_count-before.vertex_array_bind_count==1U);
         CHECK(after.sky_texture_bind_count-before.sky_texture_bind_count==1U);
@@ -1971,6 +2031,14 @@ TEST_CASE("Beam scene light reaches translated runtime brush pixels without ligh
     CHECK(read_pixel(76,48)==far_baseline);
     scene.world_effect_light_count=0;renderer.render(scene,extent);
     CHECK(read_pixel(20,48)==near_baseline);CHECK(read_pixel(76,48)==far_baseline);
+    renderer.render_with_gpu_timing(scene,extent,901U);
+    const auto timing_pixels=renderer.observe_framebuffer(extent,scene.clear_color,true);
+    REQUIRE(timing_pixels);
+    const auto brush_timing=renderer.poll_gpu_timing();
+    if(brush_timing && brush_timing->status==renderer::opengl::OpenGlGpuTimingStatus::ready) {
+        CHECK(brush_timing->frame_number==901U);
+        CHECK(brush_timing->valid_world_subpass_mask==0x0fU);
+    }
     CHECK(glGetError()==GL_NO_ERROR);context->release_renderer();
 }
 
@@ -2039,7 +2107,7 @@ TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",
     CHECK(statistics.draw_call_count == 4U);
     CHECK(statistics.triangle_count == 8U);
     CHECK(statistics.base_texture_bind_count == 4U);
-    CHECK(statistics.lightmap_bind_count == 4U);
+    CHECK(statistics.lightmap_bind_count == 2U);
     CHECK(statistics.uploaded_base_texture_count == 2U);
     CHECK(statistics.uploaded_base_mip_level_count == 8U);
     CHECK(statistics.uploaded_lightmap_page_count == 1U);
@@ -2368,6 +2436,119 @@ TEST_CASE("OpenGL scene visibility changes commands without resource reupload",
     CHECK(statistics.visible_brush_instance_count == 0U);
     CHECK(glGetError() == GL_NO_ERROR);
 
+    context->release_renderer();
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("Prepared static-world draws match original all-batch color and depth across layouts and resize",
+    "[renderer][opengl][integration][prepared-world]")
+{
+    const std::array packages{
+        make_prepared_render_package(33U),
+        make_prepared_render_package(288U),
+        make_frame_package(false, false, 2U, 0U, 0xA0U),
+    };
+    REQUIRE(packages[0U]->prepared_draw_blocks().size() == 3U);
+    REQUIRE(packages[1U]->prepared_draw_blocks().size() == 18U);
+    REQUIRE(packages[2U]->draw_batches().size() == 2U);
+    auto context = try_create_context();
+    if (!context) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_profile_mask = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile_mask.has_value());
+    if (!supports_required_open_gl_profile(*actual_profile_mask)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    context->initialize_renderer();
+
+    struct FramePixels {
+        std::vector<std::uint8_t> rgba;
+        std::vector<float> depth;
+    };
+    const auto capture = [](const renderer::RenderExtent extent) {
+        FramePixels pixels;
+        const auto count = static_cast<std::size_t>(extent.width) *
+            static_cast<std::size_t>(extent.height);
+        pixels.rgba.resize(count * 4U);
+        pixels.depth.resize(count);
+        glReadBuffer(GL_BACK);
+        glReadPixels(0, 0, extent.width, extent.height, GL_RGBA,
+            GL_UNSIGNED_BYTE, pixels.rgba.data());
+        glReadPixels(0, 0, extent.width, extent.height, GL_DEPTH_COMPONENT,
+            GL_FLOAT, pixels.depth.data());
+        return pixels;
+    };
+    constexpr std::array extents{
+        renderer::RenderExtent{96, 96},
+        renderer::RenderExtent{48, 48},
+        renderer::RenderExtent{96, 48},
+    };
+    struct ProjectionCase {
+        float vertical_fov;
+        float near_plane;
+        float far_plane;
+    };
+    constexpr std::array projections{
+        ProjectionCase{1.0471975512F, 0.1F, 10.0F},
+        ProjectionCase{0.35F, 1.95F, 10.0F},
+        ProjectionCase{1.45F, 2.05F, 10.0F},
+        ProjectionCase{1.0471975512F, 0.1F, 1.95F},
+        ProjectionCase{1.0471975512F, 0.1F, 2.05F},
+    };
+    auto& gl_renderer = context->renderer();
+    const auto rejected_before = gl_renderer.statistics()
+        .prepared_world_rejected_block_count;
+    const auto bypass_before = gl_renderer.statistics()
+        .prepared_world_all_batch_bypass_frame_count;
+    for (std::size_t layout = 0U; layout < packages.size(); ++layout) {
+        auto optimized = make_scene(packages[layout]);
+        optimized.static_world->scene_package =
+            make_visibility_scene(packages[layout]);
+        // No visible list: this is the normal game's immutable package path.
+        REQUIRE_FALSE(optimized.static_world->visible_draw_list);
+        auto original = optimized;
+        // The existing no-scene-package branch draws the exact original
+        // material batches. It is the pixel/depth oracle in this binary.
+        original.static_world->scene_package.reset();
+        for (const auto extent : extents) {
+            for (std::size_t pose = 0U; pose < 2U; ++pose) {
+                const auto x = layout != 2U
+                    ? (pose == 0U ? 8.0F : 72.0F)
+                    : (pose == 0U ? 0.0F : 2.0F);
+                optimized.camera.position.x = x;
+                optimized.camera.target.x = x;
+                for (const auto projection : projections) {
+                    optimized.camera.vertical_field_of_view_radians =
+                        projection.vertical_fov;
+                    optimized.camera.near_plane = projection.near_plane;
+                    optimized.camera.far_plane = projection.far_plane;
+                    original.camera = optimized.camera;
+                    CAPTURE(layout, extent.width, extent.height, pose,
+                        projection.vertical_fov, projection.near_plane,
+                        projection.far_plane);
+                    gl_renderer.render(optimized, extent);
+                    const auto selected = capture(extent);
+                    gl_renderer.render(original, extent);
+                    const auto all_world = capture(extent);
+                    CHECK(selected.rgba == all_world.rgba);
+                    CHECK(selected.depth == all_world.depth);
+                    CHECK(glGetError() == GL_NO_ERROR);
+                }
+            }
+        }
+    }
+    CHECK(gl_renderer.statistics().prepared_world_rejected_block_count >
+        rejected_before);
+    CHECK(gl_renderer.statistics().prepared_world_all_batch_bypass_frame_count >
+        bypass_before);
+    CHECK(gl_renderer.statistics().prepared_world_probed_block_count > 0U);
+    CHECK(gl_renderer.statistics().failed_upload_count == 0U);
     context->release_renderer();
     CHECK(glGetError() == GL_NO_ERROR);
 }

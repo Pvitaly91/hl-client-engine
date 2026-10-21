@@ -18,6 +18,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -26,7 +27,11 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 namespace app=hlclient::app;
@@ -38,11 +43,11 @@ namespace f=hlclient::tests;
 using Clock=std::chrono::steady_clock;
 constexpr rr::RenderExtent extent{1920,1080};
 constexpr hlclient::assets::AssetVector3 marker_eye{-983.0078125F,712.1748657226562F,-1472.F};
-struct View {const char* label;hlclient::assets::AssetVector3 eye;double yaw;};
+struct View {const char* label;hlclient::assets::AssetVector3 eye;double yaw;double pitch{-0.4};};
 cl::RenderCameraState camera(const View& v) {
   // camera_final_angles uses the runtime's pitch-up convention. Use the same
   // production basis and default HFOV-at-4:3 policy as LiveVisualControl.
-  const auto forward=hlclient::gameplay_camera::forward_from_yaw_pitch(v.yaw,-.4);
+  const auto forward=hlclient::gameplay_camera::forward_from_yaw_pitch(v.yaw,v.pitch);
   REQUIRE(forward);
   constexpr double radians=.01745329251994329577;
   return {v.eye,{v.eye.x+forward->x,v.eye.y+forward->y,v.eye.z+forward->z},
@@ -106,12 +111,61 @@ void quantile(const char* view,bool capture,const char* scope,std::vector<double
       <<",\"scope\":\""<<scope<<"\",\"unit\":\"ms\",\"percentile\":\"nearest_rank\",\"n\":"<<values.size()
       <<",\"p50\":"<<q(.5)<<",\"p95\":"<<q(.95)<<",\"p99\":"<<q(.99)<<",\"max\":"<<values.back()<<"}\n";
 }
+std::string optional_environment(const char* name) {
+#ifdef _WIN32
+  char* value=nullptr;std::size_t count{};
+  if(_dupenv_s(&value,&count,name)!=0)return {};
+  const std::string result=value?value:"";std::free(value);return result;
+#else
+  const char* value=std::getenv(name);return value?value:"";
+#endif
+}
+struct RawWorldSample {
+  std::array<double,5> cpu{};
+  std::optional<double> gpu_total;
+  std::array<std::optional<double>,6> gpu_pass{};
+  std::array<std::optional<double>,4> world_subpass{};
+  std::uint8_t pass_mask{},world_subpass_mask{};
+};
+template<class Timing>
+void collect_world_subpasses(const Timing& timing,RawWorldSample* raw,
+    std::array<std::vector<double>,4>& quantiles) {
+  if constexpr(requires(const Timing& value) {
+      value.valid_world_subpass_mask;value.world_subpass_elapsed_ms;}) {
+    for(std::size_t pass=0;pass<quantiles.size();++pass)
+      if(timing.valid_world_subpass_mask&(1U<<pass)) {
+        quantiles[pass].push_back(timing.world_subpass_elapsed_ms[pass]);
+        if(raw)raw->world_subpass[pass]=timing.world_subpass_elapsed_ms[pass];
+      }
+    if(raw)raw->world_subpass_mask=timing.valid_world_subpass_mask;
+  }
+}
+template<class Statistics>
+std::optional<std::uint64_t> material_uniform_delta(const Statistics& before,
+    const Statistics& after) {
+  if constexpr(requires(const Statistics& value){value.material_uniform_upload_count;})
+    return after.material_uniform_upload_count-before.material_uniform_upload_count;
+  else
+    return std::nullopt;
+}
 }
 
 TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production preparation and GPU costs",
     "[gauss-71b97-camera][actual-assets][opengl][benchmark]") {
   std::filesystem::path root;
   bool selected_visibility=true;
+  const auto raw_setting=optional_environment("HLCLIENT_22AD_RAW_W");
+  REQUIRE((raw_setting.empty()||raw_setting=="1"));
+  const bool emit_raw=raw_setting=="1";
+  const auto old_comparison=optional_environment("HLCLIENT_51_OLD_VISIBILITY_DIFF");
+  REQUIRE((old_comparison.empty()||old_comparison=="1"));
+  const bool compare_old_visibility=old_comparison=="1";
+  const auto msaa_setting=optional_environment("HLCLIENT_22AD_MSAA");
+  REQUIRE((msaa_setting.empty()||msaa_setting=="0"||msaa_setting=="2"||
+      msaa_setting=="4"||msaa_setting=="8"));
+  const unsigned requested_msaa=msaa_setting.empty()?8U:
+      static_cast<unsigned>(std::stoul(msaa_setting));
+  const auto selected_view=optional_environment("HLCLIENT_22AD_VIEW");
 #ifdef _WIN32
   wchar_t* value=nullptr;std::size_t count{};
   if(_wdupenv_s(&value,&count,L"HLCLIENT_LOCAL_GAME_ROOT")==0&&value)root=value;
@@ -137,7 +191,7 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
   std::cout<<"[71b97-hardware] {\"vendor\":"<<std::quoted(hardware.vendor)
       <<",\"device\":"<<std::quoted(hardware.device)<<",\"version\":"<<std::quoted(hardware.version)<<"}\n";
   std::cout<<"[71b97-fixture] {\"fixture_version\":2,\"phase\":\"fixed_server_time_and_animation\",\"visibility\":\""<<(selected_visibility?"selected":"all")
-      <<"\",\"hidden_context\":true,\"swaps\":false,\"historical_replay\":false,\"width\":1920,\"height\":1080,\"requested_msaa\":8} \n";
+      <<"\",\"hidden_context\":true,\"swaps\":false,\"historical_replay\":false,\"width\":1920,\"height\":1080,\"requested_msaa\":"<<requested_msaa<<"} \n";
   const auto resources=f::readiness_fixture::parse_resource_list({{2,names[0],9,0,0},{2,names[1],7,0,0},
       {2,names[2],15,0,0},{2,names[3],16,0,0},{2,names[4],21,0,0},{2,names[5],22,0,0}});
   auto made=app::RuntimeReplayLocalAssets::create(resources,server_info(),root,"valve",
@@ -174,6 +228,13 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       {"f8_yaw180",marker_eye,143.999146},{"approach_128",{-1086.56F,787.41F,-1472},-36.000854},
       {"adjacent_128",{-907.77F,815.73F,-1472},-36.000854}};
   views.push_back({"f8_yaw_sweep",marker_eye,-36.000854});
+  // Camera-only controls from the retained MSAA8 run. Actors, effects,
+  // lighting, and animation remain this fixed synthetic fixture, not a
+  // reconstruction of the historical live frame.
+  views.push_back({"f093_frame3538_camera_fixed_fixture",
+      {-713.9987183F,498.9496765F,-1472.F},-80.50122,-3.238726});
+  views.push_back({"f093_f8_marker_camera_fixed_fixture",
+      {-739.8359375F,669.09375F,-1472.F},-172.80122,-14.0});
   // A read-only map-derived sloped-surface control; it is explicitly NOT
   // identified as the user's Shotgun ramp without a recorded camera position.
   const auto& map=*assets.surface_scene();
@@ -182,11 +243,18 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
   }
   std::uint64_t next_frame=1;
   constexpr unsigned warm=48,samples=192;
-  for(const auto& view:views)for(bool capture:{false,true}) {
+  std::size_t matched_views{};
+  for(const auto& view:views) {
+    if(!selected_view.empty()&&selected_view!=view.label)continue;
+    ++matched_views;
+  for(bool capture:{false,true}) {
     world.set_camera(camera(view));
     f::RuntimeWorldVisibility selector;
     std::array<std::vector<double>,5> cpu;
     std::array<std::vector<double>,7> gpu;
+    std::array<std::vector<double>,4> world_gpu;
+    std::vector<RawWorldSample> raw_samples(emit_raw?samples:0U);
+    const auto first_sample_frame=next_frame+warm;
     std::map<std::uint64_t,bool> accepted;
     rr::RenderScene scene;
     const auto collect=[&]{while(auto timing=renderer.poll_gpu_timing()) {
@@ -195,11 +263,24 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       if(found->second&&timing->status==rr::opengl::OpenGlGpuTimingStatus::ready) {
         gpu[0].push_back(timing->elapsed_ms);
         for(std::size_t pass=0;pass<6;++pass)if(timing->valid_pass_mask&(1U<<pass))gpu[pass+1].push_back(timing->pass_elapsed_ms[pass]);
+        RawWorldSample* raw=nullptr;
+        if(emit_raw&&timing->frame_number>=first_sample_frame &&
+            timing->frame_number-first_sample_frame<raw_samples.size()) {
+          raw=&raw_samples[static_cast<std::size_t>(timing->frame_number-first_sample_frame)];
+          raw->gpu_total=timing->elapsed_ms;
+          raw->pass_mask=timing->valid_pass_mask;
+          for(std::size_t pass=0;pass<raw->gpu_pass.size();++pass)
+            if(timing->valid_pass_mask&(1U<<pass))
+              raw->gpu_pass[pass]=timing->pass_elapsed_ms[pass];
+        }
+        collect_world_subpasses(*timing,raw,world_gpu);
       }
       accepted.erase(found);
     }};
     std::uint64_t world_draws{},world_triangles{},studio_draws{},sprite_draws{},pose_updates{},base_binds{},lightmap_binds{},model_binds{};
-    std::uint64_t world_uploads{},studio_uploads{},sprite_uploads{},program_binds{},vao_binds{},sky_binds{},transform_uploads{},camera_uploads{},light_uploads{};
+    std::uint64_t world_uploads{},studio_uploads{},sprite_uploads{},program_binds{},vao_binds{},sky_binds{},transform_uploads{},camera_uploads{},light_uploads{},material_uniform_uploads{};
+    std::uint64_t prepared_selected_blocks{},prepared_rejected_blocks{},prepared_batch_fallbacks{};
+    std::uint64_t prepared_probed_blocks{},prepared_all_batch_bypass_frames{};
     double pixel_yaw=view.yaw;
     unsigned slot_wait_timeouts{};
     for(unsigned i=0;i<warm+samples;++i) {
@@ -220,7 +301,7 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       const auto presented=Clock::now();
       scene=cl::build_render_scene(world);scene.skybox=assets.skybox();
       scene.first_person_entities=assets.materialize_viewmodel(held,view.eye);
-      scene.requested_msaa_samples=8;scene.image_adjustments={.1F,1.04F,1.1F};
+      scene.requested_msaa_samples=requested_msaa;scene.image_adjustments={.1F,1.04F,1.1F};
       const auto prepared=Clock::now();
       bool visibility_ok=true;
       if(selected_visibility)visibility_ok=selector.apply(scene,extent);
@@ -230,6 +311,8 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       const auto timing_submitted=renderer.gpu_timing_statistics().submitted;
       const auto render_begin=Clock::now();
       renderer.render_with_gpu_timing(scene,extent,id);
+      if(i==0U&&renderer.scene_target_statistics().actual_samples!=requested_msaa)
+        SKIP("Requested MSAA mode is unavailable in the actual OpenGL context");
       if(renderer.gpu_timing_statistics().submitted==timing_submitted)accepted.erase(id);
       const auto submitted=Clock::now();collect();
       // Test-only driver flush. No glFinish/query-result wait in renderer or
@@ -239,13 +322,21 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       if(!result){INFO((result.error?result.error->context:"presentation failed without error"));REQUIRE(result);}
       REQUIRE(result);REQUIRE(scene.first_person_entities);REQUIRE(visibility_ok);
       if(i>=warm) {
-        cpu[0].push_back(std::chrono::duration<double,std::milli>(presented-begin).count());
-        cpu[1].push_back(std::chrono::duration<double,std::milli>(prepared-presented).count());
-        cpu[2].push_back(std::chrono::duration<double,std::milli>(culled-prepared).count());
-        cpu[3].push_back(std::chrono::duration<double,std::milli>(submitted-render_begin).count());
-        cpu[4].push_back(std::chrono::duration<double,std::milli>(ended-begin).count());
+        const std::array durations{
+          std::chrono::duration<double,std::milli>(presented-begin).count(),
+          std::chrono::duration<double,std::milli>(prepared-presented).count(),
+          std::chrono::duration<double,std::milli>(culled-prepared).count(),
+          std::chrono::duration<double,std::milli>(submitted-render_begin).count(),
+          std::chrono::duration<double,std::milli>(ended-begin).count()};
+        for(std::size_t stage=0;stage<cpu.size();++stage)cpu[stage].push_back(durations[stage]);
+        if(emit_raw)raw_samples[i-warm].cpu=durations;
         const auto& w=renderer.statistics();const auto& e=renderer.entity_statistics();
         world_draws+=w.draw_call_count-ws.draw_call_count;world_triangles+=w.triangle_count-ws.triangle_count;
+        prepared_selected_blocks+=w.prepared_world_selected_block_count-ws.prepared_world_selected_block_count;
+        prepared_rejected_blocks+=w.prepared_world_rejected_block_count-ws.prepared_world_rejected_block_count;
+        prepared_batch_fallbacks+=w.prepared_world_full_batch_fallback_count-ws.prepared_world_full_batch_fallback_count;
+        prepared_probed_blocks+=w.prepared_world_probed_block_count-ws.prepared_world_probed_block_count;
+        prepared_all_batch_bypass_frames+=w.prepared_world_all_batch_bypass_frame_count-ws.prepared_world_all_batch_bypass_frame_count;
         base_binds+=w.base_texture_bind_count-ws.base_texture_bind_count;lightmap_binds+=w.lightmap_bind_count-ws.lightmap_bind_count;
         studio_draws+=e.studio_draw_count-es.studio_draw_count;sprite_draws+=e.sprite_draw_count-es.sprite_draw_count;
         pose_updates+=e.pose_ubo_update_count-es.pose_ubo_update_count;model_binds+=e.model_texture_bind_count-es.model_texture_bind_count;
@@ -254,12 +345,129 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
         program_binds+=w.program_bind_count-ws.program_bind_count;vao_binds+=w.vertex_array_bind_count-ws.vertex_array_bind_count;
         sky_binds+=w.sky_texture_bind_count-ws.sky_texture_bind_count;transform_uploads+=w.transform_upload_count-ws.transform_upload_count;
         camera_uploads+=w.camera_upload_count-ws.camera_upload_count;light_uploads+=w.light_upload_count-ws.light_upload_count;
+        if(const auto uniform_count=material_uniform_delta(ws,w))material_uniform_uploads+=*uniform_count;
       }
     }
     const auto deadline=Clock::now()+std::chrono::seconds(5);
     while(!accepted.empty()&&Clock::now()<deadline){collect();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
     CHECK(glGetError()==GL_NO_ERROR);
     const auto pixels=renderer.observe_framebuffer(extent,scene.clear_color,false);REQUIRE(pixels);
+    // The first-person pass clears depth, so the completed full frame cannot
+    // prove world depth correctness. Draw the same static-world camera alone
+    // after all timed samples, and hash its default depth only in Off mode.
+    // MSAA resolves color only; default depth there would be false evidence.
+    std::optional<std::uint64_t> depth_signature;
+    std::optional<std::size_t> depth_nonclear_pixels;
+    std::optional<std::array<float,2>> depth_range;
+    if(requested_msaa==0U) {
+      rr::RenderScene world_only;
+      world_only.clear_color=scene.clear_color;
+      world_only.camera=scene.camera;
+      world_only.static_world=scene.static_world;
+      world_only.skybox=scene.skybox;
+      renderer.render(world_only,extent);
+      const auto baseline_world_color=compare_old_visibility&&!selected_visibility
+          ?renderer.observe_framebuffer(extent,scene.clear_color,true)
+          :hlclient::renderer::opengl::OpenGlFramebufferObservation{};
+      GLint read_fbo{};
+      glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&read_fbo);
+      if(read_fbo==0) {
+        std::vector<float> depth(static_cast<std::size_t>(extent.width)*extent.height);
+        GLint old_pack{},old_alignment{},old_row_length{},old_skip_pixels{},old_skip_rows{};
+        glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING,&old_pack);
+        glGetIntegerv(GL_PACK_ALIGNMENT,&old_alignment);
+        glGetIntegerv(GL_PACK_ROW_LENGTH,&old_row_length);
+        glGetIntegerv(GL_PACK_SKIP_PIXELS,&old_skip_pixels);
+        glGetIntegerv(GL_PACK_SKIP_ROWS,&old_skip_rows);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER,0);
+        glPixelStorei(GL_PACK_ALIGNMENT,1);
+        glPixelStorei(GL_PACK_ROW_LENGTH,0);
+        glPixelStorei(GL_PACK_SKIP_PIXELS,0);
+        glPixelStorei(GL_PACK_SKIP_ROWS,0);
+        glReadPixels(0,0,extent.width,extent.height,GL_DEPTH_COMPONENT,GL_FLOAT,depth.data());
+        const auto read_error=glGetError();
+        glPixelStorei(GL_PACK_ALIGNMENT,old_alignment);
+        glPixelStorei(GL_PACK_ROW_LENGTH,old_row_length);
+        glPixelStorei(GL_PACK_SKIP_PIXELS,old_skip_pixels);
+        glPixelStorei(GL_PACK_SKIP_ROWS,old_skip_rows);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER,static_cast<GLuint>(old_pack));
+        REQUIRE(read_error==GL_NO_ERROR);
+        REQUIRE(glGetError()==GL_NO_ERROR);
+        std::uint64_t hash=14695981039346656037ULL;
+        for(const float depth_value:depth) {
+          const auto bits=std::bit_cast<std::uint32_t>(depth_value);
+          for(unsigned shift=0;shift<32;shift+=8) {
+            hash^=(bits>>shift)&0xffU;hash*=1099511628211ULL;
+          }
+        }
+        depth_signature=hash;
+        depth_nonclear_pixels=static_cast<std::size_t>(std::count_if(
+            depth.begin(),depth.end(),[](const float value){return value<1.0F;}));
+        const auto [minimum,maximum]=std::minmax_element(depth.begin(),depth.end());
+        depth_range=std::array{*minimum,*maximum};
+        if(compare_old_visibility&&!selected_visibility) {
+          REQUIRE(baseline_world_color);
+          auto selected_scene=scene;
+          f::RuntimeWorldVisibility negative_selector;
+          REQUIRE(negative_selector.apply(selected_scene,extent));
+          world_only.static_world=selected_scene.static_world;
+          renderer.render(world_only,extent);
+          const auto selected_world_color=renderer.observe_framebuffer(
+              extent,scene.clear_color,true);
+          REQUIRE(selected_world_color);
+          REQUIRE(selected_world_color.rgba8.size()==baseline_world_color.rgba8.size());
+          std::vector<float> selected_depth(depth.size());
+          glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&read_fbo);
+          REQUIRE(read_fbo==0);
+          glBindBuffer(GL_PIXEL_PACK_BUFFER,0);
+          glPixelStorei(GL_PACK_ALIGNMENT,1);
+          glPixelStorei(GL_PACK_ROW_LENGTH,0);
+          glPixelStorei(GL_PACK_SKIP_PIXELS,0);
+          glPixelStorei(GL_PACK_SKIP_ROWS,0);
+          glReadPixels(0,0,extent.width,extent.height,GL_DEPTH_COMPONENT,
+              GL_FLOAT,selected_depth.data());
+          REQUIRE(glGetError()==GL_NO_ERROR);
+          glPixelStorei(GL_PACK_ALIGNMENT,old_alignment);
+          glPixelStorei(GL_PACK_ROW_LENGTH,old_row_length);
+          glPixelStorei(GL_PACK_SKIP_PIXELS,old_skip_pixels);
+          glPixelStorei(GL_PACK_SKIP_ROWS,old_skip_rows);
+          glBindBuffer(GL_PIXEL_PACK_BUFFER,static_cast<GLuint>(old_pack));
+          REQUIRE(glGetError()==GL_NO_ERROR);
+          std::size_t changed_color{},changed_depth{},same_depth_changed_color{};
+          std::size_t missing_depth{},extra_depth{};
+          int min_x=extent.width,min_y=extent.height,max_x=-1,max_y=-1;
+          for(std::size_t pixel=0;pixel<depth.size();++pixel) {
+            const auto rgba=pixel*4U;
+            const bool color_changed=!std::equal(
+                baseline_world_color.rgba8.begin()+rgba,
+                baseline_world_color.rgba8.begin()+rgba+4U,
+                selected_world_color.rgba8.begin()+rgba);
+            const bool depth_changed=std::bit_cast<std::uint32_t>(depth[pixel])!=
+                std::bit_cast<std::uint32_t>(selected_depth[pixel]);
+            changed_color+=color_changed;changed_depth+=depth_changed;
+            same_depth_changed_color+=color_changed&&!depth_changed;
+            missing_depth+=depth[pixel]<1.0F&&selected_depth[pixel]>=1.0F;
+            extra_depth+=depth[pixel]>=1.0F&&selected_depth[pixel]<1.0F;
+            if(color_changed||depth_changed) {
+              const int x=static_cast<int>(pixel%static_cast<std::size_t>(extent.width));
+              const int y=static_cast<int>(pixel/static_cast<std::size_t>(extent.width));
+              min_x=std::min(min_x,x);min_y=std::min(min_y,y);
+              max_x=std::max(max_x,x);max_y=std::max(max_y,y);
+            }
+          }
+          std::cout<<"[51-g1-negative-diff] {\"view\":"<<std::quoted(view.label)
+            <<",\"remote_capture\":"<<(capture?"true":"false")
+            <<",\"scope\":\"world_only_rgba8_and_default_depth_off\""
+            <<",\"changed_color_pixels\":"<<changed_color
+            <<",\"changed_depth_pixels\":"<<changed_depth
+            <<",\"same_depth_changed_color_pixels\":"<<same_depth_changed_color
+            <<",\"missing_depth_pixels\":"<<missing_depth
+            <<",\"extra_depth_pixels\":"<<extra_depth
+            <<",\"diff_bounds_bottom_origin\":["<<min_x<<','<<min_y<<','<<max_x<<','<<max_y<<"]}\n";
+        }
+      }
+    }
+    const auto depth_text=depth_signature?"\""+std::to_string(*depth_signature)+"\"":"null";
     const auto visibility=sidecar(map,scene.camera);
     const auto& v=visibility.statistics();const auto& target=renderer.scene_target_statistics();
     const auto& timing=renderer.gpu_timing_statistics();const auto& summary=assets.summary();
@@ -287,25 +495,44 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       <<",\"eye\":["<<view.eye.x<<','<<view.eye.y<<','<<view.eye.z<<"],\"yaw\":"<<view.yaw
       <<",\"pixel_eye\":["<<scene.camera.position.x<<','<<scene.camera.position.y<<','<<scene.camera.position.z<<"],\"pixel_yaw\":"<<pixel_yaw
       <<",\"pixel_target\":["<<scene.camera.target.x<<','<<scene.camera.target.y<<','<<scene.camera.target.z<<"]"
-      <<",\"pitch\":-0.4,\"vertical_fov_radians\":"<<scene.camera.vertical_field_of_view_radians
+      <<",\"pitch\":"<<view.pitch<<",\"vertical_fov_radians\":"<<scene.camera.vertical_field_of_view_radians
       <<",\"near_plane\":"<<scene.camera.near_plane<<",\"far_plane\":"<<scene.camera.far_plane
       <<",\"historical_replay\":false,\"synthetic_players\":8,\"synthetic_pickups\":12,\"effects\":0,\"decals\":0,\"lights\":0"
       <<",\"leaf\":"<<visibility.camera_leaf_index().value_or(0)<<",\"pvs_candidates\":"<<v.pvs_candidate_world_surface_count
       <<",\"frustum_visible\":"<<v.frustum_visible_world_surface_count<<",\"sidecar_visible_surfaces\":"<<v.visible_world_surface_count
       <<",\"actual_visible_list\":"<<(scene.static_world->visible_draw_list?"true":"false")
       <<",\"world_draws\":"<<world_draws<<",\"world_triangles\":"<<world_triangles<<",\"studio_draws\":"<<studio_draws
+      <<",\"prepared_draw_blocks\":"<<map.world_package()->statistics().prepared_draw_block_count
+      <<",\"prepared_draw_bytes\":"<<map.world_package()->statistics().prepared_draw_byte_count
+      <<",\"prepared_selected_blocks\":"<<prepared_selected_blocks
+      <<",\"prepared_rejected_blocks\":"<<prepared_rejected_blocks
+      <<",\"prepared_batch_fallbacks\":"<<prepared_batch_fallbacks
+      <<",\"prepared_probed_blocks\":"<<prepared_probed_blocks
+      <<",\"prepared_all_batch_bypass_frames\":"<<prepared_all_batch_bypass_frames
       <<",\"sprite_draws\":"<<sprite_draws<<",\"pose_updates\":"<<pose_updates<<",\"base_binds\":"<<base_binds
       <<",\"lightmap_binds\":"<<lightmap_binds<<",\"model_binds\":"<<model_binds<<",\"frames\":"<<samples
       <<",\"world_uploads\":"<<world_uploads<<",\"studio_uploads\":"<<studio_uploads<<",\"sprite_uploads\":"<<sprite_uploads
       <<",\"program_binds\":"<<program_binds<<",\"vao_binds\":"<<vao_binds<<",\"sky_binds\":"<<sky_binds
       <<",\"transform_uploads\":"<<transform_uploads<<",\"camera_uploads\":"<<camera_uploads<<",\"light_uploads\":"<<light_uploads
+      <<",\"material_uniform_uploads\":";
+    if(material_uniform_delta(renderer.statistics(),renderer.statistics()))
+      std::cout<<material_uniform_uploads;
+    else std::cout<<"null";
+    std::cout
       <<",\"final_visible_studio_triangles\":"<<studio_triangles<<",\"final_visible_studio_vertices\":"<<studio_vertices
       <<",\"final_visible_studio_bones\":"<<studio_bones
       <<",\"ordinary_pose_evaluations\":"<<summary.ordinary_pose_evaluations<<",\"ordinary_pose_reuses\":"<<summary.ordinary_pose_reuses
       <<",\"base_model_mesh_value_bytes\":"<<mesh_bytes<<",\"appearance_owners\":"<<world.entity_scene()->presentation_studio_sources().size()
       <<",\"color_only_players\":8,\"expected_appearance_owners\":"<<expected_appearance_owners
       <<",\"palette_path\":\""<<(expected_appearance_owners?"remapped_variants":"no_remappable_palette")<<'"'
-      <<",\"pixel_signature\":\""<<pixels.color_signature<<"\",\"msaa\":"<<target.actual_samples<<",\"target_allocations\":"<<target.storage_allocations
+      <<",\"pixel_signature\":\""<<pixels.color_signature<<"\",\"depth_signature\":"<<depth_text
+      <<",\"depth_signature_scope\":\""<<(depth_signature?"world_only_default_depth_off":"unavailable_msaa_or_default_depth")<<"\""
+      <<",\"depth_nonclear_pixels\":";
+    if(depth_nonclear_pixels)std::cout<<*depth_nonclear_pixels;else std::cout<<"null";
+    std::cout<<",\"depth_range\":";
+    if(depth_range)std::cout<<'['<<(*depth_range)[0]<<','<<(*depth_range)[1]<<']';else std::cout<<"null";
+    std::cout
+      <<",\"msaa\":"<<target.actual_samples<<",\"target_allocations\":"<<target.storage_allocations
       <<",\"width\":"<<target.scene_extent.width<<",\"height\":"<<target.scene_extent.height
       <<",\"resolve_width\":"<<target.resolve_extent.width<<",\"resolve_height\":"<<target.resolve_extent.height
       <<",\"hud_width\":"<<target.hud_extent.width<<",\"hud_height\":"<<target.hud_extent.height
@@ -316,7 +543,38 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
     constexpr std::array gpu_names{"gpu_total","gpu_world","gpu_studio_viewmodel","gpu_effects_decals","gpu_msaa_resolve","gpu_image_adjustments","gpu_hud_console"};
     for(std::size_t i=0;i<cpu.size();++i)quantile(view.label,capture,cpu_names[i],std::move(cpu[i]));
     for(std::size_t i=0;i<gpu.size();++i)quantile(view.label,capture,gpu_names[i],std::move(gpu[i]));
+    constexpr std::array world_names{"gpu_world_target_setup_clear","gpu_world_sky",
+        "gpu_world_static_world","gpu_world_runtime_brushes"};
+    for(std::size_t i=0;i<world_gpu.size();++i)
+      quantile(view.label,capture,world_names[i],std::move(world_gpu[i]));
+    if(emit_raw)for(std::size_t sample=0;sample<raw_samples.size();++sample) {
+      const auto& raw=raw_samples[sample];
+      const auto print_optional=[](const std::optional<double>& value) {
+        if(value)std::cout<<*value;else std::cout<<"null";
+      };
+      std::cout<<"[22ad-world-raw] {\"view\":"<<std::quoted(view.label)
+        <<",\"remote_capture\":"<<(capture?"true":"false")
+        <<",\"requested_msaa\":"<<requested_msaa
+        <<",\"source_frame\":"<<first_sample_frame+sample
+        <<",\"cpu_ms\":[";
+      for(std::size_t stage=0;stage<raw.cpu.size();++stage) {
+        if(stage)std::cout<<',';std::cout<<raw.cpu[stage];
+      }
+      std::cout<<"],\"gpu_total_ms\":";print_optional(raw.gpu_total);
+      std::cout<<",\"gpu_pass_ms\":[";
+      for(std::size_t pass=0;pass<raw.gpu_pass.size();++pass) {
+        if(pass)std::cout<<',';print_optional(raw.gpu_pass[pass]);
+      }
+      std::cout<<"],\"world_subpass_ms\":[";
+      for(std::size_t pass=0;pass<raw.world_subpass.size();++pass) {
+        if(pass)std::cout<<',';print_optional(raw.world_subpass[pass]);
+      }
+      std::cout<<"],\"valid_pass_mask\":"<<unsigned(raw.pass_mask)
+        <<",\"valid_world_subpass_mask\":"<<unsigned(raw.world_subpass_mask)<<"}\n";
+    }
   }
+  }
+  REQUIRE((selected_view.empty()||matched_views==1U));
   for(std::size_t i=0;i<names.size();++i)CHECK(std::filesystem::last_write_time(root/"valve"/names[i])==modified[i]);
   host.teardown();gl->release_renderer();
 }

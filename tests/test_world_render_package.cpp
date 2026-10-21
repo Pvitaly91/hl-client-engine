@@ -91,6 +91,32 @@ concept HasRendererHandle = requires(Type value) {
         std::move(*lightmaps.lightmap_set));
 }
 
+[[nodiscard]] world_render::WorldRenderPackageBuildResult
+make_prepared_block_package(
+    const world_render::WorldRenderPackageLimits& limits = {})
+{
+    constexpr std::size_t surface_count = 33U;
+    std::vector<assets::WorldSurfaceLightmapBinding> bindings;
+    bindings.reserve(surface_count);
+    for (std::size_t surface = 0U; surface < surface_count; ++surface) {
+        assets::WorldSurfaceLightmapBinding binding;
+        binding.surface_index = surface;
+        binding.status =
+            assets::WorldSurfaceLightmapBindingStatus::unlit_no_lightmap;
+        binding.sample_width = 2U;
+        binding.sample_height = 2U;
+        bindings.push_back(binding);
+    }
+    auto lightmaps = assets::WorldLightmapSet::create(
+        {}, std::move(bindings), surface_count);
+    if (!lightmaps || !lightmaps.lightmap_set) {
+        throw std::runtime_error{"Unable to build prepared-block lightmaps"};
+    }
+    return world_render::WorldRenderPackageBuilder{}.build(
+        {fixture::make_world(surface_count), fixture::make_texture_set(false)},
+        std::move(*lightmaps.lightmap_set), limits);
+}
+
 TEST_CASE("World render package retains exact neutral geometry and UV bindings",
           "[world-render][package]")
 {
@@ -278,6 +304,70 @@ TEST_CASE("World render package construction is deterministic and owning",
     CHECK(retained->lightmaps().pages()[0]
             .style_slot_images[0]
             .rgba_pixels[0] == std::byte{0x10});
+}
+
+TEST_CASE("World render package prepares exact contiguous indexed blocks with bounded fallback",
+          "[world-render][package][prepared-blocks]")
+{
+    auto built = make_prepared_block_package();
+    REQUIRE(built);
+    REQUIRE(built.package);
+    const auto& package = *built.package;
+    REQUIRE(package.draw_batches().size() == 1U);
+    REQUIRE(package.prepared_draw_batches().size() == 1U);
+    REQUIRE(package.prepared_draw_blocks().size() == 3U);
+    const auto& prepared = package.prepared_draw_batches()[0U];
+    CHECK(prepared.first_block == 0U);
+    CHECK(prepared.block_count == 3U);
+    const auto blocks = package.prepared_draw_blocks();
+    CHECK(blocks[0U].first_index == 0U);
+    CHECK(blocks[0U].index_count == 96U);
+    CHECK(blocks[0U].bounds.minimum.x == 0.0F);
+    CHECK(blocks[0U].bounds.maximum.x == 496.0F);
+    CHECK(blocks[1U].first_index == 96U);
+    CHECK(blocks[1U].index_count == 96U);
+    CHECK(blocks[1U].bounds.minimum.x == 512.0F);
+    CHECK(blocks[1U].bounds.maximum.x == 1008.0F);
+    CHECK(blocks[2U].first_index == 192U);
+    CHECK(blocks[2U].index_count == 6U);
+    CHECK(blocks[2U].bounds.minimum.x == 1024.0F);
+    CHECK(blocks[2U].bounds.maximum.x == 1040.0F);
+    CHECK(prepared.bounds.minimum.x == 0.0F);
+    CHECK(prepared.bounds.maximum.x == 1040.0F);
+    for (const auto& block : blocks) {
+        for (std::size_t index = block.first_index;
+             index < static_cast<std::size_t>(block.first_index) +
+                 block.index_count; ++index) {
+            const auto& position =
+                package.vertices()[package.indices()[index]].position;
+            CHECK(position.x >= block.bounds.minimum.x);
+            CHECK(position.x <= block.bounds.maximum.x);
+            CHECK(position.y >= block.bounds.minimum.y);
+            CHECK(position.y <= block.bounds.maximum.y);
+            CHECK(position.z >= block.bounds.minimum.z);
+            CHECK(position.z <= block.bounds.maximum.z);
+        }
+    }
+    const auto& statistics = package.statistics();
+    CHECK(statistics.prepared_draw_block_count == blocks.size());
+    CHECK(statistics.prepared_draw_byte_count >=
+        sizeof(world_render::WorldPreparedDrawBatch) +
+            blocks.size() * sizeof(world_render::WorldPreparedDrawBlock));
+    REQUIRE(statistics.total_cpu_render_byte_count >
+        statistics.prepared_draw_byte_count);
+    world_render::WorldRenderPackageLimits tight;
+    tight.maximum_total_cpu_render_bytes =
+        statistics.total_cpu_render_byte_count -
+        statistics.prepared_draw_byte_count;
+    auto full_batch_fallback = make_prepared_block_package(tight);
+    REQUIRE(full_batch_fallback);
+    REQUIRE(full_batch_fallback.package);
+    CHECK(full_batch_fallback.package->prepared_draw_batches().empty());
+    CHECK(full_batch_fallback.package->prepared_draw_blocks().empty());
+    CHECK(full_batch_fallback.package->statistics().prepared_draw_block_count ==
+        0U);
+    CHECK(full_batch_fallback.package->statistics().total_cpu_render_byte_count ==
+        tight.maximum_total_cpu_render_bytes);
 }
 
 TEST_CASE("World render package variants repeat deterministically twenty times",

@@ -5,6 +5,7 @@
 #include <hlclient/app/external_session.hpp>
 #include <hlclient/app/external_diagnostics.hpp>
 #include <hlclient/app/external_observation_gate.hpp>
+#include <hlclient/app/external_p1_branch_observation.hpp>
 #include <hlclient/app/application_presentation_settings.hpp>
 #include <hlclient/app/session_receipt.hpp>
 #include <hlclient/app/movement_diagnostics.hpp>
@@ -382,12 +383,12 @@ public:
       if(movement_.requested()) {
         try {
           auto report=movement_.encode(journal_->snapshot()->identity);
-          if(report && !diagnostic_capabilities_.empty()) {
+          if(report) {
             const auto last=report->rfind('}');
-            const auto metadata=",\"game_diagnostic_capabilities\":"+diagnostic_capabilities_+
-                ",\"launch_manifest_reference\":\"launch-manifest.json\",\"process_manifest_reference\":\"process-manifest.json\"";
-            if(last!=report->npos)report->insert(last,metadata.size()<=hlclient::app::MovementIncidentRecorder::publication_metadata_reserve
-                ?metadata:",\"game_diagnostic_capabilities_omitted\":\"publication_metadata_budget_exceeded\"");
+            const auto metadata=hlclient::app::external_p1_movement_metadata(p1_branch_,
+                journal_->snapshot()->identity.run_id,diagnostic_capabilities_,
+                hlclient::app::MovementIncidentRecorder::publication_metadata_reserve);
+            if(last!=report->npos)report->insert(last,metadata);
           }
           if(!report || !directory_ || !hlclient::platform::windows::secure_atomic_write_new(*directory_,
               L"external-movement.json",std::as_bytes(std::span{report->data(),report->size()})))
@@ -470,7 +471,12 @@ public:
       std::uint64_t frame) {
     if(!options.external_server_client) return;
     scene_metrics_=renderer.scene_target_statistics();
-    postprocess_extent_=renderer.image_adjustment_statistics().last_extent;
+    const auto image_metrics=renderer.image_adjustment_statistics();
+    postprocess_extent_=image_metrics.last_extent;
+    const auto* current_session=snapshot();
+    p1_branch_.observe(*scene_metrics_,image_metrics,
+        current_session?current_session->generation.network_generation:0U,
+        current_session?current_session->generation.map_generation:0U);
 #ifdef _WIN32
     // Only a completed production draw establishes actual samples/dimensions.
     // Preserve the last valid observation while a resize replaces our exact
@@ -571,6 +577,7 @@ public:
       <<",\"brightness\":"<<options.image.brightness<<",\"gamma\":"<<options.image.gamma
       <<",\"contrast\":"<<options.image.contrast<<",\"volume\":"<<options.audio_volume
       <<",\"scene_observed\":"<<boolean(scene_metrics_.has_value())
+      <<",\"p1_branch_counters\":"<<p1_branch_.encode(options.session_run_id.value_or(""))
       <<",\"hud_observed\":"<<boolean(hud_metrics_.observed);
     report<<",\"reporting_cost\":{\"scope\":\"this_application_session_inclusive_not_cpu_samples\""
       <<",\"metadata_refreshes\":"<<metadata_refreshes_;
@@ -700,6 +707,7 @@ private:
     friend bool operator==(const VideoKey&,const VideoKey&)=default;
   };
   std::optional<hlclient::renderer::opengl::OpenGlSceneTargetStatistics> scene_metrics_;
+  hlclient::app::ExternalP1BranchObservation p1_branch_;
   hlclient::renderer::RenderExtent postprocess_extent_{};
   hlclient::app::ExternalObservationGate<MsaaKey> msaa_gate_;
   hlclient::app::ExternalObservationGate<VideoKey> video_gate_;
@@ -8241,7 +8249,8 @@ int run_live_visual_control(
           (void)receipts.movement().observe_gpu(timing->frame_number,timing->elapsed_ms);
         (void)receipts.movement().observe_gpu_passes(timing->frame_number,
             {timing->pass_elapsed_ms,timing->valid_pass_mask,
-             movement_gpu_status(timing->status)});
+             movement_gpu_status(timing->status),timing->world_subpass_elapsed_ms,
+             timing->valid_world_subpass_mask});
       }
     }
     if (control_activated) {

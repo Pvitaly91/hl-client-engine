@@ -556,6 +556,38 @@ TEST_CASE("Delayed acknowledgement replays commands thirteen through twenty",
         movement::local_player_movement_state_signature(expected));
 }
 
+TEST_CASE("Synthetic post-pause suffix replays exactly twenty-six commands",
+    "[prediction][reconciliation][rx-burst-22ad3a5][no-stock]")
+{
+    IdentityCollision collision;
+    const auto environment = fixture::make_environment();
+    const auto campaign = build_campaign(
+        fixture::make_state(), linear_commands(27U), environment, collision);
+    const auto* acknowledged = campaign.history->find_exact(
+        *goldsrc::GoldSrcUserCmdSequence::create(1U));
+    REQUIRE(acknowledged != nullptr);
+    const auto corrected = offset_state(
+        *acknowledged->post_command_state(), {0.0F, 0.25F, 0.0F});
+    const auto authority = make_authority(
+        campaign.session, 1U, 1U, corrected);
+    const auto expected = direct_replay(corrected,
+        std::span{campaign.commands}.subspan(1U), environment, collision);
+
+    const auto result = reconcile(
+        *campaign.history, authority, environment, collision);
+    REQUIRE(result);
+    REQUIRE(result.history);
+    CHECK(result.replay_statistics.replayed_command_count == 26U);
+    REQUIRE(result.replay_statistics.first_sequence);
+    REQUIRE(result.replay_statistics.last_sequence);
+    CHECK(result.replay_statistics.first_sequence->value() == 2U);
+    CHECK(result.replay_statistics.last_sequence->value() == 27U);
+    CHECK(result.history->size() == 26U);
+    CHECK(movement::local_player_movement_state_signature(
+              *result.corrected_current_state) ==
+        movement::local_player_movement_state_signature(expected));
+}
+
 TEST_CASE("Correction at the newest command becomes the new empty anchor",
     "[prediction][reconciliation][newest][correction]")
 {
