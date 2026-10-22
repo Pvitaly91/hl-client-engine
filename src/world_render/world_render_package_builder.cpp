@@ -278,6 +278,8 @@ struct PreparedDrawData {
                     }
                     block.index_count = static_cast<std::uint32_t>(
                         expected_index - block.first_index);
+                    block.source_surface_count = static_cast<std::uint8_t>(
+                        surfaces_in_block);
                     if (!batch_has_bounds) {
                         prepared_batch.bounds = block.bounds;
                         batch_has_bounds = true;

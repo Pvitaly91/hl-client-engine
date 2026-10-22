@@ -44,6 +44,18 @@ template<std::size_t N> std::string_view token(const std::array<char,N>& value) 
 std::uint64_t saturated_add(std::uint64_t a,std::uint64_t b) noexcept {
     return a>(std::numeric_limits<std::uint64_t>::max)()-b?(std::numeric_limits<std::uint64_t>::max)():a+b;
 }
+std::uint64_t manual_sampling_interval_for(const std::uint64_t now) noexcept {
+    // Preserve the available four seconds before F8 and the full second after it
+    // within the fixed 8 MiB incident budget, leaving room for exact witnesses.
+    constexpr std::size_t exact_reserve=4;
+    static_assert(MovementIncidentRecorder::incident_frame_capacity>exact_reserve);
+    constexpr auto background_capacity=static_cast<std::uint64_t>(
+        MovementIncidentRecorder::incident_frame_capacity-exact_reserve);
+    const auto span=std::min(now,MovementIncidentRecorder::manual_pre_incident_us)+
+        MovementIncidentRecorder::post_incident_us;
+    const auto capacity_interval=span/background_capacity+static_cast<std::uint64_t>(span%background_capacity!=0);
+    return std::max(MovementIncidentRecorder::manual_sampling_interval_us,capacity_interval);
+}
 void bounded_value(std::optional<double>& value,double low,double high,std::uint64_t& invalid) noexcept {
     if(value && (!std::isfinite(*value) || *value<low || *value>high)){value.reset();++invalid;}
 }
@@ -66,12 +78,32 @@ bool valid_prediction_work(const core::PredictionWorkDiagnostics& value) noexcep
         if(!std::isfinite(duration) || duration<0 || duration>1'000'000'000.0)return false;
     return true;
 }
+bool valid_static_world(const MovementStaticWorldFrameRecord& value) noexcept {
+    if(value.path>MovementStaticWorldPath::visible_commands ||
+        value.fallback_reason>MovementStaticWorldFallbackReason::fragmented_batch)return false;
+    if(value.selected_blocks && value.considered_blocks &&
+        *value.selected_blocks>*value.considered_blocks)return false;
+    if(value.selected_surfaces && value.considered_surfaces &&
+        *value.selected_surfaces>*value.considered_surfaces)return false;
+    if(value.resource_id.has_value()!=value.resource_revision.has_value())return false;
+    if(value.path==MovementStaticWorldPath::none &&
+        (value.resource_id || value.considered_blocks || value.tested_bounds ||
+         value.selected_blocks || value.considered_surfaces || value.selected_surfaces ||
+         value.submitted_draws || value.submitted_triangles || value.prepared_rebuilds ||
+         value.selection_preparation_ms ||
+         value.fallback_reason!=MovementStaticWorldFallbackReason::none))return false;
+    if(value.selection_preparation_ms && (!std::isfinite(*value.selection_preparation_ms) ||
+        *value.selection_preparation_ms<0 || *value.selection_preparation_ms>1'000'000'000.0))return false;
+    return true;
+}
 void sanitize(Record& value,std::uint64_t& invalid) noexcept {
     if(!valid_gpu_passes(value.gpu_passes)) {
         value.gpu_passes={};value.gpu_passes.status=MovementGpuPassStatus::invalid;++invalid;
     }
     if(value.prediction_work && !valid_prediction_work(*value.prediction_work))
         {value.prediction_work.reset();++invalid;}
+    if(value.static_world && !valid_static_world(*value.static_world))
+        {value.static_world.reset();++invalid;}
     for(auto* stamp:{&value.input_sample_us,&value.render_submit_us})if(*stamp>value.monotonic_us){*stamp=0;++invalid;}
     if(value.previous_iteration_waits_known && (value.limiter_wait_us>1'000'000'000'000ULL || value.yield_wait_us>1'000'000'000'000ULL)) {
         value.previous_iteration_waits_known=false;++invalid;
@@ -149,6 +181,22 @@ std::string encode_prediction_work(const std::optional<core::PredictionWorkDiagn
     field(text,"contents_queries",value->contents_queries);field(text,"traversal_steps",value->traversal_steps);
     return text+'}';
 }
+std::string encode_static_world(const std::optional<MovementStaticWorldFrameRecord>& value) {
+    if(!value)return "null";
+    constexpr std::array paths{"none","original_batches","prepared_bypass","prepared_selected","visible_commands"};
+    constexpr std::array reasons{"none","prepared_unavailable","insufficient_probe_rejections",
+        "invalid_prepared_batch","fragmented_batch"};
+    std::string text="{\"path\":"+core::external_json_string(paths[static_cast<std::size_t>(value->path)]);
+    text+=",\"fallback_reason\":"+core::external_json_string(reasons[static_cast<std::size_t>(value->fallback_reason)]);
+#define STATIC_WORLD_FIELD(name) field(text,#name,value->name)
+    STATIC_WORLD_FIELD(resource_id);STATIC_WORLD_FIELD(resource_revision);
+    STATIC_WORLD_FIELD(considered_blocks);STATIC_WORLD_FIELD(tested_bounds);STATIC_WORLD_FIELD(selected_blocks);
+    STATIC_WORLD_FIELD(considered_surfaces);STATIC_WORLD_FIELD(selected_surfaces);
+    STATIC_WORLD_FIELD(submitted_draws);STATIC_WORLD_FIELD(submitted_triangles);STATIC_WORLD_FIELD(prepared_rebuilds);
+    STATIC_WORLD_FIELD(selection_preparation_ms);
+#undef STATIC_WORLD_FIELD
+    return text+'}';
+}
 bool valid_stop(const MovementVelocityStopRecord& value,const Record& frame) noexcept {
     const auto finite=[](const auto& vector) {
         return std::ranges::all_of(vector,[](float v){return std::isfinite(v)&&std::abs(v)<=1e9F;});
@@ -213,6 +261,7 @@ std::string encode_frame(const Record& value) {
     field(text,"previous_iteration_waits_known",value.previous_iteration_waits_known);
     for(const auto& descriptor:metrics)field(text,descriptor.name,value.*descriptor.member);
     text+=",\"prediction_work\":"+encode_prediction_work(value.prediction_work);
+    text+=",\"static_world\":"+encode_static_world(value.static_world);
     if(value.gpu_passes.status!=MovementGpuPassStatus::not_observed) {
         constexpr std::array statuses{"not_observed","pending","ready","unsupported","disjoint","invalid","capacity_dropped"};
         constexpr std::array names{"world","studio_viewmodel","effects_decals","msaa_resolve","image_adjustments","hud_console"};
@@ -540,7 +589,18 @@ bool MovementIncidentRecorder::observe(const Record& observation,const MovementF
     const bool stall=value.frame_interval_ms && *value.frame_interval_ms>=frame_stall_ms;
     for(auto& incident:incidents_)if(!incident.complete && !incident.generation_boundary && !incident.life_boundary) {
         if(value.monotonic_us<=incident.end_us) {
-            append_incident(incident,value,correction_entry || fallback_entry || stall);
+            append_incident(incident,value,correction_entry || fallback_entry || stall,false,
+                value.monotonic_us==incident.end_us);
+        } else if(count_>1) {
+            // A frame need not land exactly on the requested endpoint. The
+            // immediately preceding observed frame is the truthful last one.
+            const auto& prior=*recent_frame(count_-2);
+            const auto beginning=incident.trigger_us>=incident.requested_pre_us ?
+                incident.trigger_us-incident.requested_pre_us : 0;
+            if(prior.monotonic_us>=beginning && prior.monotonic_us<=incident.end_us &&
+                prior.network_generation==incident.network_generation &&
+                prior.map_generation==incident.map_generation)
+                append_incident(incident,prior,false,false,true);
         }
         if(value.monotonic_us>=incident.end_us)incident.complete=true;
     }
@@ -628,17 +688,27 @@ void MovementIncidentRecorder::capture_decision(const MovementIncidentTrigger tr
     if(decisions_.size()<maximum_capture_decisions)decisions_.push_back(value);
     else {decisions_[decision_first_]=value;decision_first_=(decision_first_+1)%maximum_capture_decisions;++statistics_.decision_evictions;}
 }
-void MovementIncidentRecorder::append_incident(MovementIncident& incident,const Record& frame,const bool exact,const bool marker) noexcept {
+void MovementIncidentRecorder::append_incident(MovementIncident& incident,const Record& frame,
+    const bool exact,const bool marker,const bool coverage_endpoint) noexcept {
     if(!incident.frames.empty() && incident.frames.back().frame_number==frame.frame_number) {
         if(exact)incident.exact_samples[incident.frames.size()-1]=marker?2U:std::max<std::uint8_t>(1U,incident.exact_samples[incident.frames.size()-1]);return;
     }
     const auto beginning=incident.trigger_us>=incident.requested_pre_us?incident.trigger_us-incident.requested_pre_us:0;
     const auto bucket=(frame.monotonic_us-beginning)/incident.sampling_interval_us;
     if(!exact && !incident.frames.empty() && bucket==incident.last_sample_bucket) {
-        ++incident.background_samples_omitted;++incident.omitted_samples;++statistics_.background_samples_omitted;return;
+        if(coverage_endpoint && incident.frames.size()>1 && !incident.exact_samples[incident.frames.size()-1]) {
+            // Keep the actual latest timestamp without consuming a slot or
+            // misclassifying an ordinary endpoint as an exact event witness.
+            incident.frames.back()=frame;
+            ++incident.background_samples_omitted;++incident.omitted_samples;++statistics_.background_samples_omitted;
+            return;
+        }
+        if(!coverage_endpoint) {
+            ++incident.background_samples_omitted;++incident.omitted_samples;++statistics_.background_samples_omitted;return;
+        }
     }
     if(incident.frames.size()==incident_frame_capacity) {
-        if(exact) {
+        if(exact || coverage_endpoint) {
             std::size_t victim=incident.frames.size();
             for(std::size_t i=1;i<incident.frames.size();++i)if(!incident.exact_samples[i]){victim=i;break;}
             if(victim==incident.frames.size() && marker)for(std::size_t i=1;i<incident.frames.size();++i)
@@ -649,8 +719,12 @@ void MovementIncidentRecorder::append_incident(MovementIncident& incident,const 
                 incident.frames.erase(incident.frames.begin()+static_cast<std::ptrdiff_t>(victim));
                 for(std::size_t i=victim;i+1<incident_frame_capacity;++i)incident.exact_samples[i]=incident.exact_samples[i+1];
                 ++incident.omitted_samples;
-            } else {++incident.exact_samples_omitted;++incident.omitted_samples;++statistics_.exact_samples_omitted;
-                ++statistics_.incident_sample_drops;return;}
+            } else {
+                ++incident.omitted_samples;++statistics_.incident_sample_drops;
+                if(exact){++incident.exact_samples_omitted;++statistics_.exact_samples_omitted;}
+                else {++incident.background_samples_omitted;++statistics_.background_samples_omitted;}
+                return;
+            }
         } else {++incident.background_samples_omitted;++incident.omitted_samples;++statistics_.background_samples_omitted;
             ++statistics_.incident_sample_drops;return;}
     }
@@ -688,7 +762,7 @@ bool MovementIncidentRecorder::mark_impl(const MovementIncidentTrigger trigger,c
             previous.priority=std::max(previous.priority,priority);
             if(promote) {
                 previous.trigger_us=now;previous.end_us=saturated_add(now,post_incident_us);
-                previous.requested_pre_us=manual_pre_incident_us;previous.sampling_interval_us=manual_sampling_interval_us;
+                previous.requested_pre_us=manual_pre_incident_us;previous.sampling_interval_us=manual_sampling_interval_for(now);
                 previous.frames.clear();previous.exact_samples={};previous.omitted_samples=0;previous.background_samples_omitted=0;
                 const auto oldest=now>=manual_pre_incident_us?now-manual_pre_incident_us:0;
                 for(std::size_t i=0;i<count_;++i)if(recent_frame(i)->monotonic_us>=oldest && recent_frame(i)->monotonic_us<=now) {
@@ -734,7 +808,7 @@ bool MovementIncidentRecorder::mark_impl(const MovementIncidentTrigger trigger,c
     incident.network_generation=network;incident.map_generation=map;
     incident.producer_rejection=correction_event_ && !correction_event_->accepted;
     incident.requested_pre_us=automatic?pre_incident_us:manual_pre_incident_us;incident.requested_post_us=post_incident_us;
-    incident.sampling_interval_us=automatic?automatic_sampling_interval_us:manual_sampling_interval_us;
+    incident.sampling_interval_us=automatic?automatic_sampling_interval_us:manual_sampling_interval_for(now);
     if(trigger==MovementIncidentTrigger::manual){incident.manual_marker_us[0]=now;incident.manual_marker_count=1;}
     // Replacement reuses its reserved backing store: no transient ninth
     // incident-frame allocation may break the strict high-water budget.
@@ -839,6 +913,7 @@ std::optional<std::string> MovementIncidentRecorder::encode(const SessionReceipt
         text+=",\"local_clock\":\"application_steady_microseconds\",\"quantiles\":\"nearest_rank_recorded_recent_window\"";
         text+=",\"gpu_policy\":\"delayed_identity_bound_nonblocking_or_not_available\",\"causality\":\"observations_not_root_cause_proof\"";
         text+=",\"prediction_work_semantics\":\"durations_overlap_prediction_ms_collision_query_ms_is_subset_counts_are_actual_calls_traversal_steps_are_successfully_reported\"";
+        if(enabled_)text+=",\"static_world_receipt\":{\"schema\":\"hlclient.static-world-frame.v1\",\"scope\":\"completed_renderer_frame_in_recent_window_or_incident\",\"counter_semantics\":\"per_frame_not_cumulative\",\"considered_blocks_semantics\":\"eligible_immutable_pool\",\"tested_bounds_semantics\":\"frustum_calls_including_retests\",\"selected_blocks_semantics\":\"submitted_pool_blocks\",\"selection_preparation_scope\":\"frustum_probe_range_decisions_excludes_gl_submission_and_map_load\",\"submitted_triangles_semantics\":\"geometry_not_visible_pixels\",\"unknown\":\"null\",\"omission\":\"bounded_recent_window_and_incident_sampling\"}";
         if(enabled_)text+=",\"pacing_wait_policy\":\"previous_completed_iteration_not_current_frame_execution\"";
         text+=",\"receive_counter_scope\":\"owned_peer\",\"rejected_sequence_is_packet_loss\":false,\"choke_marker_is_server_load_proof\":false";
         text+=",\"limits\":{\"recent_frames\":"+scalar(maximum_recent_frames);field(text,"retention_us",retention_us);

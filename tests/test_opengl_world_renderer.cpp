@@ -1566,7 +1566,13 @@ TEST_CASE("World draw bindings reuse only immutable inputs inside one render fra
         CHECK(after.vertex_array_bind_count-before.vertex_array_bind_count==1U);
         CHECK(after.sky_texture_bind_count-before.sky_texture_bind_count==1U);
         CHECK(after.camera_upload_count-before.camera_upload_count==1U);
-        CHECK(after.light_upload_count-before.light_upload_count==1U);
+        // The world-only no-light program has no light uniforms. Any active
+        // point/effect light keeps the original dynamic-light program.
+        const bool has_point_light=scene.transient_world_light &&
+            renderer::valid_render_point_light(*scene.transient_world_light) &&
+            scene.transient_world_light->intensity>0.0F;
+        CHECK(after.light_upload_count-before.light_upload_count==
+            (has_point_light || !scene.effect_lights().empty() ? 1U : 0U));
         CHECK(after.transform_upload_count-before.transform_upload_count==2U);
         CHECK(glGetError()==GL_NO_ERROR);
         return gpu.observe_framebuffer(extent,scene.clear_color,true);
@@ -2549,6 +2555,21 @@ TEST_CASE("Prepared static-world draws match original all-batch color and depth 
         bypass_before);
     CHECK(gl_renderer.statistics().prepared_world_probed_block_count > 0U);
     CHECK(gl_renderer.statistics().failed_upload_count == 0U);
+    auto receipt_scene=make_scene(packages[0U]);
+    receipt_scene.static_world->scene_package=
+        make_visibility_scene(packages[0U]);
+    gl_renderer.render_with_gpu_timing(receipt_scene,{96,96},1U);
+    CHECK_FALSE(gl_renderer.statistics().last_static_world_frame);
+    gl_renderer.render_with_gpu_timing(receipt_scene,{96,96},2U,true);
+    const auto& receipt=gl_renderer.statistics().last_static_world_frame;
+    REQUIRE(receipt);
+    CHECK(receipt->frame_number==2U);
+    CHECK(receipt->path!=renderer::opengl::OpenGlStaticWorldPath::none);
+    CHECK(receipt->resource_id==packages[0U]->resource_id());
+    CHECK(receipt->resource_revision==packages[0U]->resource_revision());
+    CHECK(receipt->api_draws.has_value());
+    CHECK(receipt->selection_preparation_ms.has_value());
+    CHECK_FALSE(receipt->prepared_rebuilds);
     context->release_renderer();
     CHECK(glGetError() == GL_NO_ERROR);
 }
@@ -2609,7 +2630,9 @@ TEST_CASE("OpenGL brush instances share one aggregate GPU upload",
     CHECK(statistics.program_bind_count == 4U);
     CHECK(statistics.vertex_array_bind_count == 4U);
     CHECK(statistics.camera_upload_count == 4U);
-    CHECK(statistics.light_upload_count == 4U);
+    // World uses the no-light variant; brush instances retain the original
+    // program and upload their own light state once per frame.
+    CHECK(statistics.light_upload_count == 2U);
     CHECK(statistics.sky_texture_bind_count == 4U);
     CHECK(statistics.transform_upload_count == 12U);
     CHECK(statistics.visible_brush_instance_count == 2U);

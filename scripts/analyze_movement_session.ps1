@@ -95,6 +95,72 @@ function Get-PredictionWork($Object) {
     }
     return $result
 }
+function Get-StaticWorldReceipt($Report) {
+    $policy = Get-Object $Report 'static_world_receipt'
+    if ($null -eq $policy) {
+        return [ordered]@{ availability = 'not_recorded_in_older_build'; coverage = 'unavailable' }
+    }
+    if ((Get-Field $policy 'schema') -cne 'hlclient.static-world-frame.v1' -or
+        (Get-Field $policy 'scope') -cne 'completed_renderer_frame_in_recent_window_or_incident' -or
+        (Get-Field $policy 'counter_semantics') -cne 'per_frame_not_cumulative' -or
+        (Get-Field $policy 'considered_blocks_semantics') -cne 'eligible_immutable_pool' -or
+        (Get-Field $policy 'tested_bounds_semantics') -cne 'frustum_calls_including_retests' -or
+        (Get-Field $policy 'selected_blocks_semantics') -cne 'submitted_pool_blocks' -or
+        (Get-Field $policy 'selection_preparation_scope') -cne 'frustum_probe_range_decisions_excludes_gl_submission_and_map_load' -or
+        (Get-Field $policy 'submitted_triangles_semantics') -cne 'geometry_not_visible_pixels' -or
+        (Get-Field $policy 'unknown') -cne 'null' -or
+        (Get-Field $policy 'omission') -cne 'bounded_recent_window_and_incident_sampling') {
+        throw 'unsupported_static_world_receipt_schema'
+    }
+    $recent = Get-Object $Report 'recent_window' -Required
+    $frames = Get-RemoteArray $recent 'frames' 961
+    $paths = @('none','original_batches','prepared_bypass','prepared_selected','visible_commands')
+    $reasons = @('none','prepared_unavailable','insufficient_probe_rejections',
+        'invalid_prepared_batch','fragmented_batch')
+    $counterNames = @('considered_blocks','tested_bounds','selected_blocks',
+        'considered_surfaces','selected_surfaces','submitted_draws','submitted_triangles','prepared_rebuilds')
+    $summary = [ordered]@{
+        availability = 'ready'; schema = 'hlclient.static-world-frame.v1'
+        coverage = 'recent_window_only'; source = 'retained_encoded_frames_not_whole_session'
+        frames_scanned = $frames.Count; frames_with_receipt = 0; frames_unavailable = 0
+        paths = [ordered]@{}; fallback_frames = 0; counters = [ordered]@{}
+        selection_preparation_ms_observed = 0; selection_preparation_ms_max = $null
+    }
+    foreach ($name in $counterNames) {
+        $summary.counters[$name] = [ordered]@{ observed = 0; total = 0 }
+    }
+    foreach ($frame in $frames) {
+        if ($frame -isnot [Collections.IDictionary]) { throw 'invalid_static_world_frame' }
+        $receipt = Get-Object $frame 'static_world'
+        if ($null -eq $receipt) { $summary.frames_unavailable++; continue }
+        $path = Get-Field $receipt 'path';$reason = Get-Field $receipt 'fallback_reason'
+        if ($path -isnot [string] -or $path -cnotin $paths -or
+            $reason -isnot [string] -or $reason -cnotin $reasons) { throw 'invalid_static_world_path' }
+        $summary.frames_with_receipt++
+        if (-not $summary.paths.Contains($path)) { $summary.paths[$path] = 0 }
+        $summary.paths[$path]++
+        if ($reason -cne 'none') { $summary.fallback_frames++ }
+        foreach ($name in @('resource_id','resource_revision') + $counterNames) {
+            $number = Get-Number $receipt $name -Integer
+            if ($null -ne $number -and $name -in $counterNames) {
+                $summary.counters[$name].observed++
+                $summary.counters[$name].total += [decimal]$number
+            }
+        }
+        foreach ($name in @('selection_preparation_ms')) {
+            $duration = Get-Number $receipt $name
+            if ($null -ne $duration) {
+                if ($duration -gt 1e9) { throw 'invalid_static_world_duration' }
+                $observedName = $name + '_observed';$maximumName = $name + '_max'
+                $summary[$observedName]++
+                if ($null -eq $summary[$maximumName] -or $duration -gt $summary[$maximumName]) {
+                    $summary[$maximumName] = $duration
+                }
+            }
+        }
+    }
+    return $summary
+}
 function Get-Boolean($Object, [string]$Name) {
     $value = Get-Field $Object $Name
     if ($value -isnot [bool]) { throw 'invalid_report_boolean' }
@@ -1199,6 +1265,7 @@ $result = [ordered]@{
         'no_automated_prediction_health_or_cause_verdict')
 }
 $result.identity_evidence = Get-AdjacentRunIdentity $ReportPath $runId $processId $processCreation
+$result.static_world = Get-StaticWorldReceipt $report
 $result.capture = Get-PriorityCapture $report $result.enabled $legacyCapture
 $result.critical_corrections = Get-CriticalCorrections (Get-Object $report 'critical_corrections') $result.enabled $legacyCapture
 $result.remote_players = Get-RemotePlayers (Get-Object $report 'remote_players')

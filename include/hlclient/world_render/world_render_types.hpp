@@ -82,6 +82,9 @@ struct WorldRenderSurfaceRange {
 struct WorldPreparedDrawBlock {
     std::uint32_t first_index{0U};
     std::uint32_t index_count{0U};
+    // Exact count of original source surfaces covered by this contiguous
+    // block; useful for per-frame selection receipts without rescanning them.
+    std::uint8_t source_surface_count{0U};
     assets::WorldBounds bounds{};
 };
 

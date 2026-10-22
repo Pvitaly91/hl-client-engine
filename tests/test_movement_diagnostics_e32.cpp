@@ -250,6 +250,48 @@ TEST_CASE("Prediction work diagnostics retain measured calls and reject invalid 
     CHECK(sanitized->find("\"prediction_work\":null")!=sanitized->npos);
     CHECK(sanitized->size()<=Recorder::maximum_encoded_bytes);
 }
+TEST_CASE("Static-world frame receipts preserve typed path, per-frame counts and unknowns",
+    "[static-world-receipt][movement-diagnostics][core][app]") {
+    Recorder recorder{true};auto value=frame(1,1'000'000);
+    value.static_world=app::MovementStaticWorldFrameRecord{};
+    value.static_world->path=app::MovementStaticWorldPath::prepared_selected;
+    value.static_world->fallback_reason=app::MovementStaticWorldFallbackReason::fragmented_batch;
+    value.static_world->resource_id=81U;value.static_world->resource_revision=7U;
+    value.static_world->considered_blocks=272U;value.static_world->tested_bounds=63U;
+    value.static_world->selected_blocks=180U;
+    value.static_world->submitted_draws=19U;
+    value.static_world->submitted_triangles=1600U;value.static_world->selection_preparation_ms=.125;
+    REQUIRE(recorder.observe(value));
+    value.static_world->selected_blocks=0U;
+    const auto* retained=recorder.recent_frame(0);REQUIRE(retained);REQUIRE(retained->static_world);
+    CHECK(retained->static_world->selected_blocks==180U);
+    CHECK(retained->static_world->selection_preparation_ms==.125);
+    const auto report=recorder.encode(identity);REQUIRE(report);
+    CHECK(report->find("\"static_world_receipt\":{\"schema\":\"hlclient.static-world-frame.v1\"")!=report->npos);
+    CHECK(report->find("\"static_world\":{\"path\":\"prepared_selected\",\"fallback_reason\":\"fragmented_batch\"")!=report->npos);
+    CHECK(report->find("\"selected_blocks\":180")!=report->npos);
+    CHECK(report->find("\"tested_bounds\":63")!=report->npos);
+    CHECK(report->find("\"submitted_triangles\":1600")!=report->npos);
+    CHECK(report->find("\"selection_preparation_ms\":0.125")!=report->npos);
+    CHECK(report->find("\"submitted_triangles_semantics\":\"geometry_not_visible_pixels\"")!=report->npos);
+    CHECK(recorder.statistics().allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
+    auto missing=frame(2,1'010'000);REQUIRE(recorder.observe(missing));
+    const auto unknown=recorder.encode(identity);REQUIRE(unknown);
+    CHECK(unknown->find("\"static_world\":null")!=unknown->npos);
+    auto invalid=frame(3,1'020'000);invalid.static_world=app::MovementStaticWorldFrameRecord{};
+    invalid.static_world->selection_preparation_ms=std::numeric_limits<double>::quiet_NaN();
+    REQUIRE(recorder.observe(invalid));
+    CHECK_FALSE(recorder.recent_frame(2)->static_world);
+    CHECK(recorder.statistics().invalid_values==1U);
+    auto contradictory=frame(4,1'030'000);
+    contradictory.static_world=app::MovementStaticWorldFrameRecord{};
+    contradictory.static_world->path=app::MovementStaticWorldPath::prepared_selected;
+    contradictory.static_world->considered_blocks=2U;
+    contradictory.static_world->selected_blocks=3U;
+    REQUIRE(recorder.observe(contradictory));
+    CHECK_FALSE(recorder.recent_frame(3)->static_world);
+    CHECK(recorder.statistics().invalid_values==2U);
+}
 TEST_CASE("E32 normal recorder publishes bounded whole-session evidence alongside detailed windows",
     "[e32-session][movement-diagnostics][core][app]") {
     Recorder recorder{true};

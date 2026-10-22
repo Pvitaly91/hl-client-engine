@@ -85,6 +85,32 @@ private:
     OpenGlRendererErrorCode code_;
 };
 
+enum class OpenGlStaticWorldPath : std::uint8_t {
+    none, visible_commands, original_batches, prepared_bypass,
+    prepared_selected
+};
+enum class OpenGlStaticWorldFallback : std::uint8_t {
+    none, prepared_unavailable, insufficient_probe_rejections,
+    invalid_prepared_batch, fragmented_batch
+};
+// One completed renderer frame, not cumulative and not a count of visible
+// pixels. Optional CPU timing is collected only for diagnostic-timed frames.
+struct OpenGlStaticWorldFrameReceipt final {
+    std::uint64_t frame_number{};
+    OpenGlStaticWorldPath path{OpenGlStaticWorldPath::none};
+    OpenGlStaticWorldFallback fallback{OpenGlStaticWorldFallback::none};
+    std::uint64_t resource_id{},resource_revision{};
+    // considered_blocks is the eligible immutable pool; tested_bounds counts
+    // actual frustum classifier calls (a probe may be tested again later).
+    std::optional<std::uint64_t> considered_blocks,tested_bounds,selected_blocks;
+    std::optional<std::uint64_t> considered_surfaces,selected_surfaces;
+    std::optional<std::uint64_t> api_draws,submitted_triangles;
+    std::optional<double> selection_preparation_ms;
+    // Immutable owner creation occurs before render(); this renderer cannot
+    // infer its cost or rebuild count from a GPU resource upload.
+    std::optional<std::uint64_t> prepared_rebuilds;
+};
+
 struct OpenGlWorldRendererStatistics {
     std::uint64_t package_revision{0U};
     std::uint64_t upload_count{0U};
@@ -103,6 +129,7 @@ struct OpenGlWorldRendererStatistics {
     std::uint64_t prepared_world_full_batch_fallback_count{0U};
     std::uint64_t prepared_world_probed_block_count{0U};
     std::uint64_t prepared_world_all_batch_bypass_frame_count{0U};
+    std::optional<OpenGlStaticWorldFrameReceipt> last_static_world_frame;
     std::uint64_t rendered_command_count{0U};
     std::uint64_t triangle_count{0U};
     std::uint64_t base_texture_bind_count{0U};
@@ -264,8 +291,10 @@ public:
     void render(const RenderScene& scene, RenderExtent extent) override;
     // Optional nonblocking GPU observation. Ordinary render() allocates no
     // queries. Results retain the original frame identity, not the poll frame.
+    // The per-draw static-world CPU receipt is a separate, opt-in diagnostic;
+    // GPU timing alone must not add its clocks to benchmark/normal frames.
     void render_with_gpu_timing(const RenderScene& scene, RenderExtent extent,
-        std::uint64_t frame_number);
+        std::uint64_t frame_number, bool capture_static_world_receipt = false);
     [[nodiscard]] std::optional<OpenGlGpuFrameTiming> poll_gpu_timing();
     [[nodiscard]] const OpenGlGpuTimingStatistics& gpu_timing_statistics() const noexcept;
     [[nodiscard]] const OpenGlWorldRendererStatistics& statistics() const noexcept;
@@ -288,6 +317,7 @@ private:
     RendererInfo information_;
     std::unique_ptr<Implementation> implementation_;
     bool loader_initialized_{false};
+    std::optional<std::uint64_t> static_world_receipt_frame_;
 };
 
 } // namespace hlclient::renderer::opengl

@@ -39,6 +39,27 @@ struct MovementGpuPassRecord final {
     std::array<float,4> world_subpass_milliseconds{};
     std::uint8_t valid_world_subpass_mask{};
 };
+// A completed renderer frame's static-world work, not a visibility oracle or
+// a live FPS estimate. Optional values are unavailable rather than zero.
+enum class MovementStaticWorldPath : std::uint8_t {
+    none,original_batches,prepared_bypass,prepared_selected,visible_commands
+};
+enum class MovementStaticWorldFallbackReason : std::uint8_t {
+    none,prepared_unavailable,insufficient_probe_rejections,
+    invalid_prepared_batch,fragmented_batch
+};
+struct MovementStaticWorldFrameRecord final {
+    MovementStaticWorldPath path{MovementStaticWorldPath::none};
+    MovementStaticWorldFallbackReason fallback_reason{MovementStaticWorldFallbackReason::none};
+    std::optional<std::uint64_t> resource_id,resource_revision;
+    // Candidate pool and actual classifier calls are intentionally distinct.
+    std::optional<std::uint64_t> considered_blocks,tested_bounds,selected_blocks;
+    std::optional<std::uint64_t> considered_surfaces,selected_surfaces;
+    std::optional<std::uint64_t> submitted_draws,submitted_triangles,prepared_rebuilds;
+    // Frustum/probe/range decisions only. Immutable map-load owner build and
+    // GL submission are outside this per-frame duration.
+    std::optional<double> selection_preparation_ms;
+};
 // Exact adapter output which was accepted by command history, not sampled
 // keys reconstructed after a shot. Sample time uses the receipt clock in us.
 struct MovementDiagnosticCommand final {
@@ -106,6 +127,7 @@ struct MovementFrameRecord final {
     std::array<char,32> recovery_wait_reason{'n','o','n','e'};
     // Appended so existing positional aggregate prefixes remain source-compatible.
     std::optional<core::PredictionWorkDiagnostics> prediction_work;
+    std::optional<MovementStaticWorldFrameRecord> static_world;
     void set_fallback_reason(std::string_view) noexcept;
     void set_correction_anchor_provenance(std::string_view) noexcept;
     void set_remote_sample_mode(std::string_view) noexcept;
@@ -244,7 +266,8 @@ public:
 private:
     void append_recent(const MovementFrameRecord&) noexcept;
     [[nodiscard]] bool mark_impl(MovementIncidentTrigger,std::uint64_t,bool automatic) noexcept;
-    void append_incident(MovementIncident&,const MovementFrameRecord&,bool exact,bool marker=false) noexcept;
+    void append_incident(MovementIncident&,const MovementFrameRecord&,bool exact,bool marker=false,
+        bool coverage_endpoint=false) noexcept;
     void capture_decision(MovementIncidentTrigger,std::uint64_t,std::uint8_t,MovementCaptureDecisionKind,
         std::uint64_t incident=0,std::uint64_t replacement=0) noexcept;
     bool requested_{},enabled_{};

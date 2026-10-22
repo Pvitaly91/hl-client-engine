@@ -159,6 +159,25 @@ TEST_CASE("B080 manual temporal coverage stays honest at every supported samplin
     }
 }
 
+TEST_CASE("B080 manual window retains the real frame before an irregular endpoint crossing", "[b080][capture-policy][core][app]") {
+    Recorder recorder{true};
+    for(std::uint64_t i=0;i<600;++i) {
+        const auto stamp=1'000'000+i*10'000;
+        REQUIRE(recorder.observe(capture_frame(i+1,stamp),playing()));
+        if(i==500)REQUIRE(recorder.mark(Trigger::manual,stamp));
+    }
+    REQUIRE(recorder.observe(capture_frame(601,7'005'000),playing()));
+    REQUIRE(recorder.incidents().size()==1);
+    const auto& incident=recorder.incidents().front();
+    REQUIRE(incident.complete);
+    REQUIRE_FALSE(incident.frames.empty());
+    CHECK(incident.frames.back().monotonic_us==6'990'000);
+    CHECK(incident.exact_samples[incident.frames.size()-1]==0U);
+    CHECK(std::ranges::any_of(incident.frames,[](const auto& frame){return frame.monotonic_us==6'000'000;}));
+    CHECK(incident.frames.size()<=Recorder::incident_frame_capacity);
+    CHECK(recorder.statistics().allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
+}
+
 TEST_CASE("B080 manual availability is not reduced to two total markers", "[b080][capture-policy][core][app]") {
     Recorder recorder{true};
     for(std::size_t i=0;i<Recorder::maximum_incidents;++i) {

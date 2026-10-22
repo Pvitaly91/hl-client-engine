@@ -322,18 +322,25 @@ TEST_CASE("World render package prepares exact contiguous indexed blocks with bo
     const auto blocks = package.prepared_draw_blocks();
     CHECK(blocks[0U].first_index == 0U);
     CHECK(blocks[0U].index_count == 96U);
+    CHECK(blocks[0U].source_surface_count == 16U);
     CHECK(blocks[0U].bounds.minimum.x == 0.0F);
     CHECK(blocks[0U].bounds.maximum.x == 496.0F);
     CHECK(blocks[1U].first_index == 96U);
     CHECK(blocks[1U].index_count == 96U);
+    CHECK(blocks[1U].source_surface_count == 16U);
     CHECK(blocks[1U].bounds.minimum.x == 512.0F);
     CHECK(blocks[1U].bounds.maximum.x == 1008.0F);
     CHECK(blocks[2U].first_index == 192U);
     CHECK(blocks[2U].index_count == 6U);
+    CHECK(blocks[2U].source_surface_count == 1U);
     CHECK(blocks[2U].bounds.minimum.x == 1024.0F);
     CHECK(blocks[2U].bounds.maximum.x == 1040.0F);
     CHECK(prepared.bounds.minimum.x == 0.0F);
     CHECK(prepared.bounds.maximum.x == 1040.0F);
+    CHECK(static_cast<std::size_t>(blocks[0U].source_surface_count +
+            blocks[1U].source_surface_count +
+            blocks[2U].source_surface_count) ==
+        package.draw_batches()[0U].source_surface_count);
     for (const auto& block : blocks) {
         for (std::size_t index = block.first_index;
              index < static_cast<std::size_t>(block.first_index) +

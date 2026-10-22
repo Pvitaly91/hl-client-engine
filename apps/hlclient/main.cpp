@@ -140,6 +140,53 @@ using hlclient::core::LogLevel;
   return Target::invalid;
 }
 
+[[nodiscard]] constexpr hlclient::app::MovementStaticWorldPath movement_static_world_path(
+    hlclient::renderer::opengl::OpenGlStaticWorldPath source) noexcept {
+  using Source=hlclient::renderer::opengl::OpenGlStaticWorldPath;
+  using Target=hlclient::app::MovementStaticWorldPath;
+  switch(source) {
+  case Source::none:return Target::none;
+  case Source::visible_commands:return Target::visible_commands;
+  case Source::original_batches:return Target::original_batches;
+  case Source::prepared_bypass:return Target::prepared_bypass;
+  case Source::prepared_selected:return Target::prepared_selected;
+  }
+  return Target::none;
+}
+[[nodiscard]] constexpr hlclient::app::MovementStaticWorldFallbackReason movement_static_world_fallback(
+    hlclient::renderer::opengl::OpenGlStaticWorldFallback source) noexcept {
+  using Source=hlclient::renderer::opengl::OpenGlStaticWorldFallback;
+  using Target=hlclient::app::MovementStaticWorldFallbackReason;
+  switch(source) {
+  case Source::none:return Target::none;
+  case Source::prepared_unavailable:return Target::prepared_unavailable;
+  case Source::insufficient_probe_rejections:return Target::insufficient_probe_rejections;
+  case Source::invalid_prepared_batch:return Target::invalid_prepared_batch;
+  case Source::fragmented_batch:return Target::fragmented_batch;
+  }
+  return Target::none;
+}
+[[nodiscard]] hlclient::app::MovementStaticWorldFrameRecord movement_static_world_frame(
+    const hlclient::renderer::opengl::OpenGlStaticWorldFrameReceipt& source) noexcept {
+  hlclient::app::MovementStaticWorldFrameRecord result;
+  result.path=movement_static_world_path(source.path);
+  result.fallback_reason=movement_static_world_fallback(source.fallback);
+  if(source.path!=hlclient::renderer::opengl::OpenGlStaticWorldPath::none) {
+    result.resource_id=source.resource_id;
+    result.resource_revision=source.resource_revision;
+  }
+  result.considered_blocks=source.considered_blocks;
+  result.tested_bounds=source.tested_bounds;
+  result.selected_blocks=source.selected_blocks;
+  result.considered_surfaces=source.considered_surfaces;
+  result.selected_surfaces=source.selected_surfaces;
+  result.submitted_draws=source.api_draws;
+  result.submitted_triangles=source.submitted_triangles;
+  result.prepared_rebuilds=source.prepared_rebuilds;
+  result.selection_preparation_ms=source.selection_preparation_ms;
+  return result;
+}
+
 bool external_launch_active{};
 std::string external_last_stage,external_last_reason,external_failure_reason;
 void external_status(std::string_view stage,std::string_view reason="none") {
@@ -8017,7 +8064,11 @@ int run_live_visual_control(
       movement_frame.presentation_use_us=receipts.movement_stamp(movement_render_started);
       movement_frame.presented_eye=hlclient::app::MovementDiagnosticVector3{
           render_scene.camera.position.x,render_scene.camera.position.y,render_scene.camera.position.z};
-      renderer.render_with_gpu_timing(render_scene,extent,movement_frame.frame_number);
+      renderer.render_with_gpu_timing(render_scene,extent,movement_frame.frame_number,
+          movement_diagnostics_enabled);
+      if(const auto& static_world=renderer.statistics().last_static_world_frame;
+          static_world && static_world->frame_number==movement_frame.frame_number)
+        movement_frame.static_world=movement_static_world_frame(*static_world);
       if(renderer.gpu_timing_statistics().last_submission_status==
           hlclient::renderer::opengl::OpenGlGpuTimingStatus::pending) {
         // Mirror only the existing eight pending queries' numeric ownership.

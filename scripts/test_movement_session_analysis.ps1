@@ -380,6 +380,7 @@ try {
     $priorityText=& $analyzer -ReportPath $priorityPath -Json
     $priorityFacts=$priorityText | ConvertFrom-Json -AsHashtable
     Assert ($priorityFacts.source_schema -eq 'hlclient.external-movement.v2') 'V2 format not explicit.'
+    Assert ($priorityFacts.static_world.availability -eq 'not_recorded_in_older_build') 'Older static-world receipt was fabricated.'
     Assert ($priorityFacts.capture.incidents[0].ordinal -eq 7 -and $priorityFacts.capture.incidents[0].actual_pre_us -eq 4000000) 'Priority identity or actual four-second coverage lost.'
     Assert ($priorityFacts.capture.incidents[0].background_samples_omitted -eq 200) 'Reduced sampling hidden.'
     Assert ($priorityFacts.capture.decisions[0].replacement_ordinal -eq 1 -and $priorityFacts.capture.decision_evictions -eq 7) 'Replacement or decision eviction hidden.'
@@ -404,6 +405,40 @@ try {
     $priorityHuman=(& $analyzer -ReportPath $priorityPath) -join "`n"
     Assert ($priorityHuman -match 'фактично 4/1 с' -and $priorityHuman -match 'не повний покадровий') 'V2 coverage or thinning caveat missing.'
     Assert ($priorityHuman -match 'точний кадр=available' -and $priorityHuman -match 'Доставка producer witnesses: unknown_not_recorded') 'Exact frame or unknown delivery caveat absent.'
+    $staticWorld=New-PriorityReport
+    $staticWorld.static_world_receipt=@{schema='hlclient.static-world-frame.v1'
+        scope='completed_renderer_frame_in_recent_window_or_incident';counter_semantics='per_frame_not_cumulative'
+        considered_blocks_semantics='eligible_immutable_pool';tested_bounds_semantics='frustum_calls_including_retests'
+        selected_blocks_semantics='submitted_pool_blocks'
+        selection_preparation_scope='frustum_probe_range_decisions_excludes_gl_submission_and_map_load'
+        submitted_triangles_semantics='geometry_not_visible_pixels';unknown='null'
+        omission='bounded_recent_window_and_incident_sampling'}
+    $staticWorld.recent_window.frames=@(
+        @{frame_number=10;static_world=@{path='prepared_selected';fallback_reason='fragmented_batch'
+            resource_id=81;resource_revision=7;considered_blocks=272;tested_bounds=63;selected_blocks=180
+            considered_surfaces=$null;selected_surfaces=$null;submitted_draws=19;submitted_triangles=1600
+            prepared_rebuilds=$null;selection_preparation_ms=0.125}},
+        @{frame_number=11;static_world=$null})
+    $staticWorldPath=Write-Fixture 'priority-static-world.json' $staticWorld
+    $staticWorldFacts=(& $analyzer -ReportPath $staticWorldPath -Json) | ConvertFrom-Json -AsHashtable
+    Assert ($staticWorldFacts.static_world.coverage -eq 'recent_window_only' -and
+        $staticWorldFacts.static_world.frames_scanned -eq 2 -and
+        $staticWorldFacts.static_world.frames_with_receipt -eq 1 -and
+        $staticWorldFacts.static_world.frames_unavailable -eq 1) 'Static-world bounded coverage was expanded or lost.'
+    Assert ($staticWorldFacts.static_world.paths.prepared_selected -eq 1 -and
+        $staticWorldFacts.static_world.fallback_frames -eq 1 -and
+        $staticWorldFacts.static_world.counters.tested_bounds.total -eq 63 -and
+        $staticWorldFacts.static_world.counters.submitted_triangles.total -eq 1600 -and
+        $staticWorldFacts.static_world.counters.considered_surfaces.observed -eq 0 -and
+        $staticWorldFacts.static_world.selection_preparation_ms_max -eq 0.125 -and
+        $staticWorldFacts.static_world.counters.prepared_rebuilds.observed -eq 0) 'Static-world counters invented missing data.'
+    $staticWorld.static_world_receipt.schema='hlclient.static-world-frame.v99'
+    $staticWorldFuturePath=Write-Fixture 'priority-static-world-future.json' $staticWorld
+    Assert-Rejected { & $analyzer -ReportPath $staticWorldFuturePath -Json } 'Unknown static-world schema silently reinterpreted.'
+    $staticWorld.static_world_receipt.schema='hlclient.static-world-frame.v1'
+    $staticWorld.static_world_receipt.tested_bounds_semantics='unique_blocks_only'
+    $staticWorldChangedSemanticsPath=Write-Fixture 'priority-static-world-changed-semantics.json' $staticWorld
+    Assert-Rejected { & $analyzer -ReportPath $staticWorldChangedSemanticsPath -Json } 'Changed static-world v1 metadata silently reinterpreted.'
     $missingExactWork=New-PriorityReport
     $missingExactWork.capture_policy.exact_frames[0].frame.Remove('prediction_work')
     $missingExactWorkPath=Write-Fixture 'priority-prediction-work-older.json' $missingExactWork

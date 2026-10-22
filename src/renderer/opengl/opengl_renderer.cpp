@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -436,6 +437,7 @@ uniform int u_lightmap_layer;
 uniform samplerCube u_sky_texture;
 uniform int u_sky_surface;
 uniform vec3 u_camera_position;
+#ifndef HLC_NO_DYNAMIC_LIGHTS
 uniform vec3 u_point_light_center;
 uniform vec3 u_point_light_color;
 uniform float u_point_light_radius;
@@ -443,6 +445,7 @@ uniform float u_point_light_intensity;
 uniform int u_effect_light_count;
 uniform vec4 u_effect_light_center_radius[8];
 uniform vec4 u_effect_light_color_intensity[8];
+#endif
 
 out vec4 output_color;
 
@@ -463,6 +466,7 @@ void main()
             u_lightmap_texture,
             vec3(fragment_lightmap_uv, float(u_lightmap_layer))).rgb;
     }
+#ifndef HLC_NO_DYNAMIC_LIGHTS
     if (u_point_light_radius > 0.0) {
         float falloff = max(0.0, 1.0 - length(fragment_world_position -
             u_point_light_center) / u_point_light_radius);
@@ -475,6 +479,7 @@ void main()
         light_factor+=u_effect_light_color_intensity[i].rgb *
             (u_effect_light_color_intensity[i].w*falloff*falloff);
     }
+#endif
     output_color = vec4(base_sample.rgb * light_factor, base_sample.a);
 }
 )GLSL";
@@ -515,6 +520,7 @@ void main()
 
 struct ProgramState {
     GlObject program;
+    bool omits_dynamic_lights{};
     GLint model_view_projection{-1};
     GLint model_transform{-1};
     GLint base_texture{-1};
@@ -530,15 +536,34 @@ struct ProgramState {
     detail::EffectLightUniforms effect_lights;
 };
 
-[[nodiscard]] ProgramState create_world_program()
+[[nodiscard]] ProgramState create_world_program(
+    const bool omit_dynamic_lights = false)
 {
     auto vertex = compile_shader(
         GL_VERTEX_SHADER,
         kWorldVertexShader,
         "Built-in static-world vertex shader");
+    // Both programs are built with the immutable GPU package, never on a
+    // gameplay frame. The ordinary program retains the existing light logic.
+    std::string unlit_fragment_source;
+    const char* fragment_source=kWorldFragmentShader;
+    if (omit_dynamic_lights) {
+        constexpr std::string_view version="#version 330 core\n";
+        const std::string_view original=kWorldFragmentShader;
+        if (!original.starts_with(version)) {
+            fail(OpenGlRendererErrorCode::shader_compile_failed,
+                "Static-world shader has an unexpected version prelude");
+        }
+        unlit_fragment_source.reserve(original.size()+
+            sizeof("#define HLC_NO_DYNAMIC_LIGHTS 1\n"));
+        unlit_fragment_source.append(version);
+        unlit_fragment_source.append("#define HLC_NO_DYNAMIC_LIGHTS 1\n");
+        unlit_fragment_source.append(original.substr(version.size()));
+        fragment_source=unlit_fragment_source.c_str();
+    }
     auto fragment = compile_shader(
         GL_FRAGMENT_SHADER,
-        kWorldFragmentShader,
+        fragment_source,
         "Built-in static-world fragment shader");
 
     const GLuint name = glCreateProgram();
@@ -571,6 +596,7 @@ struct ProgramState {
 
     ProgramState result;
     result.program = std::move(program);
+    result.omits_dynamic_lights=omit_dynamic_lights;
     result.model_view_projection =
         glGetUniformLocation(name, "u_model_view_projection");
     result.model_transform = glGetUniformLocation(name, "u_model_transform");
@@ -582,17 +608,21 @@ struct ProgramState {
     result.sky_texture=glGetUniformLocation(name,"u_sky_texture");
     result.sky_surface=glGetUniformLocation(name,"u_sky_surface");
     result.camera_position=glGetUniformLocation(name,"u_camera_position");
-    result.point_light_center = glGetUniformLocation(name, "u_point_light_center");
-    result.point_light_color = glGetUniformLocation(name, "u_point_light_color");
-    result.point_light_radius = glGetUniformLocation(name, "u_point_light_radius");
-    result.point_light_intensity = glGetUniformLocation(name, "u_point_light_intensity");
-    result.effect_lights=detail::EffectLightUniforms::locate(name);
+    if (!omit_dynamic_lights) {
+        result.point_light_center = glGetUniformLocation(name, "u_point_light_center");
+        result.point_light_color = glGetUniformLocation(name, "u_point_light_color");
+        result.point_light_radius = glGetUniformLocation(name, "u_point_light_radius");
+        result.point_light_intensity = glGetUniformLocation(name, "u_point_light_intensity");
+        result.effect_lights=detail::EffectLightUniforms::locate(name);
+    }
     require_no_gl_error(
         OpenGlRendererErrorCode::program_link_failed,
         "OpenGL uniform lookup");
     if (result.model_view_projection < 0 || result.model_transform < 0 ||
-        result.point_light_center < 0 || result.point_light_color < 0 ||
-        result.point_light_radius < 0 || result.point_light_intensity < 0 || !result.effect_lights.valid() ||
+        (!omit_dynamic_lights &&
+            (result.point_light_center < 0 || result.point_light_color < 0 ||
+             result.point_light_radius < 0 || result.point_light_intensity < 0 ||
+             !result.effect_lights.valid())) ||
         result.base_texture < 0 ||
         result.lightmap_texture < 0 || result.lightmap_enabled < 0 ||
         result.masked_alpha < 0 || result.lightmap_layer < 0 ||
@@ -1049,6 +1079,7 @@ struct GpuWorldResources {
     std::shared_ptr<const world_render::WorldRenderPackage> package_instance;
     world_render::WorldRendererResourceIdentity identity{};
     ProgramState program;
+    std::optional<ProgramState> no_dynamic_light_program;
     GeometryState geometry;
     std::vector<GlObject> base_textures;
     std::vector<GlObject> lightmap_pages;
@@ -1065,11 +1096,14 @@ struct GpuSceneResources {
 };
 
 [[nodiscard]] GpuWorldResources build_gpu_resources(
-    const world_render::WorldRenderPackage& package)
+    const world_render::WorldRenderPackage& package,
+    const bool prepare_no_dynamic_light_program)
 {
     GpuWorldResources result;
     result.identity = package.resource_identity();
     result.program = create_world_program();
+    if (prepare_no_dynamic_light_program)
+        result.no_dynamic_light_program.emplace(create_world_program(true));
     result.geometry = upload_geometry(package);
 
     const auto textures = package.textured_world().textures.textures();
@@ -1127,7 +1161,9 @@ struct FrameDrawState {
     const std::span<const RenderPointLight> effect_lights;
     const GLuint sky_texture;
     const assets::AssetVector3 sky_eye;
+    bool use_no_dynamic_light_world_program{};
     const GpuWorldResources* bound_resources{};
+    const ProgramState* bound_program{};
     RenderMatrix4 model_view_projection;
     RenderMatrix4 model_transform;
     bool transforms_valid{};
@@ -1226,33 +1262,40 @@ void draw_package_range(
             "Visible draw command has an invalid package range");
     }
     const auto& material = materials[material_index];
+    const ProgramState& program =
+        state.use_no_dynamic_light_world_program &&
+        resources.no_dynamic_light_program
+            ? *resources.no_dynamic_light_program : resources.program;
 
-    if(state.bound_resources!=&resources) {
-        glUseProgram(resources.program.program.name());
+    if(state.bound_resources!=&resources || state.bound_program!=&program) {
+        glUseProgram(program.program.name());
         ++counters.program_binds;
         glBindVertexArray(resources.geometry.vertex_array.name());
         ++counters.vertex_array_binds;
-        glUniform3f(resources.program.camera_position,state.sky_eye.x,state.sky_eye.y,state.sky_eye.z);
+        glUniform3f(program.camera_position,state.sky_eye.x,state.sky_eye.y,state.sky_eye.z);
         ++counters.camera_uploads;
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_CUBE_MAP,state.sky_texture);
         ++counters.sky_texture_binds;
-        const auto& light=state.light;
-        if(light && valid_render_point_light(*light) && light->intensity>0.0F) {
-            glUniform3f(resources.program.point_light_center,
-                light->center.x,light->center.y,light->center.z);
-            glUniform3f(resources.program.point_light_color,
-                light->color[0],light->color[1],light->color[2]);
-            glUniform1f(resources.program.point_light_radius,light->radius_units);
-            glUniform1f(resources.program.point_light_intensity,light->intensity);
-        } else {
-            glUniform1f(resources.program.point_light_radius,0.0F);
-            glUniform1f(resources.program.point_light_intensity,0.0F);
+        if (!program.omits_dynamic_lights) {
+            const auto& light=state.light;
+            if(light && valid_render_point_light(*light) && light->intensity>0.0F) {
+                glUniform3f(program.point_light_center,
+                    light->center.x,light->center.y,light->center.z);
+                glUniform3f(program.point_light_color,
+                    light->color[0],light->color[1],light->color[2]);
+                glUniform1f(program.point_light_radius,light->radius_units);
+                glUniform1f(program.point_light_intensity,light->intensity);
+            } else {
+                glUniform1f(program.point_light_radius,0.0F);
+                glUniform1f(program.point_light_intensity,0.0F);
+            }
+            program.effect_lights.upload(state.effect_lights);
+            ++counters.light_uploads;
         }
-        resources.program.effect_lights.upload(state.effect_lights);
-        ++counters.light_uploads;
-        glUniform1i(resources.program.lightmap_layer,0);
+        glUniform1i(program.lightmap_layer,0);
         state.bound_resources=&resources;
+        state.bound_program=&program;
         state.transforms_valid=false;
         state.base_texture_valid=false;
         state.lightmap_texture_valid=false;
@@ -1262,18 +1305,18 @@ void draw_package_range(
     }
     const GLint sky_surface=state.sky_texture && material.sky_surface ? 1 : 0;
     if(state.sky_surface!=sky_surface) {
-        glUniform1i(resources.program.sky_surface,sky_surface);
+        glUniform1i(program.sky_surface,sky_surface);
         state.sky_surface=sky_surface;
         ++counters.material_uniform_uploads;
     }
     if(!state.transforms_valid || state.model_view_projection!=model_view_projection) {
-        glUniformMatrix4fv(resources.program.model_view_projection,1,GL_FALSE,
+        glUniformMatrix4fv(program.model_view_projection,1,GL_FALSE,
             model_view_projection.values.data());
         state.model_view_projection=model_view_projection;
         ++counters.transform_uploads;
     }
     if(!state.transforms_valid || state.model_transform!=model_transform) {
-        glUniformMatrix4fv(resources.program.model_transform,1,GL_FALSE,
+        glUniformMatrix4fv(program.model_transform,1,GL_FALSE,
             model_transform.values.data());
         state.model_transform=model_transform;
         ++counters.transform_uploads;
@@ -1303,14 +1346,14 @@ void draw_package_range(
     }
     const GLint lightmap_enabled=atlas ? 1 : 0;
     if(state.lightmap_enabled!=lightmap_enabled) {
-        glUniform1i(resources.program.lightmap_enabled,lightmap_enabled);
+        glUniform1i(program.lightmap_enabled,lightmap_enabled);
         state.lightmap_enabled=lightmap_enabled;
         ++counters.material_uniform_uploads;
     }
     const GLint masked_alpha=material.base_texture_alpha_mode==
         assets::WorldTextureAlphaMode::masked_index_255 ? 1 : 0;
     if(state.masked_alpha!=masked_alpha) {
-        glUniform1i(resources.program.masked_alpha,masked_alpha);
+        glUniform1i(program.masked_alpha,masked_alpha);
         state.masked_alpha=masked_alpha;
         ++counters.material_uniform_uploads;
     }
@@ -3087,7 +3130,7 @@ public:
         try {
             const auto hardware = query_hardware_limits();
             validate_package(*package, hardware);
-            auto candidate = build_gpu_resources(*package);
+            auto candidate = build_gpu_resources(*package, true);
             candidate.package_instance = package;
             resources_.emplace(std::move(candidate));
             ++statistics_.upload_count;
@@ -3156,7 +3199,7 @@ public:
             GpuSceneResources candidate;
             candidate.scene_instance = scene;
             candidate.identity = identity;
-            candidate.world = build_gpu_resources(*world_package);
+            candidate.world = build_gpu_resources(*world_package, true);
             candidate.world.package_instance = world_package;
 
             const auto& brush_package =
@@ -3164,7 +3207,7 @@ public:
             if (brush_package) {
                 validate_package(*brush_package, hardware);
                 candidate.brushes.emplace(
-                    build_gpu_resources(*brush_package));
+                    build_gpu_resources(*brush_package, false));
                 candidate.brushes->package_instance = brush_package;
                 if (const auto& bank = scene->brush_library().alternate_textures())
                     for (const auto& texture : bank->textures())
@@ -3397,18 +3440,23 @@ void OpenGlRenderer::reset_session_resources()
 }
 
 void OpenGlRenderer::render_with_gpu_timing(const RenderScene& scene,const RenderExtent extent,
-    const std::uint64_t frame_number)
+    const std::uint64_t frame_number,const bool capture_static_world_receipt)
 {
     require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"GPU timing prior GL state");
     const bool active=implementation_->begin_gpu_timing(frame_number);
+    static_world_receipt_frame_=capture_static_world_receipt ?
+        std::optional{frame_number} : std::nullopt;
     try {
         render(scene,extent);
         if(active)require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
             "Rendered frame before GPU timing completion");
     } catch(...) {
+        static_world_receipt_frame_.reset();
+        implementation_->statistics().last_static_world_frame.reset();
         if(active)implementation_->end_gpu_timing(false);
         throw;
     }
+    static_world_receipt_frame_.reset();
     if(active)implementation_->end_gpu_timing();
 }
 std::optional<OpenGlGpuFrameTiming> OpenGlRenderer::poll_gpu_timing() {
@@ -3438,6 +3486,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         throw std::invalid_argument{"Scene MSAA request must be Off, 2, 4 or 8"};
     implementation_->begin_decals();
     auto& statistics = implementation_->statistics();
+    statistics.last_static_world_frame.reset();
     const int width = std::max(extent.width, 0);
     const int height = std::max(extent.height, 0);
     statistics.last_extent = RenderExtent{width, height};
@@ -3734,8 +3783,15 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     }
 
     FrameDrawCounters frame;
-    FrameDrawState draw_state{scene.transient_world_light,scene.effect_lights(),
+    const auto effect_lights=scene.effect_lights();
+    const bool no_positive_transient_light=
+        !scene.transient_world_light ||
+        !valid_render_point_light(*scene.transient_world_light) ||
+        scene.transient_world_light->intensity<=0.0F;
+    FrameDrawState draw_state{scene.transient_world_light,effect_lights,
         sky_texture,view_camera.position};
+    draw_state.use_no_dynamic_light_world_program=
+        no_positive_transient_light && effect_lights.empty();
     if (scene.static_world->scene_package) {
         auto& resources = implementation_->ensure_scene_resources(
             scene.static_world->scene_package);
@@ -3747,7 +3803,19 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         }
         const auto& world_package =
             *scene.static_world->scene_package->world_package();
+        std::optional<OpenGlStaticWorldFrameReceipt> static_receipt;
+        if (static_world_receipt_frame_) {
+            static_receipt.emplace();
+            static_receipt->frame_number=*static_world_receipt_frame_;
+            static_receipt->resource_id=world_package.resource_id();
+            static_receipt->resource_revision=world_package.resource_revision();
+        }
+        const auto static_draws_before=frame.draw_calls;
+        const auto static_brush_draws_before=frame.brush_draw_calls;
+        const auto static_triangles_before=frame.triangles;
         if (scene.static_world->visible_draw_list) {
+            if (static_receipt)
+                static_receipt->path=OpenGlStaticWorldPath::visible_commands;
             const auto commands =
                 scene.static_world->visible_draw_list->commands();
             for (const auto& command : commands) {
@@ -3819,12 +3887,33 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 world_package.prepared_draw_batches();
             const auto prepared_blocks =
                 world_package.prepared_draw_blocks();
+            using SelectionClock=std::chrono::steady_clock;
+            const auto selection_start=static_receipt ?
+                SelectionClock::now() : SelectionClock::time_point{};
+            SelectionClock::duration draw_duration{};
             const auto prepared_frustum =
                 prepared_batches.size() == batches.size() &&
                     !prepared_blocks.empty()
                 ? world_visibility::WorldViewFrustum::from_view_projection(
                       *matrix.matrix)
                 : world_visibility::WorldViewFrustumCreateResult{};
+            if (static_receipt) {
+                std::uint64_t candidate_surfaces=0U;
+                for (const auto& batch : batches)
+                    candidate_surfaces+=batch.source_surface_count;
+                static_receipt->considered_surfaces=candidate_surfaces;
+                static_receipt->selected_surfaces=0U;
+                if (prepared_frustum.frustum) {
+                    static_receipt->path=OpenGlStaticWorldPath::prepared_selected;
+                    static_receipt->considered_blocks=prepared_blocks.size();
+                    static_receipt->tested_bounds=0U;
+                    static_receipt->selected_blocks=0U;
+                } else {
+                    static_receipt->path=OpenGlStaticWorldPath::original_batches;
+                    static_receipt->fallback=
+                        OpenGlStaticWorldFallback::prepared_unavailable;
+                }
+            }
             // Near-all-visible views spend more CPU testing every block than
             // the rejected geometry can repay. Probe fixed, evenly spaced
             // immutable blocks; a positive probe only enables the detailed
@@ -3840,6 +3929,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     const auto block_index =
                         (probe * prepared_blocks.size()) / probe_count;
                     ++statistics.prepared_world_probed_block_count;
+                    if (static_receipt)++*static_receipt->tested_bounds;
                     if (classify_prepared_world_bounds(
                             *prepared_frustum.frustum,
                             prepared_blocks[block_index].bounds) ==
@@ -3853,6 +3943,11 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 all_batch_bypass = outside_probes < 2U;
                 if (all_batch_bypass) {
                     ++statistics.prepared_world_all_batch_bypass_frame_count;
+                    if (static_receipt) {
+                        static_receipt->path=OpenGlStaticWorldPath::prepared_bypass;
+                        static_receipt->fallback=OpenGlStaticWorldFallback::
+                            insufficient_probe_rejections;
+                    }
                 }
             }
             constexpr std::size_t maximum_runs_per_batch = 4U;
@@ -3861,13 +3956,25 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 const auto& batch = batches[batch_index];
                 const auto draw_range = [&](const std::uint32_t first,
                                             const std::uint32_t count) {
+                    const auto draw_start=static_receipt ?
+                        SelectionClock::now() : SelectionClock::time_point{};
                     draw_package_range(resources.world, world_package,
                         first, count, batch.render_material_index,
                         *matrix.matrix, RenderMatrix4{}, false,
                         frame, draw_state);
+                    if (static_receipt)
+                        draw_duration+=SelectionClock::now()-draw_start;
                 };
                 if (!prepared_frustum.frustum || all_batch_bypass) {
                     ++statistics.prepared_world_full_batch_fallback_count;
+                    if (static_receipt) {
+                        *static_receipt->selected_surfaces+=
+                            batch.source_surface_count;
+                        if (static_receipt->selected_blocks &&
+                            batch_index<prepared_batches.size())
+                            *static_receipt->selected_blocks+=
+                                prepared_batches[batch_index].block_count;
+                    }
                     draw_range(batch.first_index, batch.index_count);
                     continue;
                 }
@@ -3877,9 +3984,17 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     prepared.block_count >
                         prepared_blocks.size() - prepared.first_block) {
                     ++statistics.prepared_world_full_batch_fallback_count;
+                    if (static_receipt) {
+                        static_receipt->fallback=OpenGlStaticWorldFallback::
+                            invalid_prepared_batch;
+                        static_receipt->selected_blocks.reset();
+                        *static_receipt->selected_surfaces+=
+                            batch.source_surface_count;
+                    }
                     draw_range(batch.first_index, batch.index_count);
                     continue;
                 }
+                if (static_receipt)++*static_receipt->tested_bounds;
                 const auto relation = classify_prepared_world_bounds(
                     *prepared_frustum.frustum, prepared.bounds);
                 if (relation == PreparedBlockFrustumRelation::outside) {
@@ -3890,12 +4005,19 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 if (relation == PreparedBlockFrustumRelation::inside) {
                     statistics.prepared_world_selected_block_count +=
                         prepared.block_count;
+                    if (static_receipt) {
+                        if (static_receipt->selected_blocks)
+                            *static_receipt->selected_blocks+=prepared.block_count;
+                        *static_receipt->selected_surfaces+=
+                            batch.source_surface_count;
+                    }
                     draw_range(batch.first_index, batch.index_count);
                     continue;
                 }
                 const auto blocks = prepared_blocks.subspan(
                     prepared.first_block, prepared.block_count);
                 std::size_t selected_blocks = 0U;
+                std::size_t selected_surfaces = 0U;
                 std::size_t run_count = 0U;
                 struct RetainedRun {
                     std::uint32_t first_index;
@@ -3904,10 +4026,13 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 std::array<RetainedRun, maximum_runs_per_batch> runs{};
                 bool in_run = false;
                 for (const auto& block : blocks) {
+                    if (static_receipt)++*static_receipt->tested_bounds;
                     const bool selected = classify_prepared_world_bounds(
                         *prepared_frustum.frustum, block.bounds) !=
                         PreparedBlockFrustumRelation::outside;
                     selected_blocks += static_cast<std::size_t>(selected);
+                    if (static_receipt && selected)
+                        selected_surfaces+=block.source_surface_count;
                     if (selected && !in_run) {
                         ++run_count;
                         if (run_count > maximum_runs_per_batch) {
@@ -3927,6 +4052,15 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     ++statistics.prepared_world_full_batch_fallback_count;
                     statistics.prepared_world_selected_block_count +=
                         prepared.block_count;
+                    if (static_receipt) {
+                        if (static_receipt->fallback==OpenGlStaticWorldFallback::none)
+                            static_receipt->fallback=OpenGlStaticWorldFallback::
+                                fragmented_batch;
+                        if (static_receipt->selected_blocks)
+                            *static_receipt->selected_blocks+=prepared.block_count;
+                        *static_receipt->selected_surfaces+=
+                            batch.source_surface_count;
+                    }
                     draw_range(batch.first_index, batch.index_count);
                     continue;
                 }
@@ -3934,11 +4068,31 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     selected_blocks;
                 statistics.prepared_world_rejected_block_count +=
                     prepared.block_count - selected_blocks;
+                if (static_receipt) {
+                    if (static_receipt->selected_blocks)
+                        *static_receipt->selected_blocks+=selected_blocks;
+                    *static_receipt->selected_surfaces+=selected_surfaces;
+                }
                 for (std::size_t run = 0U; run < run_count; ++run) {
                     draw_range(runs[run].first_index,
                         runs[run].end_index - runs[run].first_index);
                 }
             }
+            if (static_receipt) {
+                const auto selection_duration=
+                    SelectionClock::now()-selection_start-draw_duration;
+                static_receipt->selection_preparation_ms=
+                    std::chrono::duration<double,std::milli>(
+                        selection_duration).count();
+            }
+        }
+        if (static_receipt) {
+            static_receipt->api_draws=frame.draw_calls-static_draws_before-
+                (frame.brush_draw_calls-static_brush_draws_before);
+            if (static_receipt->path!=OpenGlStaticWorldPath::visible_commands)
+                static_receipt->submitted_triangles=
+                    frame.triangles-static_triangles_before;
+            statistics.last_static_world_frame=std::move(static_receipt);
         }
         if (scene.static_world->runtime_brushes) {
             implementation_->gpu_world_subpass_boundary(
