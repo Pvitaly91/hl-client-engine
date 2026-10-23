@@ -99,6 +99,10 @@ struct WindowsBinaryIdentity final {
 enum class AuthenticodePolicy {
     required,
     not_required_for_project_owned_binary,
+    // Normal distributed project executables may carry Windows' download-zone
+    // metadata. This opts into only bounded, valid Zone.Identifier metadata;
+    // it does not remove that metadata or permit arbitrary named streams.
+    not_required_for_downloaded_project_owned_binary,
 };
 
 struct WindowsBinaryObservationPolicy final {

@@ -39,6 +39,66 @@ TEST_CASE("E31 literal endpoint parsing separates target from console text", "[e
     for(const auto s:{"192.168.0.102:0","192.168.0.102:65536","192.168.0.256:1","192.168.0:3","1.2.3.4.5:7","192.168.0.102;quit","connect 192.168.0.102\nquit","192.168.0.102\n","192.168.0.102:1234 extra","192.168.0.102:12:34","255.255.255.255:12","239.0.0.1:12","0.0.0.0:7","127.0.0.1:27015","192.168.0.255:9","192.168.0.1:-1","localhost:123","+connect 192.168.0.102:27016","192.168.0.1:\t123"}) {INFO(s);CHECK_FALSE(core::normalize_external_endpoint(s));}
     CHECK_FALSE(core::normalize_external_endpoint(std::string(129,'1')));
 }
+TEST_CASE("Launcher fullscreen default and FPS flag persist without changing existing windowed profiles",
+          "[e31][launcher][config][launcher-fps][no-stock]")
+{
+    const core::ExternalLaunchConfiguration defaults;
+    CHECK(defaults.video.mode==core::VideoWindowMode::borderless);
+    CHECK_FALSE(defaults.show_fps);
+    Directory directory;const auto path=directory.path/L"launcher.json";
+    for(const bool enabled:{false,true})for(const auto mode:{core::VideoWindowMode::windowed,core::VideoWindowMode::borderless}) {
+        auto configuration=defaults;configuration.show_fps=enabled;configuration.video.mode=mode;
+        const auto encoded=core::encode_external_launch_configuration(configuration);REQUIRE(encoded);
+        const auto decoded=core::decode_external_launch_configuration(*encoded);REQUIRE(decoded);
+        CHECK(*decoded.configuration==configuration);
+        REQUIRE(native::save_external_settings(path,configuration));
+        const auto loaded=native::load_external_settings(path,defaults);REQUIRE(loaded.status=="loaded");
+        CHECK(loaded.configuration.show_fps==enabled);CHECK(loaded.configuration.video.mode==mode);
+    }
+}
+TEST_CASE("Launcher FPS decoding defaults old schemas to off and rejects malformed overrides",
+          "[e31][launcher][config][launcher-fps][no-stock]")
+{
+    const std::string v1=R"({"schema":"hlclient.external-launch.v1","version":1,"endpoint":"192.168.0.104:27016","name":"Existing Player","asset_root":"D:/HL","steam_api_runtime":"D:/HL/steam_api.dll","display_index":0,"window_mode":"windowed","width":1280,"height":720,"vsync":false,"brightness":0,"gamma":1,"contrast":1,"volume":35})";
+    const auto upgrade=[](std::string value,char from,char to,std::string_view extra) {
+        const auto schema=value.find(std::string{".v"}+from);REQUIRE(schema!=value.npos);value[schema+2]=to;
+        const auto version=value.find(std::string{"\"version\":"}+from);REQUIRE(version!=value.npos);value[version+10]=to;
+        value.insert(value.size()-1,extra);return value;
+    };
+    const auto v2=upgrade(v1,'1','2',",\"msaa_samples\":4,\"hud_scale_auto\":true,\"hud_scale\":1");
+    const auto v3=upgrade(v2,'2','3',",\"movement_diagnostics\":false");
+    for(const auto& profile:{v1,v2,v3}) {
+        const auto legacy=core::decode_external_launch_configuration(profile);REQUIRE(legacy);
+        CHECK_FALSE(legacy.configuration->show_fps);
+        CHECK(legacy.configuration->video.mode==core::VideoWindowMode::windowed);
+        auto enabled=profile;enabled.insert(enabled.size()-1,",\"show_fps\":true");
+        const auto explicit_value=core::decode_external_launch_configuration(enabled);REQUIRE(explicit_value);
+        CHECK(explicit_value.configuration->show_fps);
+        CHECK(explicit_value.configuration->video==legacy.configuration->video);
+        for(const auto invalid:{"0","1","\"true\"","null","{}","[]"}) {
+            auto malformed=profile;malformed.insert(malformed.size()-1,",\"show_fps\":"+std::string{invalid});
+            CHECK_FALSE(core::decode_external_launch_configuration(malformed));
+        }
+        enabled.insert(enabled.size()-1,",\"show_fps\":false");
+        CHECK_FALSE(core::decode_external_launch_configuration(enabled));
+        auto unknown=profile;unknown.insert(unknown.size()-1,",\"unknown_fps\":true");
+        CHECK_FALSE(core::decode_external_launch_configuration(unknown));
+    }
+}
+TEST_CASE("Launcher FPS merge preserves external edits and applies explicit toggles",
+          "[e31][launcher][config][launcher-fps][no-stock]")
+{
+    const core::ExternalLaunchConfiguration baseline;
+    auto current=baseline;current.show_fps=true;current.volume=72;
+    auto edited=baseline;edited.name="Edited";
+    const auto merged=core::merge_external_launch_configuration(baseline,edited,current);REQUIRE(merged);
+    CHECK(merged->show_fps);CHECK(merged->name=="Edited");CHECK(merged->volume==72);
+    auto explicit_off=current;explicit_off.show_fps=false;
+    const auto disabled=core::merge_external_launch_configuration(current,explicit_off,current);REQUIRE(disabled);
+    CHECK_FALSE(disabled->show_fps);CHECK(disabled->volume==72);
+    const auto enabled=core::merge_external_launch_configuration(baseline,current,explicit_off);REQUIRE(enabled);
+    CHECK(enabled->show_fps);
+}
 TEST_CASE("E31 names use the existing bounded printable ASCII wire values", "[e31][launcher][config]")
 {
     CHECK(core::valid_external_player_name("Player A 123"));CHECK(core::valid_external_player_name(std::string(31,'a')));
@@ -241,10 +301,13 @@ TEST_CASE("E31.1 MSAA publication never replaces a foreign leaf and failures hav
 TEST_CASE("E31 settings use atomic replacement and preserve corrupt settings backup", "[e31][launcher][windows]")
 {
     Directory d;const auto path=d.path/L"launcher.json";core::ExternalLaunchConfiguration defaults;
-    CHECK(native::load_external_settings(path,defaults).status=="defaults");REQUIRE(native::save_external_settings(path,defaults));
+    const auto fresh=native::load_external_settings(path,defaults);CHECK(fresh.status=="defaults");
+    CHECK(fresh.configuration.video.mode==core::VideoWindowMode::borderless);
+    REQUIRE(native::save_external_settings(path,defaults));
     auto loaded=native::load_external_settings(path,defaults);CHECK(loaded.status=="loaded");CHECK(loaded.configuration.endpoint==defaults.endpoint);
     auto next=defaults;next.name="Next";next.image.gamma=2;REQUIRE(native::save_external_settings(path,next));loaded=native::load_external_settings(path,defaults);CHECK(loaded.configuration.name=="Next");CHECK(loaded.configuration.image.gamma==2);
     REQUIRE(native::write_external_text_atomic(path,"corrupt",true));loaded=native::load_external_settings(path,defaults);CHECK(loaded.status=="corrupt_settings_backed_up");CHECK(loaded.configuration.name==defaults.name);CHECK(native::read_external_text(loaded.corrupt_backup,32)=="corrupt");CHECK_FALSE(std::filesystem::exists(path));
+    CHECK(loaded.configuration.video.mode==core::VideoWindowMode::windowed);
     CHECK_FALSE(native::write_external_text_atomic(loaded.corrupt_backup,"overwrite",false));CHECK(native::read_external_text(loaded.corrupt_backup,32)=="corrupt");
 }
 TEST_CASE("E33 shared configuration merges only explicit fields without stale launcher rollback",

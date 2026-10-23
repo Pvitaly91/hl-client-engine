@@ -1,0 +1,82 @@
+{
+  "schema": "hlclient.windows10-portable-transfer-delivery.v1",
+  "status": "ready_for_user_windows10_test",
+  "archive": {
+    "path": "D:/DEV/CPP/HL-Client-engine/dist/HLClientEngine-Win10-x86-e044684fe00e-20261022T233832Z-36315d.zip",
+    "bytes": 4144924,
+    "sha256": "C91DD66B2FE2DCA1900C60574D91F3753F98A613C5F450F992A5EB588C4A7670",
+    "root": "HLClientEngine",
+    "entrypoint": "HLClientLauncher.exe",
+    "file_count": 16
+  },
+  "accepted_base": {
+    "run_id": "7844710d7bf5a0affc3d95296cee5a6d",
+    "client_sha256": "E044684FE00E688F555988478E83E7DEF037EC35844C05F19E7B540C45CAA32C",
+    "launcher_sha256": "BF7611EBB7606E5ADF54987CDBB6EE0F95E3E431CC8DFFC87EE17E8A5B90B941",
+    "client_bytes": 5568000,
+    "client_exit": 0,
+    "terminal_reason": "application_closed",
+    "gameplay_observed": true,
+    "verification": "Matching launch-manifest and external-run-report identities, supplied as positive user run. Not new manual acceptance on another PC."
+  },
+  "provenance": {
+    "branch": "main",
+    "head": "14872565a24d6ca29f9cd4de436d3ff269d6e3c8",
+    "source_dirty": true,
+    "input_directory": "D:/DEV/CPP/HLC-steamcfg-5e48b7c1/build/bin/Release",
+    "client_launcher_helper_sdl_copied_byte_for_byte": true,
+    "delivery_sdl_sha256": "AD833F09FAD8D99EADFDB1A765A76F9F20872A3AB6FADBEF648F09334F2FAC87",
+    "sdl_acceptance_scope": "Exact delivery-directory companion; accepted-run identity records do not separately bind SDL hash. Not replaced by different source-build SDL.",
+    "production_source_edits": 0,
+    "builds": 0,
+    "working_binaries_overwritten": false,
+    "existing_user_settings_modified": false,
+    "git_mutations": 0,
+    "live_connections": 0,
+    "steam_auth_tests": 0,
+    "uploads": 0
+  },
+  "runtime": {
+    "binary_architecture": "x86/Win32 for all 8 EXE/DLL files",
+    "os_target": "Windows 10 x64 with WOW64; hard API minimum version 1703/build 15063. Steam is an independent external prerequisite; no complete 32-bit-Windows Steam workflow claim.",
+    "cpu": "MSVC default SSE2 baseline inferred from retained Release flags. No new AVX2 requirement or rebuild; no exhaustive disassembly/old CPU test.",
+    "graphics": "Vendor driver supporting OpenGL 3.3 Core",
+    "vc_runtime": "Four official signed x86 VC143 Release DLLs 14.34.31948.0 from matching MSVC14.34 REDIST, deployed app-local",
+    "runtime_installer_required": false,
+    "valve_assets_and_steam_api_bundled": false,
+    "pdb": "No CodeView PDB identity in the four delivery images; matching Release symbols unavailable. Separate local status records by binary SHA; no Debug PDB substitution."
+  },
+  "checks": {
+    "dependency_import_delay_transitive_audit": "passed",
+    "dependency_negative_cases": ["missing client", "wrong expected SHA", "wrong PE architecture", "unclassified DLL", "Debug CRT import"],
+    "package_wrong_client_sha_rejected": "passed",
+    "powershell_scripts_parse": "passed",
+    "git_diff_check_ignoring_unpackaged_sdk_submodule": "passed",
+    "extracted_allowlist_and_all_file_hashes": "passed",
+    "outside_repository_space_unicode_path": "passed",
+    "system_only_path_and_loaded_module_origins": "passed",
+    "offline_cases": 9,
+    "offline_cases_result": "passed",
+    "packaged_helper_fake_child_assertions": 112,
+    "packaged_helper_fake_child_result": "passed",
+    "clean_folder_smoke": "passed",
+    "windows10_runtime": "not_run",
+    "new_windows_user_profile": "not_run",
+    "native_launcher_child_button_launch": "source_contract_only",
+    "test_host": "Windows build 26300; not Windows 10 runtime evidence",
+    "sandbox_note": "Native launcher offline UI initially exited 2 under restricted sandbox. Identical immutable binaries passed outside sandbox under ordinary Windows API access. No production fix or security setting change was made."
+  },
+  "limitations": [
+    "Launcher --offline-ui-check bypasses settings load/save; child environment overrides do not redirect SHGetKnownFolderPath into a real new profile.",
+    "Native launcher button launching child/helper is source-audited; extracted binaries and helper fake-child contracts were dynamically tested directly.",
+    "Unchanged launcher has legacy initial D:\\DEV paths. README requires selecting the user's own Half-Life directory and official x86 steam_api.dll before connecting. No old user settings were copied.",
+    "No new Steam, gameplay, hardware performance, unsupported GPU, or Windows 10 runtime test was performed."
+  ],
+  "reproduce": {
+    "script": "scripts/package_windows10_release.ps1",
+    "arguments": "-ReleaseDirectory D:\\DEV\\CPP\\HLC-steamcfg-5e48b7c1\\build\\bin\\Release -AcceptedRunDirectory C:\\Users\\admin\\AppData\\Local\\HLClientEngine\\runs\\7844710d7bf5a0affc3d95296cee5a6d",
+    "scope": "Developer-side PowerShell 7 tooling only; no scripts or development tools needed by the shipped native launcher.",
+    "local_receipt": "dist/HLClientEngine-Win10-x86-e044684fe00e-20261022T233832Z-36315d.packaging/packaging-receipt.json",
+    "local_full_smoke_evidence": "dist/HLClientEngine-Win10-x86-e044684fe00e-20261022T233832Z-36315d.packaging/clean-folder-smoke.json"
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "schema": "hlclient.unified-windows10-launcher.v1",
+  "status": "ready_for_user_windows10_startup_reproduction",
+  "archive": {
+    "path": "dist/HLClientEngine-Win10.zip",
+    "bytes": 4168536,
+    "sha256": "5D946DBF574D9C2E827DA2240401D17B65D066D810149E67342010E757D4755E",
+    "entrypoint": "HLClientEngine/HLClientLauncher.exe",
+    "file_count": 16
+  },
+  "identities": {
+    "client_sha256": "E044684FE00E688F555988478E83E7DEF037EC35844C05F19E7B540C45CAA32C",
+    "client_rebuilt": false,
+    "launcher_sha256": "77BB009FD23CFCB30BC4B34CC92C2F8A36B301D2D759A6EC5F8AC805B5DAA447",
+    "launcher_rebuilt": true,
+    "accepted_gameplay_run": "7844710d7bf5a0affc3d95296cee5a6d",
+    "acceptance_scope": "Prior run acceptance binds the unchanged client. New launcher validated offline; no new gameplay acceptance claimed."
+  },
+  "changes": [
+    "Explicit project-download policy accepts bounded valid Zone.Identifier metadata without deleting it; strict default policy and required Steam signatures remain unchanged.",
+    "One native launcher and canonical full ZIP for both ordinary use and optional gameplay/system diagnostics.",
+    "Always-on bounded, flushed startup journal before SDL and UI initialization; independent from gameplay/system checkboxes.",
+    "Retain sanitized fatal SDL/OpenGL client error output instead of discarding everything except status markers.",
+    "Native Windows errors at failing APIs and client exit codes in decimal/hex with appropriate hints.",
+    "Native startup ZIP export and folder buttons; no PowerShell or installed archiver required.",
+    "Delay-load SDL and load exact adjacent DLL with restricted search so missing SDL produces startup evidence.",
+    "Resolve newer DPI APIs dynamically with fallback rather than hard imports.",
+    "Retire the old script GUI from packaging; previous deliveries remain recoverable under dist/archive."
+  ],
+  "startup_logs": {
+    "default": "%LOCALAPPDATA%/HLClientEngine/startup/<UTC-PID-ID>",
+    "fallback": "%TEMP%/HLClientEngine/startup/<UTC-PID-ID>",
+    "files": ["launcher-startup.log", "client-startup.log"],
+    "export_button": "Зберегти ZIP логів…",
+    "folder_button": "Папка логів запуску",
+    "gameplay_diagnostics_required": false,
+    "system_diagnostics_required": false,
+    "automatically_uploads": false
+  },
+  "verification": {
+    "release_build": "passed",
+    "debug_build": "passed",
+    "release_extracted_package_checks": 12,
+    "release_checks_result": "passed",
+    "debug_native_ui_and_real_child_failure_checks": "passed",
+    "child_video_driver_startup_failure_with_diagnostics_off": "passed; exact fatal text retained and ZIP contents compared",
+    "missing_adjacent_sdl": "passed; delayed loader preserves native error and exportable logs",
+    "helper_fake_child_assertions": 112,
+    "helper_result": "passed",
+    "package_allowlist_and_extracted_hashes": "passed",
+    "existing_user_settings_unchanged": true,
+    "windows10_runtime": "not_run",
+    "live_connections": 0,
+    "steam_auth_tests": 0,
+    "commits": 0,
+    "pushes": 0,
+    "actual_other_pc_startup_cause": "Win10 report ce93bc0e5a0c442688890499111b64ca identifies client_binary_alternate-data-stream before process creation (PID0, null exit). The report does not name the stream; normal Windows download-zone metadata is the likely trigger.",
+    "download_zone_identity_release": "passed: 260 assertions in 8 cases",
+    "download_zone_identity_debug": "passed: 260 assertions in 8 cases",
+    "reparse_test_limit": "Symbolic-link creation capability unavailable: reparse assertion skipped; production reparse rejection code unchanged.",
+    "downloaded_executable_process_test": "passed: both copied EXEs retain Zone.Identifier, executable hashes unchanged, real suspended child image verified and started",
+    "arbitrary_or_malformed_streams_rejected": "passed",
+    "original_and_promoted_package_file_hashes": "passed"
+  },
+  "local_evidence": {
+    "packaging_receipt": "manual-artifacts/task-records/win10-download-zone-20261023/package/.HLClientEngine-Win10-e044684fe00e-20261023T124027Z-2afc55.packaging/packaging-receipt.json",
+    "smoke": "manual-artifacts/task-records/win10-download-zone-20261023/package/.HLClientEngine-Win10-e044684fe00e-20261023T124027Z-2afc55.packaging/clean-folder-smoke.json",
+    "debug": "manual-artifacts/task-records/win10-download-zone-20261023/Debug/debug-checks.json",
+    "previous_packages_recoverable": "dist/archive/before-download-zone-fix-20261023T124254Z"
+  },
+  "download_zone_policy": {
+    "enum": "AuthenticodePolicy::not_required_for_downloaded_project_owned_binary",
+    "abi": "Existing observation policy struct layout preserved; default strict policy not changed.",
+    "maximum_metadata_bytes": 16384,
+    "allowed_stream_name": ":Zone.Identifier:$DATA (ordinal, case-insensitive)",
+    "metadata_format": "Bounded text or UTF-16LE BOM, one ZoneTransfer section and unique ZoneId 0-4. Other field values are not used or logged.",
+    "metadata_removed": false,
+    "security_settings_changed": false,
+    "reference": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/6e3f7352-d11c-4d76-8c39-2516a9df36e8"
+  },
+  "build_notes": {
+    "isolated_launcher_outputs": "manual-artifacts/task-records/win10-download-zone-20261023/Release and Debug",
+    "msbuild_warning": "MSB8028 shared intermediate metadata warnings while evaluating project references; actual main.cpp compiled with warnings-as-errors and both configurations linked successfully.",
+    "initial_build": "Sandbox MSBuild worker stalled. Forced termination was rejected by automatic review; no process was killed. Completed with a separate single-worker build and isolated outputs."
+  }
+}

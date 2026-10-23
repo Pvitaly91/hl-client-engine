@@ -136,8 +136,70 @@ private:
     return false;
 }
 
+[[nodiscard]] bool valid_download_zone_text(std::string_view text) noexcept
+{
+    if(text.starts_with("\xef\xbb\xbf"))text.remove_prefix(3);
+    const auto trim=[](std::string_view value) noexcept {
+        while(!value.empty() && (value.front()==' ' || value.front()=='\t' || value.front()=='\r'))value.remove_prefix(1);
+        while(!value.empty() && (value.back()==' ' || value.back()=='\t' || value.back()=='\r'))value.remove_suffix(1);
+        return value;
+    };
+    const auto equal=[](std::string_view a,std::string_view b) noexcept {
+        if(a.size()!=b.size())return false;
+        for(std::size_t i=0;i<a.size();++i){const auto lower=[](char c){return c>='A' && c<='Z'?static_cast<char>(c-'A'+'a'):c;};if(lower(a[i])!=lower(b[i]))return false;}
+        return true;
+    };
+    for(const unsigned char c:text)if((c<32U && c!='\r' && c!='\n' && c!='\t') || c==127U)return false;
+    bool section{},zone{};
+    while(!text.empty()) {
+        const auto end=text.find('\n');const auto line=trim(text.substr(0,end));
+        if(end==std::string_view::npos)text={};else text.remove_prefix(end+1U);
+        if(line.empty() || line.front()==';' || line.front()=='#')continue;
+        if(line.front()=='['){if(section || !equal(line,"[ZoneTransfer]"))return false;section=true;continue;}
+        const auto separator=line.find('=');if(!section || separator==std::string_view::npos)return false;
+        const auto key=trim(line.substr(0,separator));if(key.empty())return false;
+        if(equal(key,"ZoneId")) {
+            const auto value=trim(line.substr(separator+1U));
+            if(zone || value.size()!=1U || value.front()<'0' || value.front()>'4')return false;
+            zone=true;
+        }
+        // Other metadata (for example URL fields) is never used or logged.
+    }
+    return section && zone;
+}
+
+[[nodiscard]] bool valid_download_zone_stream(const std::filesystem::path& path,
+    const HANDLE executable,const LARGE_INTEGER expected_size) noexcept
+{
+    try {
+        constexpr LONGLONG maximum_zone_bytes=16U*1024U;
+        if(expected_size.QuadPart<=0 || expected_size.QuadPart>maximum_zone_bytes)return false;
+        UniqueHandle stream{::CreateFileW((path.wstring()+L":Zone.Identifier").c_str(),
+            GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
+        if(!stream)return false;
+        BY_HANDLE_FILE_INFORMATION base{},metadata{};LARGE_INTEGER size{};
+        if(!::GetFileInformationByHandle(executable,&base) || !::GetFileInformationByHandle(stream.get(),&metadata) ||
+            !::GetFileSizeEx(stream.get(),&size) || size.QuadPart!=expected_size.QuadPart ||
+            metadata.nNumberOfLinks!=1U || (metadata.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))!=0 ||
+            base.dwVolumeSerialNumber!=metadata.dwVolumeSerialNumber || base.nFileIndexHigh!=metadata.nFileIndexHigh || base.nFileIndexLow!=metadata.nFileIndexLow)return false;
+        std::string bytes(static_cast<std::size_t>(size.QuadPart),0);DWORD read{};
+        if(!::ReadFile(stream.get(),bytes.data(),static_cast<DWORD>(bytes.size()),&read,nullptr) || read!=bytes.size())return false;
+        if(bytes.size()>=2U && static_cast<unsigned char>(bytes[0])==0xffU && static_cast<unsigned char>(bytes[1])==0xfeU) {
+            if(bytes.size()%2U!=0U)return false;
+            std::wstring wide((bytes.size()-2U)/2U,L'\0');
+            for(std::size_t i=0;i<wide.size();++i)wide[i]=static_cast<wchar_t>(static_cast<unsigned char>(bytes[2U+i*2U]) | static_cast<unsigned>(static_cast<unsigned char>(bytes[3U+i*2U]))<<8U);
+            const auto length=::WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide.data(),static_cast<int>(wide.size()),nullptr,0,nullptr,nullptr);
+            if(length<=0)return false;std::string utf8(static_cast<std::size_t>(length),0);
+            if(::WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide.data(),static_cast<int>(wide.size()),utf8.data(),length,nullptr,nullptr)!=length)return false;
+            return valid_download_zone_text(utf8);
+        }
+        return valid_download_zone_text(bytes);
+    }catch(...){return false;}
+}
+
 [[nodiscard]] bool has_only_default_data_stream(
-    const std::filesystem::path& path) noexcept
+    const std::filesystem::path& path,const HANDLE executable=nullptr,
+    const bool allow_download_zone=false) noexcept
 {
     WIN32_FIND_STREAM_DATA data{};
     const HANDLE search = ::FindFirstStreamW(
@@ -145,16 +207,20 @@ private:
     if (search == INVALID_HANDLE_VALUE) {
         return false;
     }
-    bool valid = std::wstring_view{data.cStreamName} == L"::$DATA";
-    std::size_t count = 1U;
-    while (valid && ::FindNextStreamW(search, &data)) {
-        ++count;
-        valid = count == 1U &&
-            std::wstring_view{data.cStreamName} == L"::$DATA";
+    bool valid=true,default_seen=false,zone_seen=false;DWORD final_error{};
+    for(;;) {
+        const std::wstring_view name{data.cStreamName};
+        constexpr std::wstring_view zone_name{L":Zone.Identifier:$DATA"};
+        if(name==L"::$DATA"){valid=!default_seen;default_seen=true;}
+        else if(allow_download_zone && !zone_seen &&
+            ::CompareStringOrdinal(name.data(),static_cast<int>(name.size()),zone_name.data(),static_cast<int>(zone_name.size()),TRUE)==CSTR_EQUAL) {
+            zone_seen=true;valid=valid_download_zone_stream(path,executable,data.StreamSize);
+        }else valid=false;
+        if(!valid)break;
+        if(!::FindNextStreamW(search,&data)){final_error=::GetLastError();break;}
     }
-    const DWORD final_error = ::GetLastError();
     static_cast<void>(::FindClose(search));
-    return valid && count == 1U && final_error == ERROR_HANDLE_EOF;
+    return valid && default_seen && final_error == ERROR_HANDLE_EOF;
 }
 
 [[nodiscard]] bool contains_reparse_component(
@@ -185,8 +251,21 @@ private:
     FILE_STANDARD_INFO standard{};
     FILE_BASIC_INFO basic{};
     if (!::GetFileInformationByHandleEx(
-            handle, FileIdInfo, &file_id, sizeof(file_id)) ||
-        !::GetFileInformationByHandleEx(
+            handle, FileIdInfo, &file_id, sizeof(file_id))) {
+        const auto error=::GetLastError();
+        // SMB servers can provide stable 64-bit file indices while rejecting
+        // FileIdInfo (128-bit IDs). Use the handle's documented legacy ID;
+        // access failures and all unrelated errors still fail closed.
+        if(error!=ERROR_INVALID_PARAMETER && error!=ERROR_NOT_SUPPORTED &&
+            error!=ERROR_INVALID_FUNCTION && error!=ERROR_CALL_NOT_IMPLEMENTED)return false;
+        BY_HANDLE_FILE_INFORMATION legacy{};
+        if(!::GetFileInformationByHandle(handle,&legacy))return false;
+        const std::uint64_t index=(static_cast<std::uint64_t>(legacy.nFileIndexHigh)<<32U)|legacy.nFileIndexLow;
+        if(index==0U)return false;
+        file_id.VolumeSerialNumber=legacy.dwVolumeSerialNumber;
+        for(std::size_t i=0;i<8U;++i)file_id.FileId.Identifier[i]=static_cast<BYTE>(index>>(i*8U));
+    }
+    if (!::GetFileInformationByHandleEx(
             handle, FileStandardInfo, &standard, sizeof(standard)) ||
         !::GetFileInformationByHandleEx(
             handle, FileBasicInfo, &basic, sizeof(basic)) ||
@@ -224,6 +303,10 @@ private:
         return false;
     }
     path.resize(written);
+    // std::filesystem splits extended UNC roots differently from ordinary
+    // \\server\share roots. Normalize before walking real path components.
+    constexpr std::wstring_view extended_unc{L"\\\\?\\UNC\\"};
+    if(path.starts_with(extended_unc))path.replace(0U,extended_unc.size(),L"\\\\");
     result = std::filesystem::path{std::move(path)};
     return true;
 }
@@ -675,7 +758,8 @@ WindowsBinaryIdentityResult observe_windows_binary_identity(
             return binary_error(WindowsBinaryIdentityErrorCode::reparse_point,
                                 ::GetLastError());
         }
-        if (!has_only_default_data_stream(identity.canonical_path)) {
+        if (!has_only_default_data_stream(identity.canonical_path,file.get(),
+                policy.authenticode==AuthenticodePolicy::not_required_for_downloaded_project_owned_binary)) {
             return binary_error(
                 WindowsBinaryIdentityErrorCode::alternate_data_stream,
                 ::GetLastError());

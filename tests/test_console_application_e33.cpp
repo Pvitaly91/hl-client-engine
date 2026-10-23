@@ -11,10 +11,11 @@ namespace con=hlclient::console;
 namespace input=hlclient::input;
 using Event=input::InputEvent;
 using Key=input::PhysicalKey;
-std::unique_ptr<app::ConsoleApplication> make_application(double& clock,std::optional<std::string> startup_config={},bool diagnostics=false) {
+std::unique_ptr<app::ConsoleApplication> make_application(double& clock,std::optional<std::string> startup_config={},bool diagnostics=false,std::optional<bool> show_fps={}) {
     hlclient::core::CommandLineOptions options;options.video.width=640;options.video.height=480;
     options.video.vsync=false;
     options.movement_diagnostics=diagnostics;
+    options.show_fps=show_fps;
     try {
         return std::make_unique<app::ConsoleApplication>(options,
             [](unsigned w,unsigned h,double fraction,bool full){return app::build_console_theme({},w,h,fraction,full);},
@@ -29,6 +30,123 @@ std::unique_ptr<app::ConsoleApplication> make_application(double& clock,std::opt
 bool output_has(app::ConsoleApplication& application,std::string_view text) {
     for(const auto& line:application.model().lines())if(line.find(text)!=std::string::npos)return true;
     return false;
+}
+std::optional<hlclient::renderer::ScreenUiText> fps_readout(app::ConsoleApplication& application) {
+    hlclient::renderer::RenderScene scene;application.compose(scene);
+    if(scene.screen_ui)for(const auto& command:scene.screen_ui->commands)
+        if(const auto* text=std::get_if<hlclient::renderer::ScreenUiText>(&command);
+            text&&text->text.ends_with(" FPS"))return *text;
+    return {};
+}
+void check_fps(app::ConsoleApplication& application,std::string_view expected) {
+    const auto text=fps_readout(application);REQUIRE(text);CHECK(text->text==expected);
+}
+TEST_CASE("Explicit launcher FPS visibility overrides old console config and remains editable", "[console-application][fps-counter][opengl]") {
+    for(const bool enabled:{false,true}) {
+        CAPTURE(enabled);
+        double clock{};
+        auto instance=make_application(clock,std::string{"fps_max 0;cl_showfps "}+(enabled?"0":"1"),true,enabled);
+        if(!instance)SKIP("Typed OpenGL startup capability unavailable");
+        auto& ui=*instance;
+        CHECK(fps_readout(ui).has_value()==enabled);
+        CHECK(ui.options().show_fps==std::optional<bool>{enabled});
+        CHECK(ui.pacing_statistics().requested_cap_hz==0);
+        for(const bool requested:{!enabled,enabled}) {
+            ui.execute(std::string{"cl_showfps "}+(requested?"1":"0"));ui.begin_frame();
+            CHECK(fps_readout(ui).has_value()==requested);
+            CHECK(ui.options().show_fps==std::optional<bool>{requested});
+            CHECK(ui.pacing_statistics().requested_cap_hz==0);
+            CHECK(ui.pacing_statistics().sleep_calls==0);
+        }
+    }
+}
+TEST_CASE("Absent FPS override retains legacy console config and accepts later commands", "[console-application][fps-counter][opengl]") {
+    for(const bool saved:{false,true}) {
+        CAPTURE(saved);
+        double clock{};
+        auto instance=make_application(clock,std::string{"fps_max 0;cl_showfps "}+(saved?"1":"0"),true,std::nullopt);
+        if(!instance)SKIP("Typed OpenGL startup capability unavailable");
+        auto& ui=*instance;
+        CHECK(fps_readout(ui).has_value()==saved);
+        CHECK(ui.pacing_statistics().requested_cap_hz==0);
+        for(const bool requested:{!saved,saved}) {
+            ui.execute(std::string{"cl_showfps "}+(requested?"1":"0"));ui.begin_frame();
+            CHECK(fps_readout(ui).has_value()==requested);
+            CHECK(ui.options().show_fps==std::optional<bool>{requested});
+            CHECK(ui.pacing_statistics().requested_cap_hz==0);
+            CHECK(ui.pacing_statistics().sleep_calls==0);
+        }
+    }
+}
+TEST_CASE("FPS display publishes elapsed-window averages at 2Hz and preserves unlimited pacing policy", "[console-application][fps-counter][opengl]") {
+    double clock{};auto instance=make_application(clock,{},true);
+    if(!instance)SKIP("Typed OpenGL startup capability unavailable");
+    auto& ui=*instance;
+    ui.execute("fps_max 0;cl_showfps 1");ui.begin_frame();
+    check_fps(ui,"0 FPS");
+    ui.pace(); // First observation anchors the window, not a zero-time frame.
+    ui.pace(); // Repeated clock samples cannot inflate the count.
+    for(const double time:{.05,.10,.49}) {
+        clock=time;ui.pace();check_fps(ui,"0 FPS");
+    }
+    clock=.5;ui.pace();check_fps(ui,"8 FPS"); // Four frames / .5 s, not mean(1/dt).
+    for(const double time:{.51,.7,.99}) {
+        clock=time;ui.pace();check_fps(ui,"8 FPS");
+    }
+    clock=1;ui.pace();check_fps(ui,"8 FPS");
+    clock=1.75;ui.pace();check_fps(ui,"1 FPS"); // Round one frame / .75 s.
+    const auto pacing=ui.pacing_statistics();
+    CHECK(pacing.enabled);CHECK(pacing.requested_cap_hz==0);
+    CHECK(pacing.effective_software_cap_hz==0);CHECK(pacing.last_wait_us==0);
+    CHECK(pacing.sleep_calls==0);CHECK(pacing.total_wait_us==0);
+    CHECK_FALSE(ui.options().video.vsync);
+    REQUIRE(ui.window().video_state().actual_swap_interval);
+    CHECK(*ui.window().video_state().actual_swap_interval==0);
+    ui.execute("cl_showfps 0");ui.begin_frame();CHECK_FALSE(fps_readout(ui));
+    clock=2.25;ui.pace();
+    ui.execute("cl_showfps 1");ui.begin_frame();check_fps(ui,"2 FPS");
+    CHECK(ui.pacing_statistics().effective_software_cap_hz==0);
+    CHECK(ui.pacing_statistics().sleep_calls==0);
+}
+TEST_CASE("FPS display resets invalid or backward clocks and recovers without publishing NaN", "[console-application][fps-counter][opengl]") {
+    double clock{};auto instance=make_application(clock);
+    if(!instance)SKIP("Typed OpenGL startup capability unavailable");
+    auto& ui=*instance;ui.execute("fps_max 0;cl_showfps 1");ui.begin_frame();
+    ui.pace();clock=.25;ui.pace();clock=.5;ui.pace();check_fps(ui,"4 FPS");
+    for(const double bad:{std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::infinity(),-std::numeric_limits<double>::infinity()}) {
+        clock=bad;ui.pace();
+        // The FPS sampler receives the bad value; compose has its own clock
+        // users, so read the published counter again with a finite timestamp.
+        clock=10;check_fps(ui,"0 FPS");ui.pace();
+        clock=10.25;ui.pace();check_fps(ui,"0 FPS");
+        clock=10.5;ui.pace();check_fps(ui,"4 FPS");
+    }
+    clock=9;ui.pace();check_fps(ui,"0 FPS"); // Backward discontinuity resets and reanchors.
+    clock=9.25;ui.pace();check_fps(ui,"0 FPS");
+    clock=9.5;ui.pace();check_fps(ui,"4 FPS");
+    ui.pace();ui.pace(); // Equal samples do not count additional frames.
+    clock=10;ui.pace();check_fps(ui,"2 FPS");
+}
+TEST_CASE("FPS text is enlarged clamped and right aligned within the actual viewport", "[console-application][fps-counter][opengl]") {
+    double clock{};auto instance=make_application(clock);
+    if(!instance)SKIP("Typed OpenGL startup capability unavailable");
+    auto& ui=*instance;ui.execute("fps_max 0;cl_showfps 1");ui.begin_frame();ui.pace();
+    const auto check_layout=[&](std::string_view expected) {
+        const auto text=fps_readout(ui);REQUIRE(text);CHECK(text->text==expected);
+        CHECK(text->pixel_size==Catch::Approx(1.5F));
+        CHECK(text->advance==Catch::Approx(9));CHECK(text->line_height==Catch::Approx(13.5F));
+        CHECK(text->y==Catch::Approx(8));CHECK(text->x>=8);
+        const auto width=static_cast<float>(ui.window().pixel_extent().width);
+        CHECK(text->x+static_cast<float>(text->text.size())*text->advance==Catch::Approx(width-8));
+        // Final bitmap glyph is five pixels wide at the enlarged scale.
+        CHECK(text->x+static_cast<float>(text->text.size()-1)*text->advance+5*text->pixel_size<=width-8);
+    };
+    check_layout("0 FPS");
+    // Pure injected time: 60,000 frames in .5 s exercises the five-digit cap
+    // without introducing waits, a frame-rate cap, presentation or networking.
+    for(unsigned frame=1;frame<=60000;++frame){clock=static_cast<double>(frame)/120000;ui.pace();}
+    check_layout("99999 FPS");
 }
 TEST_CASE("B080 frame cap reports the applied software policy and actual limiter wait separately from VSync", "[b080][pacing][opengl]") {
     double clock{};

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -95,6 +96,21 @@ private:
 {
     return {windows::AuthenticodePolicy::not_required_for_project_owned_binary,
             false};
+}
+
+[[nodiscard]] windows::WindowsBinaryObservationPolicy downloaded_project_policy()
+    noexcept
+{
+    return {windows::AuthenticodePolicy::not_required_for_downloaded_project_owned_binary,
+            false};
+}
+
+[[nodiscard]] std::string read_bytes(const fs::path& path)
+{
+    std::ifstream input{path, std::ios::binary};
+    REQUIRE(input);
+    return {std::istreambuf_iterator<char>{input},
+            std::istreambuf_iterator<char>{}};
 }
 
 [[nodiscard]] windows::WindowsBinaryIdentity synthetic_identity(
@@ -191,6 +207,169 @@ TEST_CASE("Windows binary observation rejects hardlinks ADS and reparses",
               windows::WindowsBinaryIdentityErrorCode::reparse_point);
     } else {
         WARN("Symbolic-link capability unavailable; reparse assertion skipped");
+    }
+}
+
+TEST_CASE("Downloaded project executables retain Internet zone metadata and binary identity",
+          "[platform][windows][binary-identity][download-zone]")
+{
+    ExactTemporaryDirectory temporary;
+    REQUIRE(temporary.valid());
+    const auto fixture = sibling(L"hlclient_external_process_fixture.exe");
+    const auto original_bytes = read_bytes(fixture);
+
+    for (const auto zone : {0, 1, 2, 3, 4}) {
+        DYNAMIC_SECTION("Internet download zone " << zone) {
+            const auto executable = temporary.path() /
+                (L"downloaded-" + std::to_wstring(zone) + L".exe");
+            REQUIRE(::CopyFileW(fixture.c_str(), executable.c_str(), TRUE) != FALSE);
+            const auto ordinary = windows::observe_windows_binary_identity(
+                executable, windows::kMaximumObservedExecutableBytes,
+                downloaded_project_policy());
+            REQUIRE(ordinary);
+
+            const auto stream = fs::path{executable.wstring() + L":Zone.Identifier"};
+            const auto zone_text = "[ZoneTransfer]\r\nZoneId=" +
+                std::to_string(zone) +
+                "\r\nReferrerUrl=https://example.invalid/download\r\n"
+                "HostUrl=https://example.invalid/HLClientEngine-Win10.zip\r\n";
+            REQUIRE(write_text(stream, zone_text));
+
+            const auto strict = windows::observe_windows_binary_identity(
+                executable, windows::kMaximumObservedExecutableBytes,
+                project_policy());
+            CHECK_FALSE(strict);
+            CHECK(strict.code ==
+                  windows::WindowsBinaryIdentityErrorCode::alternate_data_stream);
+
+            const auto downloaded = windows::observe_windows_binary_identity(
+                executable, windows::kMaximumObservedExecutableBytes,
+                downloaded_project_policy());
+            REQUIRE(downloaded);
+            CHECK(downloaded.identity->sha256 == ordinary.identity->sha256);
+            CHECK(downloaded.identity->snapshot.identity ==
+                  ordinary.identity->snapshot.identity);
+            CHECK(downloaded.identity->snapshot.size == original_bytes.size());
+            CHECK(downloaded.identity->pe_machine == ordinary.identity->pe_machine);
+            CHECK(downloaded.identity->file_version == ordinary.identity->file_version);
+            CHECK(downloaded.identity->authenticode_valid ==
+                  ordinary.identity->authenticode_valid);
+            CHECK(read_bytes(executable) == original_bytes);
+            CHECK(read_bytes(stream) == zone_text);
+
+            const auto second = windows::observe_windows_binary_identity(
+                executable, windows::kMaximumObservedExecutableBytes,
+                downloaded_project_policy());
+            REQUIRE(second);
+            CHECK(windows::same_windows_file_identity(
+                *downloaded.identity, *second.identity));
+            CHECK(read_bytes(stream) == zone_text);
+
+            const auto required_signature =
+                windows::observe_windows_binary_identity(
+                    executable, windows::kMaximumObservedExecutableBytes,
+                    {windows::AuthenticodePolicy::required, false});
+            CHECK_FALSE(required_signature);
+            CHECK(required_signature.code ==
+                  windows::WindowsBinaryIdentityErrorCode::alternate_data_stream);
+            CHECK(windows::observe_windows_binary_identity(
+                      stream, windows::kMaximumObservedExecutableBytes,
+                      downloaded_project_policy()).code ==
+                  windows::WindowsBinaryIdentityErrorCode::alternate_data_stream);
+        }
+    }
+}
+
+TEST_CASE("Download metadata does not permit arbitrary alternate streams",
+          "[platform][windows][binary-identity][download-zone][unsafe-path]")
+{
+    ExactTemporaryDirectory temporary;
+    REQUIRE(temporary.valid());
+    const auto fixture = sibling(L"hlclient_external_process_fixture.exe");
+    const auto executable = temporary.path() / L"download-with-extra-stream.exe";
+    REQUIRE(::CopyFileW(fixture.c_str(), executable.c_str(), TRUE) != FALSE);
+    const auto original_bytes = read_bytes(executable);
+    const auto zone_stream = fs::path{executable.wstring() + L":Zone.Identifier"};
+    const std::string zone_text{"[ZoneTransfer]\r\nZoneId=3\r\n"};
+    REQUIRE(write_text(zone_stream, zone_text));
+    const auto extra_stream = fs::path{executable.wstring() + L":payload"};
+    REQUIRE(write_text(extra_stream, "arbitrary data"));
+
+    const auto result = windows::observe_windows_binary_identity(
+        executable, windows::kMaximumObservedExecutableBytes,
+        downloaded_project_policy());
+    CHECK_FALSE(result);
+    CHECK(result.code == windows::WindowsBinaryIdentityErrorCode::alternate_data_stream);
+    CHECK(read_bytes(executable) == original_bytes);
+    CHECK(read_bytes(zone_stream) == zone_text);
+    CHECK(read_bytes(extra_stream) == "arbitrary data");
+}
+
+TEST_CASE("Downloaded project executables accept UTF16 Windows zone metadata",
+          "[platform][windows][binary-identity][download-zone]")
+{
+    ExactTemporaryDirectory temporary;
+    REQUIRE(temporary.valid());
+    const auto executable = temporary.path() / L"utf16-download-zone.exe";
+    const auto fixture = sibling(L"hlclient_external_process_fixture.exe");
+    REQUIRE(::CopyFileW(fixture.c_str(), executable.c_str(), TRUE) != FALSE);
+    const auto ordinary = windows::observe_windows_binary_identity(
+        executable, windows::kMaximumObservedExecutableBytes,
+        downloaded_project_policy());
+    REQUIRE(ordinary);
+    const auto original_bytes = read_bytes(executable);
+    const auto stream = fs::path{executable.wstring() + L":Zone.Identifier"};
+    std::string zone_text{"\xff\xfe", 2U};
+    const std::u16string content =
+        u"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.invalid/download\r\n";
+    for (const auto character : content) {
+        zone_text.push_back(static_cast<char>(character & 0xffU));
+        zone_text.push_back(static_cast<char>(character >> 8U));
+    }
+    REQUIRE(write_text(stream, zone_text));
+
+    const auto observed = windows::observe_windows_binary_identity(
+        executable, windows::kMaximumObservedExecutableBytes,
+        downloaded_project_policy());
+    REQUIRE(observed);
+    CHECK(observed.identity->sha256 == ordinary.identity->sha256);
+    CHECK(observed.identity->pe_machine == ordinary.identity->pe_machine);
+    CHECK(read_bytes(executable) == original_bytes);
+    CHECK(read_bytes(stream) == zone_text);
+}
+
+TEST_CASE("Malformed and oversized download zone streams remain rejected",
+          "[platform][windows][binary-identity][download-zone][unsafe-path]")
+{
+    ExactTemporaryDirectory temporary;
+    REQUIRE(temporary.valid());
+    const auto fixture = sibling(L"hlclient_external_process_fixture.exe");
+    const auto executable = temporary.path() / L"malformed-download-zone.exe";
+    REQUIRE(::CopyFileW(fixture.c_str(), executable.c_str(), TRUE) != FALSE);
+    const auto original_bytes = read_bytes(executable);
+    const auto stream = fs::path{executable.wstring() + L":Zone.Identifier"};
+
+    const std::string malformed[] = {
+        "",
+        "[ZoneTransfer]\r\n",
+        "[OtherSection]\r\nZoneId=3\r\n",
+        "[ZoneTransfer]\r\nZoneId=5\r\n",
+        "[ZoneTransfer]\r\nZoneId=3\r\nZoneId=4\r\n",
+        "[ZoneTransfer]\r\nZoneId=3trailing\r\n",
+        std::string{"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl="} +
+            std::string(32'768U, 'a') + "\r\n",
+    };
+    for (std::size_t index = 0U; index < std::size(malformed); ++index) {
+        INFO("Malformed download zone case " << index);
+        REQUIRE(write_text(stream, malformed[index]));
+        const auto result = windows::observe_windows_binary_identity(
+            executable, windows::kMaximumObservedExecutableBytes,
+            downloaded_project_policy());
+        CHECK_FALSE(result);
+        CHECK(result.code ==
+              windows::WindowsBinaryIdentityErrorCode::alternate_data_stream);
+        CHECK(read_bytes(executable) == original_bytes);
+        CHECK(read_bytes(stream) == malformed[index]);
     }
 }
 

@@ -105,8 +105,10 @@ private:
     core::ExternalLaunchConfiguration shared_baseline_;
     std::optional<std::filesystem::path> shared_settings_path_;
     bool show_fps_{};
-    Clock::time_point origin_{Clock::now()},frame_started_{origin_},last_present_{origin_};
-    double fps_{};
+    Clock::time_point origin_{Clock::now()},frame_started_{origin_};
+    std::optional<double> fps_last_present_;
+    double fps_{},fps_window_elapsed_{};
+    std::uint64_t fps_window_frames_{};
     ConsolePacingStatistics pacing_statistics_;
     std::function<double()> monotonic_seconds_;
 };

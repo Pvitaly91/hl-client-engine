@@ -2,17 +2,47 @@
 #include <hlclient/core/remote_audio_peer_plan.hpp>
 #include <hlclient/core/manual_session_timing.hpp>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
+#include <algorithm>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
 
 using hlclient::core::parse_command_line;
 using hlclient::core::RendererBackend;
+
+TEST_CASE("FPS CLI override is optional typed and does not change default video mode",
+          "[core][command-line][launcher-fps][no-stock]") {
+    const auto defaults=parse_command_line({});REQUIRE(defaults);
+    CHECK_FALSE(defaults.options->show_fps.has_value());
+    CHECK(defaults.options->video.mode==hlclient::core::VideoWindowMode::windowed);
+    for(const auto value:{"0","1"}) {
+        const std::array<std::string_view,2> args{"--show-fps",value};
+        const auto parsed=parse_command_line(args);REQUIRE(parsed);
+        REQUIRE(parsed.options->show_fps.has_value());
+        CHECK(*parsed.options->show_fps==(std::string_view{value}=="1"));
+        CHECK(parsed.options->video==defaults.options->video);
+        CHECK(parsed.options->hud_draw==defaults.options->hud_draw);
+        CHECK(parsed.options->movement_diagnostics==defaults.options->movement_diagnostics);
+    }
+    for(const auto value:{"","2","-1","true","false","on","off","1.0","01","NaN","1;quit"}) {
+        const std::array<std::string_view,2> args{"--show-fps",value};
+        CHECK_FALSE(parse_command_line(args));
+    }
+    const std::array<std::string_view,1> missing{"--show-fps"};
+    CHECK_FALSE(parse_command_line(missing));
+    for(const auto value:{"0","1"}) {
+        const std::array<std::string_view,4> duplicate{"--show-fps",value,"--show-fps","1"};
+        CHECK_FALSE(parse_command_line(duplicate));
+    }
+    CHECK(hlclient::core::command_line_help().find("--show-fps <0|1>")!=std::string_view::npos);
+}
 
 TEST_CASE("E33 idle client startup is explicit and does not invent a connection",
           "[e33][core][command-line][no-stock]") {
@@ -93,6 +123,94 @@ TEST_CASE("E31.1 normal CLI carries independent HUD and scene MSAA requests", "[
     }
     CHECK(hlclient::core::command_line_help().find("--hud-scale")!=std::string_view::npos);
     CHECK(hlclient::core::command_line_help().find("--msaa")!=std::string_view::npos);
+}
+
+TEST_CASE("Portable CLI accepts bounded window and display settings without external receipts",
+          "[portable][core][command-line][no-stock]") {
+    const std::array<std::string_view,12> configured{
+        "--window-mode","borderless","--width","1920","--height","1080",
+        "--display-index","1","--vsync","off","--msaa","8"};
+    const auto parsed=parse_command_line(configured);
+    INFO(parsed.error);
+    REQUIRE(parsed);
+    CHECK(parsed.options->video.mode==hlclient::core::VideoWindowMode::borderless);
+    CHECK(parsed.options->video.width==1920);
+    CHECK(parsed.options->video.height==1080);
+    CHECK(parsed.options->video.display_index==1);
+    CHECK_FALSE(parsed.options->video.vsync);
+    CHECK(parsed.options->video.msaa_samples==8);
+    CHECK_FALSE(parsed.options->session_receipt_root);
+
+    const std::array<std::string_view,10> defaults{
+        "--window-mode","windowed","--width","640","--height","480",
+        "--display-index","0","--vsync","on"};
+    const auto minimum=parse_command_line(defaults);
+    REQUIRE(minimum);
+    CHECK(minimum.options->video.mode==hlclient::core::VideoWindowMode::windowed);
+    CHECK(minimum.options->video.width==640);
+    CHECK(minimum.options->video.height==480);
+    CHECK(minimum.options->video.display_index==0);
+    CHECK(minimum.options->video.vsync);
+
+    for(const auto [key,bad] : std::array<std::pair<std::string_view,std::string_view>,16>{
+            {{"--window-mode","fullscreen"},
+             {"--width","639"},{"--width","7681"},{"--width","0"},
+             {"--width","1920x"},{"--height","479"},{"--height","4321"},
+             {"--height","-1"},{"--display-index","-1"},
+             {"--display-index","32"},{"--display-index","1.0"},
+             {"--vsync","false"},{"--vsync","2"},
+             {"--vsync",""},{"--width",""},{"--height",""}}}) {
+        const std::array<std::string_view,2> args{key,bad};
+        CHECK_FALSE(parse_command_line(args));
+    }
+    for(const auto [key,value] : std::array<std::pair<std::string_view,std::string_view>,5>{
+            {{"--window-mode","windowed"},{"--width","1280"},
+             {"--height","720"},{"--display-index","0"},{"--vsync","on"}}}) {
+        const std::array<std::string_view,4> args{key,value,key,value};
+        CHECK_FALSE(parse_command_line(args));
+    }
+    const std::array<std::string_view,11> external{
+        "--external-config","D:/fixture/launch-config.json",
+        "--session-receipt-root","D:/fixture","--session-run-id",
+        "0123456789abcdef0123456789abcdef","--session-role","A",
+        "--window-mode","borderless","--vsync"};
+    CHECK_FALSE(parse_command_line(external));
+    const std::array<std::string_view,4> exclusive{"--window-mode","exclusive","--vsync","1"};
+    const auto fullscreen=parse_command_line(exclusive);
+    REQUIRE(fullscreen);
+    CHECK(fullscreen.options->video.mode==hlclient::core::VideoWindowMode::exclusive);
+    CHECK(fullscreen.options->video.vsync);
+    const std::array<std::string_view,2> no_sync{"--vsync","0"};
+    const auto disabled=parse_command_line(no_sync);
+    REQUIRE(disabled);
+    CHECK_FALSE(disabled.options->video.vsync);
+    for(const auto key:{"--window-mode","--width","--height","--display-index","--vsync"})
+        CHECK(hlclient::core::command_line_help().find(key)!=std::string_view::npos);
+}
+
+TEST_CASE("Portable CLI bounds independent scene image controls", "[portable][core][command-line][no-stock]") {
+    const std::array<std::string_view,6> configured{
+        "--brightness","-0.25","--gamma","1.25","--contrast","0.8"};
+    const auto parsed=parse_command_line(configured);
+    INFO(parsed.error);
+    REQUIRE(parsed);
+    CHECK(parsed.options->image.brightness==Catch::Approx(-.25F));
+    CHECK(parsed.options->image.gamma==Catch::Approx(1.25F));
+    CHECK(parsed.options->image.contrast==Catch::Approx(.8F));
+    CHECK(hlclient::core::valid_image_adjustments(parsed.options->image));
+    for(const auto [key,bad] : std::array<std::pair<std::string_view,std::string_view>,9>{
+            {{"--brightness","-0.51"},{"--brightness","0.51"},
+             {"--gamma","0.24"},{"--gamma","4.01"},
+             {"--contrast","-0.1"},{"--contrast","2.1"},
+             {"--gamma","nan"},{"--contrast","inf"},{"--brightness",""}}}) {
+        const std::array<std::string_view,2> args{key,bad};
+        CHECK_FALSE(parse_command_line(args));
+    }
+    for(const auto key:{"--brightness","--gamma","--contrast"}) {
+        const std::array<std::string_view,4> args{key,"1",key,"1"};
+        CHECK_FALSE(parse_command_line(args));
+        CHECK(hlclient::core::command_line_help().find(key)!=std::string_view::npos);
+    }
 }
 
 TEST_CASE("E28.1 receipt CLI accepts only a complete fixed identity trio", "[e281][core][command-line]") {
@@ -194,6 +312,33 @@ TEST_CASE("Manual timers accept long or explicitly user-ended sessions without r
     }
     peer.insert(peer.end(), {L"--live-session-seconds", L"45"});
     CHECK_FALSE(hlclient::core::remote_audio_peer_plan(peer));
+}
+
+TEST_CASE("Portable live profile omits receipts only by explicit opt-in", "[core][command-line][portable]") {
+    const std::vector<std::string_view> base{
+        "--connect", "192.168.0.104:27016", "--stop-after", "live-visual-control",
+        "--live-input", "keyboard-mouse", "--basedir", "D:/fixture", "--game", "valve",
+        "--auth-provider", "steam", "--steam-api-runtime", "D:/fixture/steam_api.dll",
+        "--prediction", "reference", "--live-session-unlimited"};
+    const auto ordinary=parse_command_line(base);REQUIRE(ordinary);
+    CHECK_FALSE(ordinary.options->no_session_reports);
+    auto portable=base;portable.emplace_back("--no-session-reports");
+    const auto selected=parse_command_line(portable);REQUIRE(selected);
+    CHECK(selected.options->no_session_reports);
+    CHECK_FALSE(selected.options->movement_diagnostics);
+    CHECK_FALSE(selected.options->session_receipt_root);
+    CHECK(selected.options->connect_endpoint==ordinary.options->connect_endpoint);
+    auto invalid=portable;invalid.emplace_back("--no-session-reports");
+    CHECK_FALSE(parse_command_line(invalid));
+    invalid=portable;invalid.emplace_back("--movement-diagnostics");
+    CHECK_FALSE(parse_command_line(invalid));
+    invalid=portable;invalid.emplace_back("--net-trace");
+    CHECK_FALSE(parse_command_line(invalid));
+    invalid=portable;invalid.insert(invalid.end(),{"--session-receipt-root","D:/fixture",
+        "--session-run-id","0123456789abcdef0123456789abcdef","--session-role","A"});
+    CHECK_FALSE(parse_command_line(invalid));
+    invalid=portable;invalid.erase(std::find(invalid.begin(),invalid.end(),"--live-session-unlimited"));
+    CHECK_FALSE(parse_command_line(invalid)); // finite/no-time-limit profile is not portable live mode
 }
 
 TEST_CASE("Observed server blood presentation remains optional and typed", "[e27][core][command-line]") {

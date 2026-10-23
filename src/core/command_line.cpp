@@ -19,7 +19,11 @@ namespace {
 {
     return argument == "--audio-volume" || argument == "--server-blood-presentation" ||
            argument == "--hud-draw" || argument == "--crosshair" || argument == "--hud-fastswitch" ||
-           argument == "--hud-scale" || argument == "--msaa" ||
+           argument == "--hud-scale" || argument == "--msaa" || argument == "--show-fps" ||
+           argument == "--window-mode" || argument == "--width" ||
+           argument == "--height" || argument == "--display-index" ||
+           argument == "--vsync" || argument == "--brightness" ||
+           argument == "--gamma" || argument == "--contrast" ||
            argument == "--basedir" || argument == "--game" || argument == "--connect" ||
            argument == "+connect" || argument == "--renderer" ||
            argument == "--stop-after" || argument == "--auth-provider" ||
@@ -117,6 +121,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     bool live_session_seconds_seen = false;
     std::array<bool,3> hud_settings_seen{};
     bool hud_scale_seen{},msaa_seen{};
+    std::array<bool,5> video_settings_seen{};
+    std::array<bool,3> image_settings_seen{};
 
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
@@ -140,6 +146,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         if (argument == "--movement-diagnostics") {
             if(options.movement_diagnostics)return failure("duplicate --movement-diagnostics");
             options.movement_diagnostics=true;
+            continue;
+        }
+        if (argument == "--no-session-reports") {
+            if(options.no_session_reports)return failure("duplicate --no-session-reports");
+            options.no_session_reports=true;
             continue;
         }
         if (argument == "--live-session-unlimited") {
@@ -211,6 +222,55 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             if(value=="off" || value=="0")options.video.msaa_samples=0;
             else if(value=="2" || value=="4" || value=="8")options.video.msaa_samples=static_cast<unsigned>(value[0]-'0');
             else return failure("MSAA must be off, 2, 4 or 8");
+        } else if (argument == "--window-mode") {
+            if(video_settings_seen[0])return failure("duplicate --window-mode");
+            video_settings_seen[0]=true;
+            if(value=="windowed")options.video.mode=VideoWindowMode::windowed;
+            else if(value=="borderless")options.video.mode=VideoWindowMode::borderless;
+            else if(value=="exclusive")options.video.mode=VideoWindowMode::exclusive;
+            else return failure("Window mode must be windowed, borderless or exclusive");
+        } else if (argument == "--width") {
+            if(video_settings_seen[1])return failure("duplicate --width");
+            video_settings_seen[1]=true;
+            const auto width=positive_size(value,7680);
+            if(!width || *width<640)return failure("Video width must be 640..7680");
+            options.video.width=static_cast<int>(*width);
+        } else if (argument == "--height") {
+            if(video_settings_seen[2])return failure("duplicate --height");
+            video_settings_seen[2]=true;
+            const auto height=positive_size(value,4320);
+            if(!height || *height<480)return failure("Video height must be 480..4320");
+            options.video.height=static_cast<int>(*height);
+        } else if (argument == "--display-index") {
+            if(video_settings_seen[3])return failure("duplicate --display-index");
+            video_settings_seen[3]=true;
+            if(value=="0")options.video.display_index=0;
+            else if(const auto display_number=positive_size(value,31))options.video.display_index=*display_number;
+            else return failure("Display index must be 0..31");
+        } else if (argument == "--vsync") {
+            if(video_settings_seen[4])return failure("duplicate --vsync");
+            video_settings_seen[4]=true;
+            if(value=="on" || value=="1")options.video.vsync=true;
+            else if(value=="off" || value=="0")options.video.vsync=false;
+            else return failure("VSync must be on, off, 1 or 0");
+        } else if (argument == "--brightness" || argument == "--gamma" || argument == "--contrast") {
+            const auto slot=argument=="--brightness" ? 0U : argument=="--gamma" ? 1U : 2U;
+            if(image_settings_seen[slot])return failure("duplicate image adjustment: " + std::string{argument});
+            image_settings_seen[slot]=true;
+            double adjustment{};
+            const auto parsed=std::from_chars(value.data(),value.data()+value.size(),adjustment);
+            if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || !std::isfinite(adjustment))
+                return failure("Image adjustment must be finite: " + std::string{argument});
+            if(slot==0U) {
+                if(adjustment<-.5 || adjustment>.5)return failure("Brightness must be -0.5..0.5");
+                options.image.brightness=static_cast<float>(adjustment);
+            } else if(slot==1U) {
+                if(adjustment<.25 || adjustment>4.0)return failure("Gamma must be 0.25..4.0");
+                options.image.gamma=static_cast<float>(adjustment);
+            } else {
+                if(adjustment<0.0 || adjustment>2.0)return failure("Contrast must be 0..2.0");
+                options.image.contrast=static_cast<float>(adjustment);
+            }
         } else if (argument == "--hud-draw" || argument == "--crosshair" || argument == "--hud-fastswitch") {
             const auto slot = argument == "--hud-draw" ? 0U : argument == "--crosshair" ? 1U : 2U;
             if (hud_settings_seen[slot] || (value != "0" && value != "1"))
@@ -219,6 +279,10 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             if (slot == 0U) options.hud_draw = value == "1";
             else if (slot == 1U) options.crosshair = value == "1";
             else options.hud_fastswitch = value == "1";
+        } else if (argument == "--show-fps") {
+            if(options.show_fps.has_value() || (value!="0" && value!="1"))
+                return failure("--show-fps must occur once and be 0 or 1");
+            options.show_fps=value=="1";
         } else if (argument == "--audio-volume") {
             if (value == "0") options.audio_volume=0;
             else if (auto parsed=positive_size(value,100)) options.audio_volume=static_cast<unsigned>(*parsed);
@@ -580,6 +644,9 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         return CommandLineParseResult{std::move(options), {}};
     }
     const bool any_receipt=options.session_receipt_root || options.session_run_id || options.session_role;
+    if (options.no_session_reports && (any_receipt || options.net_trace ||
+        options.movement_diagnostics))
+        return failure("--no-session-reports cannot be combined with receipts or diagnostics");
     if(options.open_client && options.connect_endpoint)
         return failure("--open-client starts idle and cannot be combined with --connect");
     if(any_receipt && (!options.session_receipt_root || !options.session_run_id ||
@@ -619,6 +686,10 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         return failure(
             "live input options require --stop-after live-visual-control");
     }
+    if(options.no_session_reports &&
+        (options.stop_after!=ConnectionStopPoint::live_visual_control ||
+         options.live_input!=LiveInputMode::keyboard_mouse || !options.live_session_unlimited))
+        return failure("--no-session-reports requires unlimited keyboard-mouse live gameplay");
 
     if (options.view_world) {
         if (stop_after_seen &&
@@ -835,6 +906,10 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         return failure("--view-entity-snapshot requires --renderer opengl");
     }
 
+    if(!valid_video_settings(options.video))
+        return failure("Combined video settings exceed the supported bounds");
+    if(!valid_image_adjustments(options.image))
+        return failure("Image adjustments exceed the supported bounds");
     return CommandLineParseResult{std::move(options), {}};
 }
 
@@ -901,6 +976,7 @@ Options:
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
   --movement-diagnostics  Bounded movement/lift incident report; F8 marks a stutter
+  --no-session-reports  Portable live gameplay without on-disk attempt/diagnostic receipts
   --audio-volume <0..100>  Interactive application volume (default 35, 0=mute)
   --audio-on-focus-loss  Explicit manual listener; server audio stays on in background
   --mute-glock-fire-sound  Manual diagnostic: mute only local Glock fire audio
@@ -910,6 +986,15 @@ Options:
   --hud-diagnostics  Explicit legacy text diagnostic overlay (default off)
   --hud-scale <auto|0.5..2.0> Independent HUD layout multiplier (default auto)
   --msaa <off|2|4|8> Requested scene antialiasing; supported fallback reported (default 4)
+  --show-fps <0|1>   Override saved console FPS display for this launch
+  --window-mode <windowed|borderless|exclusive> Windowed, desktop borderless, or display mode fullscreen
+  --width <640..7680> Windowed client width (default 1280)
+  --height <480..4320> Windowed client height (default 720)
+  --display-index <0..31> Zero-based monitor index (default 0)
+  --vsync <on|off|1|0> Presentation sync (default on)
+  --brightness <-0.5..0.5> Scene brightness (default 0)
+  --gamma <0.25..4.0> Scene gamma (default 1)
+  --contrast <0..2.0> Scene contrast (default 1)
   --server-blood-presentation <enabled|disabled>
                       Optional observed server blood policy for cosmetic fallback;
                       absence is unknown; never changes the server setting

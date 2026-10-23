@@ -370,10 +370,19 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
         implementation_->safe_window_recovery = true;
         implementation_->video_recovery_reason = "selected_display_unavailable";
     }
+    std::optional<SDL_DisplayMode> exclusive_display_mode;
     if (requested_mode == core::VideoWindowMode::exclusive) {
-        requested_mode = core::VideoWindowMode::windowed;
-        implementation_->safe_window_recovery = true;
-        implementation_->video_recovery_reason = "exclusive_mode_unsupported";
+        SDL_DisplayMode closest{};
+        // Do not silently run a different fullscreen resolution. SDL's
+        // closest-mode search may otherwise select a larger display mode.
+        if (SDL_GetClosestFullscreenDisplayMode(display.id,config.width,config.height,
+                0.0F,false,&closest) && closest.w==config.width && closest.h==config.height)
+            exclusive_display_mode=closest;
+        else {
+            requested_mode=core::VideoWindowMode::windowed;
+            implementation_->safe_window_recovery=true;
+            implementation_->video_recovery_reason="exclusive_resolution_unavailable";
+        }
     }
     // Hidden offscreen windows intentionally retain the exact caller extent,
     // including larger-than-desktop GPU fixtures. Only interactive windows
@@ -436,25 +445,38 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
         implementation_->video_recovery_reason = "window_position_not_confirmed";
         requested_mode = core::VideoWindowMode::windowed;
     }
-    if (requested_mode == core::VideoWindowMode::borderless) {
-        const bool completed = SDL_SetWindowFullscreenMode(implementation_->window, nullptr) &&
+    if (requested_mode == core::VideoWindowMode::borderless ||
+        requested_mode == core::VideoWindowMode::exclusive) {
+        const bool exclusive=requested_mode==core::VideoWindowMode::exclusive;
+        const bool completed = SDL_SetWindowFullscreenMode(implementation_->window,
+                exclusive ? &*exclusive_display_mode : nullptr) &&
             SDL_SetWindowFullscreen(implementation_->window, true) &&
             SDL_SyncWindow(implementation_->window);
         int pixel_width{}, pixel_height{};
         const bool dimensions = SDL_GetWindowSizeInPixels(implementation_->window, &pixel_width, &pixel_height);
-        const bool confirmed = completed && dimensions &&
+        const auto* actual_fullscreen_mode=SDL_GetWindowFullscreenMode(implementation_->window);
+        const auto* actual_display_mode=SDL_GetCurrentDisplayMode(display.id);
+        const bool mode_confirmed=exclusive
+            ? actual_fullscreen_mode && actual_display_mode &&
+              actual_fullscreen_mode->w==config.width && actual_fullscreen_mode->h==config.height &&
+              actual_display_mode->w==config.width && actual_display_mode->h==config.height
+            : actual_fullscreen_mode==nullptr;
+        const bool confirmed = completed && dimensions && mode_confirmed &&
             (SDL_GetWindowFlags(implementation_->window) & SDL_WINDOW_FULLSCREEN) != 0U &&
             SDL_GetDisplayForWindow(implementation_->window) == display.id &&
-            pixel_width == display.desktop_width && pixel_height == display.desktop_height;
+            pixel_width == (exclusive ? config.width : display.desktop_width) &&
+            pixel_height == (exclusive ? config.height : display.desktop_height);
         if (!confirmed) {
             implementation_->safe_window_recovery = true;
-            implementation_->video_recovery_reason = "borderless_mode_not_confirmed";
-            // No exclusive mode or desktop gamma is ever set. Recover this
-            // owned window synchronously; failure is explicit, never a hidden
-            // black/fullscreen client advertised as ready.
-            if (!SDL_SetWindowFullscreen(implementation_->window, false) ||
-                !SDL_SetWindowSize(implementation_->window,safe_width,safe_height) ||
-                !SDL_SyncWindow(implementation_->window) ||
+            implementation_->video_recovery_reason = exclusive
+                ? "exclusive_mode_not_confirmed" : "borderless_mode_not_confirmed";
+            // Always leave fullscreen first and clear the exclusive mode
+            // request before restoring a bounded desktop window.
+            const bool exited_fullscreen=SDL_SetWindowFullscreen(implementation_->window,false);
+            const bool reset_mode=SDL_SetWindowFullscreenMode(implementation_->window,nullptr);
+            const bool resized=SDL_SetWindowSize(implementation_->window,safe_width,safe_height);
+            const bool synchronized=SDL_SyncWindow(implementation_->window);
+            if (!exited_fullscreen || !reset_mode || !resized || !synchronized ||
                 (SDL_GetWindowFlags(implementation_->window) & SDL_WINDOW_FULLSCREEN) != 0U)
                 throw std::runtime_error{"Unable to recover the safe windowed video mode"};
         }

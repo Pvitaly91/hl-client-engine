@@ -98,13 +98,15 @@ inline int run_console_lifecycle(ConsoleApplication& application,const bool star
             const bool automatic_retry_eligible=retry_profile(application.options());
             auto& options=application.options();options.connect_endpoint=std::move(endpoint);options.open_client=false;
 #ifdef _WIN32
-            auto scoped=attempts.prepare(options);
-            if(!scoped){
-                core::log(core::LogLevel::error,std::string{"[console-application] "}+std::string{attempts.error()});
-                application_result=2;application.end_attempt(2,attempts.error());application.request_quit();break;
+            if(!options.no_session_reports) {
+                auto scoped=attempts.prepare(options);
+                if(!scoped){
+                    core::log(core::LogLevel::error,std::string{"[console-application] "}+std::string{attempts.error()});
+                    application_result=2;application.end_attempt(2,attempts.error());application.request_quit();break;
+                }
+                options.session_receipt_root=std::move(scoped->session_receipt_root);
+                options.session_run_id=std::move(scoped->session_run_id);options.session_role=std::move(scoped->session_role);
             }
-            options.session_receipt_root=std::move(scoped->session_receipt_root);
-            options.session_run_id=std::move(scoped->session_run_id);options.session_role=std::move(scoped->session_role);
 #endif
             application.begin_attempt();application.present_idle();
             ConsoleAttemptOutcome outcome;
@@ -114,7 +116,8 @@ inline int run_console_lifecycle(ConsoleApplication& application,const bool star
             } catch(...) {outcome={1,"Unknown session failure"};}
             application.set_session_actions({});result=outcome.code;
 #ifdef _WIN32
-            if(!attempts.finish(result,result?"session_failed":"session_complete")) {
+            if(!options.no_session_reports &&
+                !attempts.finish(result,result?"session_failed":"session_complete")) {
                 result=2;outcome.detail=std::string{attempts.error()};outcome.integrity_failure=true;
                 core::log(core::LogLevel::error,std::string{"[console-application] "}+outcome.detail);
                 application.model().append(outcome.detail);application.request_quit();
@@ -156,7 +159,7 @@ inline int run_console_lifecycle(ConsoleApplication& application,const bool star
         }
     }
 #ifdef _WIN32
-    if(!attempts.finalize()){
+    if(!application.options().no_session_reports && !attempts.finalize()){
         core::log(core::LogLevel::error,std::string{"[console-application] "}+std::string{attempts.error()});
         application.model().append(attempts.error());return 2;
     }

@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -1561,19 +1562,24 @@ TEST_CASE("World draw bindings reuse only immutable inputs inside one render fra
         CHECK(after.triangle_count-before.triangle_count==4U);
         CHECK(after.base_texture_bind_count-before.base_texture_bind_count==1U);
         CHECK(after.lightmap_bind_count-before.lightmap_bind_count==2U);
-        CHECK(after.material_uniform_upload_count-before.material_uniform_upload_count==3U);
-        CHECK(after.program_bind_count-before.program_bind_count==1U);
-        CHECK(after.vertex_array_bind_count-before.vertex_array_bind_count==1U);
-        CHECK(after.sky_texture_bind_count-before.sky_texture_bind_count==1U);
-        CHECK(after.camera_upload_count-before.camera_upload_count==1U);
-        // The world-only no-light program has no light uniforms. Any active
-        // point/effect light keeps the original dynamic-light program.
         const bool has_point_light=scene.transient_world_light &&
             renderer::valid_render_point_light(*scene.transient_world_light) &&
             scene.transient_world_light->intensity>0.0F;
+        const bool has_dynamic_light=has_point_light || !scene.effect_lights().empty();
+        // Both opaque static-world programs need only the lightmap material
+        // uniform; neither has sky/mask branches or a camera uniform.
+        CHECK(after.material_uniform_upload_count-before.material_uniform_upload_count==
+            1U);
+        CHECK(after.program_bind_count-before.program_bind_count==1U);
+        CHECK(after.vertex_array_bind_count-before.vertex_array_bind_count==1U);
+        CHECK(after.sky_texture_bind_count-before.sky_texture_bind_count==1U);
+        CHECK(after.camera_upload_count-before.camera_upload_count==0U);
+        // Lit opaque draws retain the original dynamic-light values and model
+        // transform; the no-light opaque program needs only the MVP matrix.
         CHECK(after.light_upload_count-before.light_upload_count==
-            (has_point_light || !scene.effect_lights().empty() ? 1U : 0U));
-        CHECK(after.transform_upload_count-before.transform_upload_count==2U);
+            (has_dynamic_light ? 1U : 0U));
+        CHECK(after.transform_upload_count-before.transform_upload_count==
+            (has_dynamic_light ? 2U : 1U));
         CHECK(glGetError()==GL_NO_ERROR);
         return gpu.observe_framebuffer(extent,scene.clear_color,true);
     };
@@ -1963,6 +1969,328 @@ TEST_CASE("E4.1 transient light changes nearby wall pixels without changing a di
     context->release_renderer();
 }
 
+TEST_CASE("Opaque dynamic world shaders match the legacy brush color and resolved depth",
+          "[opaque-dynamic][renderer][opengl][actual-context][no-stock]")
+{
+    auto context=try_create_context();
+    if(!context)SKIP("OpenGL 3.3 Core unavailable");
+    context->initialize_renderer();
+    auto& gpu=context->renderer();
+    // Capture only the target identity during clear. All readbacks/resolves
+    // below are offline correctness work, outside the production render path.
+    static PFNGLCLEARPROC original_clear{};
+    static GLint depth_source{};
+    original_clear=glad_glClear;
+    struct DepthTargetCapture {
+        DepthTargetCapture(){depth_source=0;glad_glClear=&clear;}
+        ~DepthTargetCapture(){glad_glClear=original_clear;}
+        static void GLAD_API_PTR clear(const GLbitfield mask) {
+            if((mask&(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT))==
+                (GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT))
+                glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&depth_source);
+            original_clear(mask);
+        }
+    };
+    static PFNGLDRAWELEMENTSPROC original_draw_elements{};
+    static std::uint64_t skipped_world_draws{},remaining_world_draws{},forwarded_brush_draws{};
+    original_draw_elements=glad_glDrawElements;
+    struct LegacyOnlyDraws {
+        explicit LegacyOnlyDraws(const std::uint64_t world_draws) {
+            remaining_world_draws=world_draws;
+            skipped_world_draws=forwarded_brush_draws=0U;
+            glad_glDrawElements=&draw;
+        }
+        ~LegacyOnlyDraws(){glad_glDrawElements=original_draw_elements;}
+        static void GLAD_API_PTR draw(const GLenum mode,const GLsizei count,
+            const GLenum type,const void* indices) {
+            if(remaining_world_draws!=0U) {
+                --remaining_world_draws;++skipped_world_draws;return;
+            }
+            ++forwarded_brush_draws;
+            original_draw_elements(mode,count,type,indices);
+        }
+    };
+    struct Pixels {std::vector<std::uint8_t> color;std::vector<float> depth;};
+    const auto capture=[&](const renderer::RenderScene& scene,
+                           const renderer::RenderExtent extent) {
+        {DepthTargetCapture target;gpu.render(scene,extent);}
+        Pixels result;
+        const auto count=static_cast<std::size_t>(extent.width)*extent.height;
+        result.color.resize(count*4U);result.depth.resize(count);
+        glReadBuffer(GL_BACK);
+        glReadPixels(0,0,extent.width,extent.height,GL_RGBA,GL_UNSIGNED_BYTE,
+            result.color.data());
+        GLint old_read{},old_draw{},old_renderbuffer{};
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&old_read);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&old_draw);
+        glGetIntegerv(GL_RENDERBUFFER_BINDING,&old_renderbuffer);
+        GLuint target{},depth{};
+        if(depth_source!=0) {
+            // Same format/extent as SceneTarget; this compares nearest-resolved
+            // depth exactly, not each individual multisample depth value.
+            glGenFramebuffers(1,&target);glGenRenderbuffers(1,&depth);
+            glBindRenderbuffer(GL_RENDERBUFFER,depth);
+            glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH24_STENCIL8,
+                extent.width,extent.height);
+            glBindFramebuffer(GL_FRAMEBUFFER,target);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,
+                GL_RENDERBUFFER,depth);
+            glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
+            REQUIRE(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER,static_cast<GLuint>(depth_source));
+            glBlitFramebuffer(0,0,extent.width,extent.height,0,0,extent.width,
+                extent.height,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER,target);
+        }
+        glReadPixels(0,0,extent.width,extent.height,GL_DEPTH_COMPONENT,GL_FLOAT,
+            result.depth.data());
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,static_cast<GLuint>(old_read));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER,static_cast<GLuint>(old_draw));
+        glBindRenderbuffer(GL_RENDERBUFFER,static_cast<GLuint>(old_renderbuffer));
+        if(depth)glDeleteRenderbuffers(1,&depth);
+        if(target)glDeleteFramebuffers(1,&target);
+        REQUIRE(glGetError()==GL_NO_ERROR);
+        REQUIRE(std::any_of(result.depth.begin(),result.depth.end(),
+            [](const float value){return value<1.0F;}));
+        return result;
+    };
+    const auto alpha_package=[] {
+        auto texture=fixture::make_texture(false);
+        for(auto& mip:texture.mip_levels)
+            for(std::size_t i=3U;i<mip.rgba_pixels.size();i+=4U)
+                mip.rgba_pixels[i]=std::byte{93};
+        assets::WorldMaterialTextureBinding binding;
+        binding.material_index=0U;binding.texture_asset_index=0U;
+        binding.source_bsp_texture_index=0U;
+        binding.status=assets::WorldMaterialTextureBindingStatus::resolved_embedded;
+        auto textures=assets::WorldTextureSet::create({std::move(texture)},
+            {binding},{},1U);
+        REQUIRE(textures);REQUIRE(textures.texture_set);
+        auto built=world_render::WorldRenderPackageBuilder{}.build(
+            assets::TexturedWorldAsset{make_vertical_world(),
+                std::move(*textures.texture_set)},make_frame_lightmap_set(false,1U,0U));
+        REQUIRE(built);REQUIRE(built.package);
+        return std::make_shared<const world_render::WorldRenderPackage>(
+            std::move(*built.package));
+    }();
+    const std::array packages{alpha_package,
+        make_frame_package(false,true,0U,0U,0x50U),make_full_pipeline_package(),
+        make_frame_package(false,true,0U,0U,0x50U,true)};
+    auto sky=std::make_shared<assets::SkyboxAsset>();
+    for(auto& face:sky->faces) {
+        face.width=face.height=2;face.pixels.resize(16U);
+        for(std::size_t i=0;i<face.pixels.size();i+=4U) {
+            face.pixels[i]=std::byte{53};face.pixels[i+1U]=std::byte{99};
+            face.pixels[i+2U]=std::byte{173};face.pixels[i+3U]=std::byte{255};
+        }
+    }
+    constexpr std::array sample_modes{0U,2U,4U,8U};
+    std::array<unsigned,4U> actual_modes{},compared_pairs{};
+    for(std::size_t mode=0;mode<sample_modes.size();++mode) {
+        const auto samples=sample_modes[mode];
+        for(std::size_t layout=0;layout<packages.size();++layout) {
+            const auto& package=packages[layout];
+            auto scene=layout==2U ? make_full_pipeline_scene(package):make_scene(package);
+            const auto camera=scene.camera;
+            auto map=make_profiled_brush_scene(package,package,{});
+            scene.static_world->scene_package=map;
+            scene.requested_msaa_samples=samples;
+            if(layout==3U)scene.skybox=sky;
+            auto brushes=std::make_shared<world_scene::RuntimeBrushRenderFrame>();
+            brushes->scene_identity=map->resource_identity();
+            brushes->generation=brushes->revision=1U;
+            world_scene::RuntimeBrushRenderInstance instance;
+            instance.entity_number=100U;instance.model_slot=10U;instance.source_model_index=1U;
+            instance.transformed_bounds=package->bounds();
+            brushes->instances.push_back(instance);
+            REQUIRE(world_scene::valid_runtime_brush_frame(*brushes,*map));
+            for(unsigned state=0;state<10U;++state) {
+                CAPTURE(samples,layout,state);
+                scene.camera=camera;scene.transient_world_light.reset();
+                scene.world_effect_light_count=0U;
+                scene.image_adjustments={};scene.screen_effects={};
+                const renderer::RenderPointLight nearby_light{{0.0F,-0.2F,0.0F},
+                    1.25F,0.45F,{0.25F,0.5F,0.75F}};
+                if(state==1U)scene.transient_world_light=nearby_light;
+                if(state>=2U && state<=8U) {
+                    scene.world_effect_lights[0]=nearby_light;scene.world_effect_light_count=1U;
+                }
+                if(state==3U) {
+                    scene.world_effect_lights[0]={{0.4F,-0.35F,0.2F},0.75F,.8F,{.8F,.2F,.1F}};
+                    scene.camera.position.x+=.1F;scene.camera.target.x+=.1F;
+                }
+                if(state==4U)scene.world_effect_lights[0].center={1000,1000,1000};
+                if(state==5U || state==6U) {
+                    scene.transient_world_light=nearby_light;scene.world_effect_light_count=8U;
+                    for(std::size_t i=0;i<scene.world_effect_lights.size();++i) {
+                        scene.world_effect_lights[i]=nearby_light;
+                        scene.world_effect_lights[i].center.x=static_cast<float>(i)*.15F-.5F;
+                        scene.world_effect_lights[i].intensity=.1F+static_cast<float>(i)*.025F;
+                        scene.world_effect_lights[i].radius_units=.4F+static_cast<float>(i)*.2F;
+                    }
+                    if(state==6U) {
+                        std::reverse(scene.world_effect_lights.begin(),scene.world_effect_lights.end());
+                        scene.world_effect_lights[0].color={.9F,.1F,.3F};
+                        scene.camera.vertical_field_of_view_radians=.7F;
+                        gpu.reset_session_resources();
+                    }
+                }
+                if(state==7U)scene.world_effect_lights[0]={{0,-1,0},1,.75F,{1,1,1}};
+                if(state==8U) {
+                    scene.transient_world_light=nearby_light;
+                    scene.transient_world_light->radius_units=0;
+                    scene.world_effect_light_count=8U;
+                    for(auto& light:scene.world_effect_lights)light=nearby_light;
+                    scene.world_effect_lights[0].center.x=std::numeric_limits<float>::quiet_NaN();
+                    scene.world_effect_lights[1].radius_units=0;
+                    scene.world_effect_lights[2].intensity=-1;
+                    scene.world_effect_lights[3].intensity=0;
+                    scene.world_effect_lights[4].color[0]=std::numeric_limits<float>::infinity();
+                }
+                if(state>=8U) {
+                    scene.image_adjustments={.1F,1.04F,1.1F};
+                    scene.screen_effects.overlay_rgba={.8F,.2F,.1F,.25F};
+                }
+                const auto extent=state==7U ? renderer::RenderExtent{64,48}:
+                    renderer::RenderExtent{96,96};
+                const auto before_world=gpu.statistics().draw_call_count;
+                const auto optimized=capture(scene,extent);
+                const auto world_draws=gpu.statistics().draw_call_count-before_world;
+                REQUIRE(world_draws!=0U);
+                actual_modes[mode]=gpu.scene_target_statistics().actual_samples;
+                if(gpu.scene_target_statistics().actual_samples!=samples) {
+                    WARN("Requested MSAA mode is unavailable; mode comparison not run");
+                    break;
+                }
+                auto oracle=scene;oracle.static_world->runtime_brushes=brushes;
+                // Suppress the oracle's first N static-world submissions, where
+                // N is observed from the identical optimized frame above. Only
+                // the identity brush's unchanged general program populates its
+                // color/depth; a bad optimized depth cannot hide legacy samples.
+                // Sky/postprocessing use DrawArrays and are not intercepted.
+                const auto before=gpu.statistics().brush_draw_call_count;
+                Pixels reference;
+                {
+                    LegacyOnlyDraws isolate(world_draws);
+                    reference=capture(oracle,extent);
+                }
+                const auto brush_draws=gpu.statistics().brush_draw_call_count-before;
+                REQUIRE(brush_draws!=0U);
+                REQUIRE(remaining_world_draws==0U);
+                CHECK(skipped_world_draws==world_draws);
+                CHECK(forwarded_brush_draws==brush_draws);
+                CHECK(optimized.color==reference.color);
+                CHECK(optimized.depth==reference.depth);
+                ++compared_pairs[mode];
+            }
+        }
+    }
+    for(std::size_t mode=0;mode<sample_modes.size();++mode)
+        std::cout<<"[opaque-dynamic-coverage] requested="<<sample_modes[mode]
+            <<" actual="<<actual_modes[mode]<<" exact_color_resolved_depth_pairs="
+            <<compared_pairs[mode]<<" expected_pairs=40\n";
+    context->release_renderer();
+    CHECK(glGetError()==GL_NO_ERROR);
+}
+
+TEST_CASE("Opaque dynamic shader failures release partial resources and recover next frame",
+          "[opaque-dynamic-failure][renderer][opengl][actual-context][no-stock]")
+{
+    auto context=try_create_context();
+    if(!context)SKIP("OpenGL 3.3 Core unavailable");
+    context->initialize_renderer();auto& gpu=context->renderer();
+    constexpr renderer::RenderExtent extent{96,96};
+    auto scene=make_scene(make_frame_package(false,false,1U,0U,0x50U));
+    scene.requested_msaa_samples=8U;
+    scene.transient_world_light=renderer::RenderPointLight{{0,-.2F,0},1.5F,.5F,{1,.4F,.2F}};
+    gpu.render(scene,extent);
+    const auto baseline=gpu.observe_framebuffer(extent,scene.clear_color,true);
+    REQUIRE(baseline);
+    static PFNGLSHADERSOURCEPROC original_source{};
+    static PFNGLGETSHADERIVPROC original_shader_status{};
+    static PFNGLATTACHSHADERPROC original_attach{};
+    static PFNGLGETPROGRAMIVPROC original_program_status{};
+    original_source=glad_glShaderSource;original_shader_status=glad_glGetShaderiv;
+    original_attach=glad_glAttachShader;original_program_status=glad_glGetProgramiv;
+    static GLuint targeted_shader{},targeted_program{};
+    static bool fail_compile{};
+    struct InjectFailure {
+        InjectFailure() {
+            targeted_shader=targeted_program=0U;
+            glad_glShaderSource=&source;glad_glGetShaderiv=&shader_status;
+            glad_glAttachShader=&attach;glad_glGetProgramiv=&program_status;
+        }
+        ~InjectFailure() {
+            glad_glShaderSource=original_source;glad_glGetShaderiv=original_shader_status;
+            glad_glAttachShader=original_attach;glad_glGetProgramiv=original_program_status;
+        }
+        static void GLAD_API_PTR source(const GLuint shader,const GLsizei count,
+            const GLchar* const* strings,const GLint* lengths) {
+            original_source(shader,count,strings,lengths);
+            if(count!=1 || strings==nullptr || strings[0]==nullptr)return;
+            const auto text=lengths && lengths[0]>=0
+                ? std::string_view{strings[0],static_cast<std::size_t>(lengths[0])}
+                : std::string_view{strings[0]};
+            // Identify the new lit opaque fragment, never a generic shader
+            // allocation ordinal that another independent pass could change.
+            if(text.find("uniform int u_effect_light_count;")!=std::string_view::npos &&
+                text.find("u_sky_surface")==std::string_view::npos)
+                targeted_shader=shader;
+        }
+        static void GLAD_API_PTR shader_status(const GLuint shader,const GLenum name,GLint* value) {
+            original_shader_status(shader,name,value);
+            if(fail_compile && shader==targeted_shader && name==GL_COMPILE_STATUS)*value=GL_FALSE;
+        }
+        static void GLAD_API_PTR attach(const GLuint program,const GLuint shader) {
+            original_attach(program,shader);
+            if(shader==targeted_shader)targeted_program=program;
+        }
+        static void GLAD_API_PTR program_status(const GLuint program,const GLenum name,GLint* value) {
+            original_program_status(program,name,value);
+            if(!fail_compile && program==targeted_program && name==GL_LINK_STATUS)*value=GL_FALSE;
+        }
+    };
+    for(const bool compile_failure:{true,false}) {
+        CAPTURE(compile_failure);
+        gpu.reset_session_resources();fail_compile=compile_failure;
+        glEnable(GL_SCISSOR_TEST);glScissor(3,4,20,21);
+        GLint before_read{},before_draw{};
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&before_read);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&before_draw);
+        const auto before_multisample=glIsEnabled(GL_MULTISAMPLE);
+        std::optional<opengl::OpenGlRendererErrorCode> failure;
+        {
+            InjectFailure injection;
+            try {gpu.render(scene,extent);}
+            catch(const opengl::OpenGlRendererError& error){failure=error.code();}
+        }
+        REQUIRE(targeted_shader!=0U);REQUIRE(failure);
+        CHECK(*failure==(compile_failure ? opengl::OpenGlRendererErrorCode::shader_compile_failed:
+            opengl::OpenGlRendererErrorCode::program_link_failed));
+        CHECK(glIsShader(targeted_shader)==GL_FALSE);
+        if(!compile_failure) {
+            REQUIRE(targeted_program!=0U);
+            CHECK(glIsProgram(targeted_program)==GL_FALSE);
+        }
+        CHECK(gpu.statistics().failed_upload_count==1U);
+        CHECK_FALSE(gpu.statistics().active_world_resources);
+        GLint restored{};
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&restored);CHECK(restored==before_read);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&restored);CHECK(restored==before_draw);
+        CHECK(glIsEnabled(GL_SCISSOR_TEST)==GL_TRUE);
+        CHECK(glIsEnabled(GL_MULTISAMPLE)==before_multisample);
+        CHECK(glGetError()==GL_NO_ERROR);
+        gpu.render(scene,extent);
+        const auto recovered=gpu.observe_framebuffer(extent,scene.clear_color,true);
+        REQUIRE(recovered);CHECK(recovered.rgba8==baseline.rgba8);
+        CHECK(gpu.statistics().active_world_resources);
+        CHECK(gpu.statistics().failed_upload_count==1U);
+        CHECK(glGetError()==GL_NO_ERROR);
+        glDisable(GL_SCISSOR_TEST);
+    }
+    context->release_renderer();CHECK(glGetError()==GL_NO_ERROR);
+}
+
 TEST_CASE("E20 committed EF_LIGHT changes actual wall pixels and clears without a local timer",
           "[e20][opengl][actual-context][renderer]") {
     auto context=try_create_context();if(!context) SKIP("OpenGL 3.3 Core unavailable");
@@ -2113,7 +2441,9 @@ TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",
     CHECK(statistics.draw_call_count == 4U);
     CHECK(statistics.triangle_count == 8U);
     CHECK(statistics.base_texture_bind_count == 4U);
-    CHECK(statistics.lightmap_bind_count == 2U);
+    // Switching between the opaque fast program and the masked program
+    // invalidates their texture-bind caches once per program per frame.
+    CHECK(statistics.lightmap_bind_count == 4U);
     CHECK(statistics.uploaded_base_texture_count == 2U);
     CHECK(statistics.uploaded_base_mip_level_count == 8U);
     CHECK(statistics.uploaded_lightmap_page_count == 1U);
@@ -2629,12 +2959,13 @@ TEST_CASE("OpenGL brush instances share one aggregate GPU upload",
     // allowed to survive the render boundary.
     CHECK(statistics.program_bind_count == 4U);
     CHECK(statistics.vertex_array_bind_count == 4U);
-    CHECK(statistics.camera_upload_count == 4U);
-    // World uses the no-light variant; brush instances retain the original
-    // program and upload their own light state once per frame.
+    CHECK(statistics.camera_upload_count == 2U);
+    // The opaque world uses the no-light program without camera or model
+    // transform uniforms; brush instances retain the original program and
+    // upload their own light state once per frame.
     CHECK(statistics.light_upload_count == 2U);
     CHECK(statistics.sky_texture_bind_count == 4U);
-    CHECK(statistics.transform_upload_count == 12U);
+    CHECK(statistics.transform_upload_count == 10U);
     CHECK(statistics.visible_brush_instance_count == 2U);
     CHECK(statistics.failed_upload_count == 0U);
     CHECK(glGetError() == GL_NO_ERROR);

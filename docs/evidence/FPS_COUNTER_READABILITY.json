@@ -1,0 +1,44 @@
+{
+  "schema": "hlclient.fps-counter-readability.v1",
+  "date": "2026-10-23",
+  "status": "offline_verified_and_delivered_manual_test_pending",
+  "source_head": "14872565a24d6ca29f9cd4de436d3ff269d6e3c8",
+  "changes": {
+    "sampling": "Completed positive frame intervals, frame count divided by elapsed time; published when window reaches 0.5 seconds and held between publications.",
+    "maximum_readout_updates_hz": 2,
+    "text_scale_before": 1,
+    "text_scale_after": 1.5,
+    "alignment": "top right, 8 framebuffer pixels inset",
+    "range": "rounded integer 0..99999 FPS",
+    "invalid_backward_clock": "reset and reanchor; equal timestamps do not inflate the count",
+    "fps_max_vsync_rendering_simulation_and_diagnostics_changed": false
+  },
+  "tests": {
+    "release_console_pacing": { "cases": 21, "assertions": 5193, "status": "passed" },
+    "debug_console_pacing": { "cases": 21, "assertions": 5193, "status": "passed" },
+    "new_fps_counter_cases": 3,
+    "actual_candidate_idle_launcher_architecture_gl33_and_journal": { "passed": 5, "failed": 0 },
+    "clean_extracted_portable_smoke": "passed",
+    "full_release_suite": "not_rerun_for_this_readout_only_change",
+    "manual_Windows10_new_binary": "not_run",
+    "git_diff_check": "passed",
+    "infrastructure_retry": "Initial app project path build/apps/hlclient.vcxproj did not exist; corrected to actual build/hlclient.vcxproj before compiling."
+  },
+  "delivery": {
+    "base_client_sha256": "B6F7A70150827E836E9A4B97EBADEC32123E70183CC78EB7A2DA3123A95CA0C1",
+    "new_client_sha256": "EC4458D44B7452E03ABBECD12E96D8459A91BBCB7450762223E6764E47CD3BD2",
+    "launcher_unchanged_sha256": "AA152570DA99364D59A86E35B71C9DA19262918A14FEF2887B8A73CA9AE4CA9C",
+    "remote": "\\\\192.168.0.104\\storage\\HLClient-Win10-Test",
+    "remote_changed_files": ["BUILD_INFO.json", "hlclient.exe", "SHA256SUMS.txt"],
+    "all_17_remote_payload_hashes": "verified",
+    "all_existing_per_PC_launcher_settings": "hashes_unchanged",
+    "existing_test_data": "not_modified",
+    "user_confirmed_game_closed_before_replacement": true,
+    "local_build_bin_and_canonical_portable": "updated_with_exact_same_client",
+    "old_shared_payload_rollback": "manual-artifacts/task-records/fps-readable-20261023/baseline/shared-before-fps",
+    "old_local_portable_rollback": "dist/archive/before-fps-readable-20261023"
+  },
+  "records": "manual-artifacts/task-records/fps-readable-20261023",
+  "staged_committed_or_pushed": false,
+  "agent_live_gameplay_connections": 0
+}

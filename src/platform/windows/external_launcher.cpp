@@ -1,5 +1,6 @@
 #include <hlclient/platform/windows/external_launcher.hpp>
 #include <hlclient/platform/windows/secure_output.hpp>
+#include <hlclient/platform/windows/shared_test_storage.hpp>
 #include <algorithm>
 #include <array>
 #include <cwchar>
@@ -118,9 +119,10 @@ bool write_external_text_atomic(const std::filesystem::path& path,const std::str
 ExternalSettingsLoad load_external_settings(const std::filesystem::path& path,const core::ExternalLaunchConfiguration& defaults)
 {
     ExternalSettingsLoad out{defaults,"defaults",{}};
-    const auto attr=::GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){if(::GetLastError()!=ERROR_FILE_NOT_FOUND && ::GetLastError()!=ERROR_PATH_NOT_FOUND)out.status="settings_read_failed";return out;}
+    const auto attr=::GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){if(::GetLastError()!=ERROR_FILE_NOT_FOUND && ::GetLastError()!=ERROR_PATH_NOT_FOUND){out.status="settings_read_failed";out.configuration.video.mode=core::VideoWindowMode::windowed;}return out;}
     const auto text=read_external_text(path,core::kExternalLaunchMaximumBytes);
     if(text){auto parsed=core::decode_external_launch_configuration(*text);if(parsed){out.configuration=std::move(*parsed.configuration);out.status="loaded";return out;}}
+    out.configuration.video.mode=core::VideoWindowMode::windowed;
     auto pinned=open_secure_output_directory(path.parent_path());const auto id=new_external_run_id();
     if(pinned && !id.empty() && (attr&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))==0){const auto backup=path.parent_path()/(L"launcher.corrupt-"+external_widen(id)+L".json");if(::MoveFileExW(path.c_str(),backup.c_str(),MOVEFILE_WRITE_THROUGH)){out.corrupt_backup=backup;out.status="corrupt_settings_backed_up";return out;}}
     out.status="corrupt_settings_backup_failed";return out;
@@ -131,6 +133,7 @@ bool save_external_settings(const std::filesystem::path&path,const core::Externa
 }
 std::optional<std::filesystem::path> default_external_settings_path()
 {
+    if(const auto shared=shared_test_storage_root())return *shared/L"launcher.json";
     PWSTR local{};
     if(FAILED(::SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_DEFAULT,nullptr,&local)))return {};
     const auto result=std::filesystem::path{local}/L"HLClientEngine"/L"launcher.json";
@@ -188,7 +191,7 @@ bool ExternalClientProcess::launch(const WindowsBinaryIdentity&binary,const std:
     PROCESS_INFORMATION child{};const auto directory=binary.canonical_path.parent_path();
     if(!::CreateProcessW(binary.canonical_path.c_str(),mutable_command.data(),nullptr,nullptr,TRUE,CREATE_SUSPENDED|CREATE_NO_WINDOW|EXTENDED_STARTUPINFO_PRESENT|CREATE_UNICODE_ENVIRONMENT,environment.data(),directory.c_str(),&startup.StartupInfo,&child)){impl_->error=::GetLastError();return false;}
     impl_->process.reset(child.hProcess);Handle thread{child.hThread};impl_->pid=child.dwProcessId;impl_->log->close_parent_write_handle();
-    const auto checked=verify_windows_process_image_identity(child.hProcess,binary,kMaximumObservedExecutableBytes,{AuthenticodePolicy::not_required_for_project_owned_binary,false});
+    const auto checked=verify_windows_process_image_identity(child.hProcess,binary,kMaximumObservedExecutableBytes,{AuthenticodePolicy::not_required_for_downloaded_project_owned_binary,false});
     FILETIME created{},exited{},kernel{},user{};
     if(!checked || !::GetProcessTimes(child.hProcess,&created,&exited,&kernel,&user)){impl_->error=checked?::GetLastError():ERROR_INVALID_IMAGE_HASH;static_cast<void>(::TerminateProcess(child.hProcess,126));static_cast<void>(::WaitForSingleObject(child.hProcess,2000));return false;}
     impl_->creation=(static_cast<std::uint64_t>(created.dwHighDateTime)<<32U)|created.dwLowDateTime;

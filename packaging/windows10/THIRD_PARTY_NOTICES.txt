@@ -1,0 +1,59 @@
+HL CLIENT ENGINE — THIRD-PARTY NOTICES
+
+This package redistributes the project-owned Windows launcher, normal
+client and optional diagnostics helper, plus their audited runtime closure.
+Exact versions, origins, sizes and SHA-256 hashes are in BUILD_INFO.json.
+The project MIT license does not relicense third-party components.
+HLClientLauncher.exe is the sole launcher. Gameplay/system diagnostics are
+optional settings in that program; bounded startup error logs remain available.
+
+HL Client Engine
+Copyright (c) 2026 Pvitaly91 and hl-client-engine contributors.
+License: MIT. Complete text: LICENSES/HL-Client-engine.txt.
+Project: https://github.com/Pvitaly91/hl-client-engine
+
+SDL 3.4.14
+SDL3.dll is copied byte-for-byte from the explicitly audited Release input,
+not a system PATH copy. Its exact identity is recorded in BUILD_INFO.json.
+The project pins the following SDL source revision; this notice does not
+claim a reproducible source-to-binary match. License: zlib.
+Complete text: LICENSES/SDL3.txt.
+Source: https://github.com/libsdl-org/SDL
+Pinned source commit: 147a8ee32dbf9ac02f3794964490687b6bbda1bc.
+
+bzip2 1.0.8
+The bounded decoder is linked statically into the client; there is no
+separate bzip2 DLL in this package. License: bzip2-1.0.6.
+Complete upstream text: LICENSES/bzip2.txt.
+Source: https://sourceware.org/bzip2/
+
+GLAD2 generated OpenGL loader
+The generated loader is linked statically. GLAD generator version: 2.0.8,
+commit 73db193f853e2ee079bf3ca8a64aa2eaf6459043.
+Generated files declare:
+    (WTFPL OR CC0-1.0) AND Apache-2.0
+The generator and referenced specification/header materials have their
+respective MIT, Apache-2.0 and permissive Khronos notices.
+Complete upstream notices: LICENSES/GLAD.txt.
+Source: https://github.com/Dav1dde/glad
+
+Microsoft Visual C++ runtime
+The included x86 app-local Visual C++ runtime DLLs are Microsoft software,
+distributed from the licensed Visual Studio REDIST location. They are not
+covered by the project MIT license. The exact authorized source, runtime
+versions and signatures are recorded in BUILD_INFO.json. No Debug CRT,
+compiler, SDK, Windows system DLL or graphics driver is included.
+Microsoft redistribution reference:
+https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files
+
+External prerequisites NOT distributed
+Steam, steam_api.dll, Half-Life game data, game DLLs, sounds, maps, models,
+textures and sprites must come from the user's own licensed installation.
+They remain subject to Valve's applicable terms. The Valve Half-Life SDK
+is a source reference/header boundary of this project, not a bundled SDK,
+runtime or game-asset distribution. Catch2 and test executables are not
+included. Windows APIs and the GPU's OpenGL driver are supplied by the
+operating system/driver installation, not this ZIP.
+
+No Steam account, token, session file or machine-specific settings are
+provided by this package. It does not bypass ownership or authentication.

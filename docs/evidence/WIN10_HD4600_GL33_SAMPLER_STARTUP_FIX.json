@@ -1,0 +1,215 @@
+{
+  "schema": "hlclient.gl33-sampler-startup-fix.v1",
+  "date": "2026-10-23",
+  "status": "offline_verified_candidate_target_acceptance_pending",
+  "source": {
+    "root": "D:/DEV/CPP/HL-Client-engine",
+    "branch": "main",
+    "head": "14872565a24d6ca29f9cd4de436d3ff269d6e3c8",
+    "preexisting_dirty_changes_preserved": true,
+    "cmake_source_binding_verified": true,
+    "staged_committed_or_pushed": false,
+    "git_diff_check": "passed",
+    "task_record": "manual-artifacts/task-records/gl33-sampler-hd4600-20261023",
+    "rollback": [
+      "manual-artifacts/task-records/gl33-sampler-hd4600-20261023/baseline/HEAD.zip",
+      "manual-artifacts/task-records/gl33-sampler-hd4600-20261023/baseline/dirty.patch",
+      "manual-artifacts/task-records/gl33-sampler-hd4600-20261023/baseline/source-overlay",
+      "manual-artifacts/task-records/gl33-sampler-hd4600-20261023/baseline/shared-before-gl33",
+      "dist/archive/before-gl33-sampler-20261023"
+    ],
+    "renderer_source_before_sha256": "809960D8DF6B5540543B52BFD87C561D11B7C9DEF6961A072B5083E918077B52",
+    "renderer_source_after_sha256": "E477A6AC45DDCB06E3A9841966E373048B620A18897A1C2D1C0712BF2507CA33",
+    "renderer_library_before_sha256": "03C4FEA8E47A0868706F873B144CC157F15FCC10316549D4C58749507B4F5AC4",
+    "renderer_library_after_sha256": "C567E97B507E34BCA5025BE3A4C433000E91CAE3B8A618C51A1D9EE21C0813FA"
+  },
+  "original_run": {
+    "id": "6c16d56c9d4ac1d2ae7515b10e345b07",
+    "input_archive": "DESKTOP-GRJ0N3K-admin-95c83dd4.zip",
+    "archive_sha256": "1115A877F26FF99044B5FE1F2A26B464D5044913F81337F3A9E755064685CACE",
+    "input_bytes_preserved": true,
+    "client_sha256": "83DB6619D782741F6429690F5CB0CADC2475F9FF9A1E9AE3905042AA716FBD56",
+    "launcher_sha256": "44BB0846544B2731F491BCBDEACF6CBC69BAA0F8641E39B7ADDA51ACC4EEA982",
+    "windows_build": 19045,
+    "system_adapter_label": "Intel HD Graphics 4600",
+    "actual_gl_context_record": "absent",
+    "run_config": {
+      "startup": "open_client",
+      "window_mode": "borderless",
+      "requested_width": 1092,
+      "requested_height": 614,
+      "requested_msaa": 4,
+      "vsync": true,
+      "brightness": 0,
+      "gamma": 1,
+      "contrast": 1,
+      "actual_extent": null,
+      "actual_samples": null
+    },
+    "fatal": "Native scene resolve failed with invalid_enum",
+    "exit_code": 1,
+    "result": "client_runtime_failed",
+    "forced": false,
+    "gameplay_observed": false,
+    "receipt_status": "not_observed",
+    "video_movement_game_diagnostic_reports": "not_created",
+    "helper_archive": "created",
+    "runtime_original_cause": "not_verified_on_target_Intel"
+  },
+  "fix": {
+    "renderer_file": "src/renderer/opengl/opengl_renderer.cpp",
+    "calls": [
+      { "guard": "HudGlStateGuard", "already_selected_unit": 0 },
+      { "guard": "Projective decal Restore", "already_selected_unit": 0 },
+      { "guard": "SkyDrawState", "already_selected_unit": 2 }
+    ],
+    "before": "glGetIntegeri_v(GL_SAMPLER_BINDING, unit, &sampler)",
+    "after": "glGetIntegerv(GL_SAMPLER_BINDING, &sampler)",
+    "rationale": "Baseline GL3.3 sampler state query is active-unit GetIntegerv; indexed sampler query requires core4.5 or ARB_direct_state_access. Function pointer presence does not establish pname support.",
+    "same_path_on_all_vendors": true,
+    "minimum_gl": "3.3 Core",
+    "sampler_objects_preserved": true,
+    "legal_indexed_ubo_queries_preserved_and_tested": true,
+    "active_selector_texture_and_sampler_restoration": "normal_and_exception_passed",
+    "scene_target_resolve_changed": false,
+    "msaa_quality_downgrade": false,
+    "startup_provenance": {
+      "stderr_prefix": "[opengl-startup]",
+      "context_facts_once_per_renderer": true,
+      "context_identifier": "logical_renderer_instance_bound_to_process_by_startup_journal",
+      "string_limit_bytes": 256,
+      "extension_enumeration_limit": 16384,
+      "boundary_render_attempt_budget": 3,
+      "first_error_fields": ["stage", "context", "frame", "pname", "numeric_gl_error"],
+      "startup_journal_retains_facts_before_video_reports": true,
+      "sensitive_text_filter_preserved": true,
+      "error_drain_loop_added": false,
+      "glFinish_added": false,
+      "per_draw_queries_after_budget": false
+    }
+  },
+  "strict_contract": {
+    "mechanism": "Real hidden driver context and production renderer with minimal GLAD dispatch seam rejecting only indexed GL_SAMPLER_BINDING as unsupported; lawful calls forwarded to driver.",
+    "actual_pre_DSA_hardware_negative": false,
+    "before": {
+      "production_renderer": "saved_baseline_library",
+      "cases": 4,
+      "passed": 1,
+      "failed": 3,
+      "assertions": 45,
+      "assertions_passed": 42,
+      "exit_code": 42,
+      "startup_failure": "Native scene resolve failed with invalid_enum",
+      "log": "baseline/strict-gl33-tests.txt"
+    },
+    "fixture_changes_after_negative": [
+      "Added first-error injected scalar-query case.",
+      "Changed decal fixture alpha mode to straight_alpha to exercise actual projective draw."
+    ],
+    "after_release": { "cases": 5, "assertions": 210, "status": "passed", "log": "strict-gl33-fixed-release.txt" },
+    "after_debug": { "cases": 5, "assertions": 210, "status": "passed", "log": "strict-gl33-fixed-debug.txt" },
+    "inputs": [
+      "active unit 5", "distinct nonzero samplers on units 0 and 2",
+      "correct scalar sampler reads", "legal indexed UBO query",
+      "empty startup", "sky", "HUD", "font/image", "image correction", "projective decals",
+      "normal restoration", "exception restoration",
+      "first-frame injected GL_INVALID_ENUM attributed to SkyDrawState_sampler_snapshot before resolve"
+    ]
+  },
+  "actual_development_context": {
+    "windows_build": 26300,
+    "vendor": "Intel",
+    "renderer": "Intel(R) RaptorLake-S Mobile Graphics Controller",
+    "version": "3.3.0 - Build 32.0.101.7026",
+    "glsl": "3.30 - Build 32.0.101.7026",
+    "profile_mask": 1,
+    "indexed_sampler_query_capability": "supported_by_advertised_DSA",
+    "chosen_path": "GL33_active_unit_GetIntegerv",
+    "target_HD4600_or_pre_DSA_host": false
+  },
+  "regressions": {
+    "startup_journal_debug_and_release": { "each_cases": 2, "each_assertions": 44, "status": "passed" },
+    "debug_renderer_video_state": { "cases": 235, "passed": 223, "skipped": 12, "assertions_passed": 2277349, "log": "debug-renderer-state.txt" },
+    "full_offline_release_ctest": { "registrations": 4250, "failed": 0, "skipped": 75, "elapsed_seconds": 583.66, "log": "final-release-ctest.log" },
+    "final_candidate_exe_binding_gates": { "passed": 6, "failed": 0, "log": "final-candidate-binding-checks.txt", "note": "Reran no-stock, launcher, architecture, strict, journal and Null checks after promoting exact new app binaries into build/bin/Release." },
+    "core_only_api": { "cases": 532, "passed": 531, "skipped": 1, "assertions_passed": 636257, "log": "core-api-release.txt" },
+    "core_only_idle_and_architecture": { "passed": 2, "failed": 0, "log": "core-no-stock-architecture.txt" },
+    "core_only_focused_gl_target": "not_registered_in_game_OFF_configuration_not_claimed_as_pass",
+    "normal_startup_matrix": {
+      "cases": 8,
+      "passed": 8,
+      "configurations": ["Debug", "Release"],
+      "window_modes": ["windowed", "borderless"],
+      "image_correction": ["neutral", "nonneutral"],
+      "requested_msaa": 4,
+      "smoke_frames": 2,
+      "steam_assets_network_required": false,
+      "log": "normal-startup-matrix.json"
+    },
+    "renderer_msaa_and_state_scope": [
+      "AA Off/2/4/8 subject to GPU support", "world/Studio", "thin rails and silhouettes",
+      "color/depth", "default/custom FBO", "separate READ/DRAW and MRT state",
+      "resize", "neutral/nonneutral correction", "P1 paths"
+    ],
+    "asan": { "build": "passed", "runtime": "unavailable", "runtime_exit_hex": "0xC0000142", "runtime_tests": 0, "stdout": "empty", "stderr": "empty", "log": "asan-runtime.json" },
+    "infrastructure_retries_preserved": [
+      { "issue": "Isolated Debug missing SDL", "exit_hex": "0xC0000135", "log": "debug-startup-initial-loader.json" },
+      { "issue": "Stale Debug core rejected --width; rebuilt dependent Debug libraries before retry", "exit_code": 2, "log": "normal-startup-matrix-before-debug-dependency-refresh.json" }
+    ],
+    "skips_are_not_passes": true,
+    "new_fps_claim": false
+  },
+  "delivery": {
+    "archive": "dist/HLClientEngine-Win10.zip",
+    "bytes": 4179317,
+    "sha256": "C78BFB5B9EAF98086FA60DEB8101D2AE2567C89806F265B579C0E841F40D8834",
+    "client_sha256": "B6F7A70150827E836E9A4B97EBADEC32123E70183CC78EB7A2DA3123A95CA0C1",
+    "launcher_sha256": "AA152570DA99364D59A86E35B71C9DA19262918A14FEF2887B8A73CA9AE4CA9C",
+    "helper_sha256": "DAC64EB2490BE791DCD8E183E044977E047A2EDFF71782EFE6D2DC3438BE9659",
+    "sdl_sha256": "AD833F09FAD8D99EADFDB1A765A76F9F20872A3AB6FADBEF648F09334F2FAC87",
+    "client_rebuilt": true,
+    "launcher_rebuild_reason": "Startup journal now retains bounded GL context provenance; three offline-control predicates added.",
+    "helper_rebuilt": false,
+    "packaging_mechanism": "scripts/package_windows10_release.ps1 explicit ClientRebuilt provenance via scripts/build_portable_release.ps1",
+    "package_allowlist_files": 16,
+    "clean_extracted_smoke_cases_passed": 12,
+    "helper_fake_child_assertions_passed": 112,
+    "clean_extracted_allowlist_and_hashes": "passed",
+    "clean_extraction_scope": "Unicode and spaces, outside repository, controlled temporary profile, system-only PATH, existing user settings bypassed",
+    "receipt": "portable/.HLClientEngine-Win10-b6f7a7015082-20261023T154056Z-9ec2e9.packaging/packaging-receipt.json",
+    "personal_logs_settings_auth_or_Valve_assets_packaged": false,
+    "shared_path": "\\\\192.168.0.104\\storage\\HLClient-Win10-Test",
+    "shared_payload_files": 17,
+    "shared_payload_hashes": "passed",
+    "shared_user_settings_unchanged": true,
+    "shared_launch_helper_and_log_storage_check": "passed_offline_on_development_host",
+    "shared_check_run": "b7485521fa74a3bee87f789b99ef0add",
+    "shared_check_intentional_failure_not_target_acceptance": true,
+    "shared_test_data_preserved": true
+  },
+  "acceptance": {
+    "source_contract_fixed": true,
+    "strict_negative_reproduced": true,
+    "actual_Intel_startup_verified": "not_run_on_target_HD4600",
+    "actual_MSAA4_verified": "not_run_on_target_HD4600",
+    "manual_gameplay": "not_run",
+    "historical_runtime_cause_established": false,
+    "manual_steps": [
+      "Extract the full ZIP or use the updated shared native launcher.",
+      "Keep MSAA4 and existing VSync/resolution/image settings.",
+      "Open Client; verify splash/console before connecting manually.",
+      "Close normally; startup logs remain available even if rendering fails early."
+    ]
+  },
+  "scope": {
+    "new_agent_live_steam_gameplay_sessions": 0,
+    "new_automations_services_scheduled_tasks": 0,
+    "server_os_driver_assets_user_settings_changes": false,
+    "ingame_english_unchanged": true
+  },
+  "primary_sources": [
+    "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sampler_objects.txt",
+    "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_direct_state_access.txt",
+    "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Refpages/main/gl4/glGetError.xml"
+  ]
+}

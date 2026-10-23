@@ -19,6 +19,53 @@ target_compile_definitions(hlclient_movement_effect_tests PRIVATE HLCLIENT_HAS_G
 hlclient_enable_warnings(hlclient_movement_effect_tests)
 hlclient_enable_address_sanitizer(hlclient_movement_effect_tests)
 
+# Real production renderer exercised behind a strict pre-DSA GL 3.3 dispatch
+# seam, so modern drivers cannot conceal an unsupported indexed sampler query.
+add_executable(hlclient_gl33_sampler_tests test_gl33_sampler_contract.cpp)
+target_link_libraries(hlclient_gl33_sampler_tests PRIVATE Catch2::Catch2WithMain
+    hlclient::renderer_opengl hlclient::platform hlclient::world_render
+    hlclient_glad SDL3::SDL3-shared)
+target_compile_features(hlclient_gl33_sampler_tests PRIVATE cxx_std_20)
+hlclient_enable_warnings(hlclient_gl33_sampler_tests)
+add_test(NAME hlclient_gl33_sampler_contract COMMAND hlclient_gl33_sampler_tests)
+set_tests_properties(hlclient_gl33_sampler_contract PROPERTIES
+    LABELS "opengl;gl33-sampler;no-stock" TIMEOUT 60 RUN_SERIAL TRUE)
+
+if(WIN32)
+    add_executable(hlclient_startup_gl_provenance_tests test_startup_gl_provenance.cpp)
+    target_link_libraries(hlclient_startup_gl_provenance_tests PRIVATE
+        Catch2::Catch2WithMain hlclient::hash_sha256 shell32 ole32)
+    target_compile_features(hlclient_startup_gl_provenance_tests PRIVATE cxx_std_20)
+    target_compile_definitions(hlclient_startup_gl_provenance_tests PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX)
+    hlclient_enable_warnings(hlclient_startup_gl_provenance_tests)
+    add_test(NAME hlclient_startup_gl_provenance_offline
+        COMMAND hlclient_startup_gl_provenance_tests)
+    set_tests_properties(hlclient_startup_gl_provenance_offline PROPERTIES
+        LABELS "offline;windows;startup;no-gpu" TIMEOUT 30)
+
+    add_executable(hlclient_secure_output_tests test_windows_secure_output.cpp)
+    target_link_libraries(hlclient_secure_output_tests PRIVATE
+        Catch2::Catch2WithMain hlclient::windows_secure_output)
+    target_compile_features(hlclient_secure_output_tests PRIVATE cxx_std_20)
+    hlclient_enable_warnings(hlclient_secure_output_tests)
+    add_test(NAME hlclient_secure_output_offline COMMAND hlclient_secure_output_tests)
+    set_tests_properties(hlclient_secure_output_offline PROPERTIES
+        LABELS "offline;windows;secure-output" TIMEOUT 60)
+
+    add_executable(hlclient_binary_identity_tests test_windows_binary_identity.cpp)
+    target_link_libraries(hlclient_binary_identity_tests PRIVATE
+        Catch2::Catch2WithMain hlclient::windows_binary_identity)
+    target_compile_features(hlclient_binary_identity_tests PRIVATE cxx_std_20)
+    hlclient_enable_warnings(hlclient_binary_identity_tests)
+    hlclient_enable_address_sanitizer(hlclient_binary_identity_tests)
+    add_dependencies(hlclient_binary_identity_tests
+        hlclient_stock_runtime_fake_server hlclient_external_process_fixture)
+    add_test(NAME hlclient_binary_identity_offline COMMAND hlclient_binary_identity_tests)
+    set_tests_properties(hlclient_binary_identity_offline PROPERTIES
+        LABELS "offline;windows;binary-identity" TIMEOUT 60)
+endif()
+
 add_executable(hlclient_tests
     test_model_preparation_cache.cpp
     test_gauss_frame_cost_71b97.cpp

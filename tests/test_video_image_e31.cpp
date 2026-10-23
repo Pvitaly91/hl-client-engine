@@ -9,6 +9,7 @@
 #include <hlclient/renderer/null/null_renderer.hpp>
 #include <hlclient/renderer/render_camera_math.hpp>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_video.h>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -376,7 +377,7 @@ TEST_CASE("E31.1 scene AA request never leaks into SDL default framebuffer attri
     }
 }
 
-TEST_CASE("E31 SDL unsupported exclusive and vanished display recover owned safe window", "[e31][video][sdl][no-stock]") {
+TEST_CASE("E31 SDL unavailable display and unsupported exclusive resolution recover safe window", "[e31][video][sdl][no-stock]") {
     std::unique_ptr<platform::SdlRuntime> runtime;
     try {runtime=std::make_unique<platform::SdlRuntime>();}
     catch(const std::exception& error) {
@@ -385,14 +386,22 @@ TEST_CASE("E31 SDL unsupported exclusive and vanished display recover owned safe
         throw;
     }
     const auto displays=platform::enumerate_video_displays();REQUIRE_FALSE(displays.empty());
-    for(const auto mode:{core::VideoWindowMode::exclusive,core::VideoWindowMode::windowed}) {
-        const auto index=mode==core::VideoWindowMode::exclusive ? 0U : 31U;
-        if(mode==core::VideoWindowMode::windowed && displays.size()==32U)continue;
-        platform::SdlWindow window{{"E31 safe recovery",800,600,true,index,mode,false}};
+    if(displays.size()<32U) {
+        platform::SdlWindow window{{"E31 missing display",800,600,true,31U,core::VideoWindowMode::windowed,false}};
         const auto actual=window.video_state();CHECK(actual.safe_window_recovery);
         CHECK(actual.actual_mode==core::VideoWindowMode::windowed);
-        CHECK(actual.recovery_reason==(mode==core::VideoWindowMode::exclusive ?
-            "exclusive_mode_unsupported" : "selected_display_unavailable"));
+        CHECK(actual.recovery_reason=="selected_display_unavailable");
+        CHECK(actual.window_extent.width<=actual.desktop_extent.width);
+        CHECK(actual.window_extent.height<=actual.desktop_extent.height);
+    }
+    SDL_DisplayMode closest{};
+    if(!SDL_GetClosestFullscreenDisplayMode(displays[0].id,7999,4000,0.0F,false,&closest) ||
+       closest.w!=7999 || closest.h!=4000) {
+        platform::SdlWindow window{{"E31 unavailable exclusive mode",7999,4000,true,0,core::VideoWindowMode::exclusive,false}};
+        const auto actual=window.video_state();
+        CHECK(actual.safe_window_recovery);
+        CHECK(actual.actual_mode==core::VideoWindowMode::windowed);
+        CHECK(actual.recovery_reason=="exclusive_resolution_unavailable");
         CHECK(actual.window_extent.width<=actual.desktop_extent.width);
         CHECK(actual.window_extent.height<=actual.desktop_extent.height);
     }
@@ -404,6 +413,32 @@ TEST_CASE("E31 SDL unsupported exclusive and vanished display recover owned safe
         CHECK(actual.recovery_reason=="window_resolution_exceeds_display");
         CHECK(actual.actual_mode==core::VideoWindowMode::windowed);
         CHECK(actual.window_extent.width<=actual.desktop_extent.width);
+    }
+}
+
+TEST_CASE("E31 SDL exclusive uses the exact advertised mode or recovers safely", "[e31][video][sdl][no-stock]") {
+    std::unique_ptr<platform::SdlRuntime> runtime;
+    try {runtime=std::make_unique<platform::SdlRuntime>();}
+    catch(const std::exception& error) {
+        if(platform::classify_opengl_startup_capability_failure(error)!=platform::OpenGlStartupCapabilityFailure::none)
+            SKIP("SDL startup capability unavailable: "<<error.what());
+        throw;
+    }
+    const auto displays=platform::enumerate_video_displays();REQUIRE_FALSE(displays.empty());
+    SDL_DisplayMode mode{};
+    if(!SDL_GetClosestFullscreenDisplayMode(displays[0].id,800,600,0.0F,false,&mode))
+        SKIP("Display exposes no fullscreen modes");
+    platform::SdlWindow window{{"E31 exact exclusive",mode.w,mode.h,true,0,core::VideoWindowMode::exclusive,false}};
+    const auto actual=window.video_state();
+    CHECK(actual.requested.mode==core::VideoWindowMode::exclusive);
+    if(actual.actual_mode==core::VideoWindowMode::exclusive) {
+        CHECK_FALSE(actual.safe_window_recovery);
+        CHECK(actual.framebuffer_extent.width==mode.w);
+        CHECK(actual.framebuffer_extent.height==mode.h);
+    } else {
+        CHECK(actual.actual_mode==core::VideoWindowMode::windowed);
+        CHECK(actual.safe_window_recovery);
+        CHECK_FALSE(actual.recovery_reason.empty());
     }
 }
 

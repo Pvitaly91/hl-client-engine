@@ -2,6 +2,9 @@
 /build/
 /build-*/
 /out/
+/dist/
+/portable/portable-settings.json
+/portable/logs/
 /CMakeFiles/
 /CMakeCache.txt
 /cmake_install.cmake

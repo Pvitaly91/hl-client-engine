@@ -205,7 +205,14 @@ ExternalLaunchConfigurationResult decode_external_launch_configuration(const std
     const bool legacy=schema && *schema=="hlclient.external-launch.v1" && version && *version==1;
     const bool previous=schema && *schema=="hlclient.external-launch.v2" && version && *version==2;
     const bool current=schema && *schema==kExternalLaunchSchema && version && *version==3;
-    if((!legacy && !previous && !current) || fields->size()!=(legacy?15U:previous?18U:19U) || !endpoint || !name || !root || !runtime || !mode || !display || !width || !height || !brightness || !gamma || !contrast || !volume || !vsync)return {{},"invalid_configuration_fields"};
+    const auto fps=fields->find("show_fps");
+    if(fps!=fields->end()) {
+        const auto* enabled=std::get_if<bool>(&fps->second);
+        if(!enabled)return {{},"invalid_configuration_fields"};
+        c.show_fps=*enabled;
+    }
+    const auto field_count=(legacy?15U:previous?18U:19U)+(fps==fields->end()?0U:1U);
+    if((!legacy && !previous && !current) || fields->size()!=field_count || !endpoint || !name || !root || !runtime || !mode || !display || !width || !height || !brightness || !gamma || !contrast || !volume || !vsync)return {{},"invalid_configuration_fields"};
     for(const auto* p:{display,width,height,volume})if(*p<0 || *p>10000 || std::trunc(*p)!=*p)return {{},"invalid_configuration_integer"};
     const auto normalized=normalize_external_endpoint(*endpoint);if(!normalized)return {{},"invalid_endpoint"};
     c.endpoint=*normalized;c.name=*name;c.asset_root=*root;c.steam_api_runtime=*runtime;c.video.display_index=static_cast<std::size_t>(*display);c.video.width=static_cast<int>(*width);c.video.height=static_cast<int>(*height);c.video.vsync=*vsync;
@@ -238,7 +245,7 @@ std::optional<std::string> encode_external_launch_configuration(const ExternalLa
 {
     if(!validate_external_launch_configuration(c).empty())return {};
     const auto mode=c.video.mode==VideoWindowMode::windowed?"windowed":c.video.mode==VideoWindowMode::borderless?"borderless":"exclusive";
-    return "{\n\"schema\":"+external_json_string(kExternalLaunchSchema)+",\n\"version\":3,\n\"endpoint\":"+external_json_string(*normalize_external_endpoint(c.endpoint))+",\n\"name\":"+external_json_string(c.name)+",\n\"asset_root\":"+external_json_string(c.asset_root)+",\n\"steam_api_runtime\":"+external_json_string(c.steam_api_runtime)+",\n\"display_index\":"+std::to_string(c.video.display_index)+",\n\"window_mode\":"+external_json_string(mode)+",\n\"width\":"+std::to_string(c.video.width)+",\n\"height\":"+std::to_string(c.video.height)+",\n\"vsync\":"+(c.video.vsync?"true":"false")+",\n\"brightness\":"+number(c.image.brightness)+",\n\"gamma\":"+number(c.image.gamma)+",\n\"contrast\":"+number(c.image.contrast)+",\n\"volume\":"+std::to_string(c.volume)+",\n\"msaa_samples\":"+std::to_string(c.video.msaa_samples)+",\n\"hud_scale_auto\":"+(c.hud_scale.automatic?"true":"false")+",\n\"hud_scale\":"+number(c.hud_scale.scale)+",\n\"movement_diagnostics\":"+(c.movement_diagnostics?"true":"false")+"\n}\n";
+    return "{\n\"schema\":"+external_json_string(kExternalLaunchSchema)+",\n\"version\":3,\n\"endpoint\":"+external_json_string(*normalize_external_endpoint(c.endpoint))+",\n\"name\":"+external_json_string(c.name)+",\n\"asset_root\":"+external_json_string(c.asset_root)+",\n\"steam_api_runtime\":"+external_json_string(c.steam_api_runtime)+",\n\"display_index\":"+std::to_string(c.video.display_index)+",\n\"window_mode\":"+external_json_string(mode)+",\n\"width\":"+std::to_string(c.video.width)+",\n\"height\":"+std::to_string(c.video.height)+",\n\"vsync\":"+(c.video.vsync?"true":"false")+",\n\"brightness\":"+number(c.image.brightness)+",\n\"gamma\":"+number(c.image.gamma)+",\n\"contrast\":"+number(c.image.contrast)+",\n\"volume\":"+std::to_string(c.volume)+",\n\"msaa_samples\":"+std::to_string(c.video.msaa_samples)+",\n\"hud_scale_auto\":"+(c.hud_scale.automatic?"true":"false")+",\n\"hud_scale\":"+number(c.hud_scale.scale)+",\n\"movement_diagnostics\":"+(c.movement_diagnostics?"true":"false")+",\n\"show_fps\":"+(c.show_fps?"true":"false")+"\n}\n";
 }
 bool ExternalLauncherLifecycle::busy() const noexcept{return phase_==ExternalLauncherPhase::starting || phase_==ExternalLauncherPhase::active || phase_==ExternalLauncherPhase::cancelling;}
 std::optional<ExternalLaunchConfiguration> merge_external_launch_configuration(
@@ -269,6 +276,7 @@ std::optional<ExternalLaunchConfiguration> merge_external_launch_configuration(
     apply(baseline.hud_scale.scale,edited.hud_scale.scale,out.hud_scale.scale);
     apply(baseline.volume,edited.volume,out.volume);
     apply(baseline.movement_diagnostics,edited.movement_diagnostics,out.movement_diagnostics);
+    apply(baseline.show_fps,edited.show_fps,out.show_fps);
     return validate_external_launch_configuration(out).empty()?std::optional{std::move(out)}:std::nullopt;
 }
 std::optional<SceneAntialiasingObservation> decode_external_msaa_observation(

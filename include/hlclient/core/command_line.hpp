@@ -111,7 +111,11 @@ struct CommandLineOptions {
     bool audio_on_focus_loss{false}; // explicit manual listener, default unchanged
     bool mute_glock_fire_sound{false}; // manual audio-isolation diagnostic, not gameplay
     bool hud_draw{true}, crosshair{true}, hud_fastswitch{}, hud_diagnostics{};
+    // No override preserves saved console.cfg; explicit CLI/launcher values
+    // take precedence over that configuration for this launch.
+    std::optional<bool> show_fps;
     bool movement_diagnostics{}; // bounded, opt-in movement incident recording
+    bool no_session_reports{}; // portable gameplay: no on-disk attempt/diagnostic receipts
     // Optional session presentation evidence from the owned server query;
     // absence remains unknown and never supplies a server cvar assignment.
     std::optional<bool> server_blood_presentation;

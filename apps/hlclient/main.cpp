@@ -10944,11 +10944,13 @@ int run_console_application(hlclient::core::CommandLineOptions options) {
         if(const auto config=hlclient::core::decode_external_launch_configuration(*text);config) {
           const auto explicit_base=options.base_directory;
           const auto explicit_runtime=options.steam_api_runtime;
+          const auto explicit_show_fps=options.show_fps;
           options.external_server_client=true;
           (void)hlclient::app::apply_external_launch_configuration(*config.configuration,options);
           options.external_server_client=false;
           if(explicit_base)options.base_directory=explicit_base;
           if(explicit_runtime)options.steam_api_runtime=explicit_runtime;
+          if(explicit_show_fps)options.show_fps=explicit_show_fps;
         }
 #endif
     options.connect_endpoint.reset();

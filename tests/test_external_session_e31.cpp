@@ -32,7 +32,7 @@ TEST_CASE("E31 external typed config maps one normal unlimited client without re
     auto parsed=core::parse_command_line(launch_arguments);REQUIRE(parsed);
     REQUIRE(parsed.options->external_server_client);
     core::ExternalLaunchConfiguration config;
-    config.name="LAN_Player";config.volume=71;config.movement_diagnostics=true;
+    config.name="LAN_Player";config.volume=71;config.movement_diagnostics=true;config.show_fps=true;
     config.video={1,core::VideoWindowMode::borderless,1920,1080,false};
     config.video.msaa_samples=8;config.hud_scale={false,.75F};
     config.image={0.1F,1.2F,1.3F};
@@ -51,6 +51,10 @@ TEST_CASE("E31 external typed config maps one normal unlimited client without re
     CHECK(options.video==config.video);CHECK(options.image==config.image);CHECK(options.audio_volume==71);
     CHECK(options.hud_scale==config.hud_scale);
     CHECK(options.movement_diagnostics);
+    CHECK(options.show_fps==std::optional<bool>{true});
+    auto hidden_fps=config;hidden_fps.show_fps=false;
+    REQUIRE(app::apply_external_launch_configuration(hidden_fps,*parsed.options));
+    CHECK(parsed.options->show_fps==std::optional<bool>{false});
     CHECK(options.renderer==core::RendererBackend::opengl);
     auto invalid=config;invalid.endpoint="127.0.0.1:27015";
     CHECK_FALSE(app::apply_external_launch_configuration(invalid,*parsed.options));

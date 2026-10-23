@@ -2589,14 +2589,30 @@ target_link_libraries(
 if(WIN32)
     target_link_libraries(hlclient PRIVATE hlclient::windows_secure_output hlclient::external_launcher)
 
+    add_executable(hlclient_system_diagnostics
+        apps/hlclient_system_diagnostics/main.cpp
+        apps/hlclient_system_diagnostics/wpr_probe.cpp
+        apps/hlclient_system_diagnostics/wpr_probe.hpp)
+    set_target_properties(hlclient_system_diagnostics PROPERTIES
+        OUTPUT_NAME HLClientSystemDiagnostics FOLDER Apps)
+    hlclient_enable_warnings(hlclient_system_diagnostics)
+    target_compile_options(hlclient_system_diagnostics PRIVATE /utf-8)
+    target_compile_definitions(hlclient_system_diagnostics PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_link_libraries(hlclient_system_diagnostics PRIVATE pdh psapi powrprof)
+
     add_executable(hlclient_launcher WIN32 apps/hlclient_launcher/main.cpp)
+    add_dependencies(hlclient_launcher hlclient_system_diagnostics)
     set_target_properties(hlclient_launcher PROPERTIES OUTPUT_NAME HLClientLauncher FOLDER Apps)
     hlclient_enable_warnings(hlclient_launcher)
     target_compile_options(hlclient_launcher PRIVATE /utf-8)
     target_compile_definitions(hlclient_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    # Journal entry executes before SDL DLL resolution so missing portable
+    # dependencies produce an exportable startup error instead of a loader exit.
+    target_link_options(hlclient_launcher PRIVATE /DELAYLOAD:SDL3.dll)
     target_link_libraries(hlclient_launcher PRIVATE hlclient::external_launcher
         hlclient::platform SDL3::SDL3-shared hlclient::windows_network_isolation hlclient::hash_sha256
-        hlclient::session_receipts user32 gdi32 comctl32 shell32 ole32 uuid)
+        hlclient::session_receipts user32 gdi32 comctl32 shell32 ole32 uuid delayimp)
     add_custom_command(TARGET hlclient_launcher POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:SDL3::SDL3-shared>"
             "$<TARGET_FILE_DIR:hlclient_launcher>" VERBATIM)

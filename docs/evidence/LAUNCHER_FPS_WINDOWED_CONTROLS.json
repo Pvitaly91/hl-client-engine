@@ -1,0 +1,63 @@
+{
+  "schema": "hlclient.launcher-fps-windowed-controls.v1",
+  "date": "2026-10-23",
+  "status": "offline_verified_delivered_both_manual_gameplay_pending",
+  "head": "14872565a24d6ca29f9cd4de436d3ff269d6e3c8",
+  "controls": {
+    "show_fps": "Native automatic checkbox; saved bool show_fps; off for a new profile.",
+    "windowed_mode": "Native automatic checkbox replacing mode combo; checked=windowed, unchecked=borderless fullscreen.",
+    "fresh_launcher_default": "borderless",
+    "existing_profile_modes": "preserved",
+    "global_CLI_video_default": "unchanged_windowed",
+    "fullscreen_type": "borderless_desktop_extent_not_exclusive",
+    "fps_max_vsync_and_simulation_changed_by_FPS_checkbox": false
+  },
+  "persistence": {
+    "schema": "hlclient.external-launch.v3",
+    "legacy_v1_v2_v3_without_show_fps": "accepted_false_default",
+    "typed_CLI": "--show-fps 0|1; optional bool distinguishes explicit false from no override",
+    "normal_child_path": "typed launch-config JSON -> apply_external_launch_configuration -> CommandLineOptions -> ConsoleApplication",
+    "startup_precedence": "Explicit launcher/CLI FPS choice reapplied after old console.cfg, without writing settings during startup.",
+    "runtime_console_commands": "cl_showfps remains supported and synchronizes launcher settings",
+    "merge": "independent changes preserved by existing three-way field merge",
+    "user_profile_paths_logs_and_settings_copied_between_PCs": false
+  },
+  "recovery": {
+    "corrupt_settings_default": "windowed",
+    "pending_video_display_missing_and_unsupported_exclusive": "windowed",
+    "additional_issue_found": "A projected windowed form baseline could let three-way merge restore the old fullscreen disk mode.",
+    "fix": "Retain original VideoSettings as recovery merge baseline until successful save; keep recovery as an explicit unsaved edit.",
+    "regression": "Native offline UI merges recovered windowed form against unchanged borderless disk profile and requires windowed result.",
+    "intermediate_candidate": "Earlier launcher 69C50261CB2B00C99E3BBE7CC12843F99579D60EE7ECEE90A54263AC8726212B was replaced in both deliveries before handoff; retained in task records."
+  },
+  "verification": {
+    "release_console_suite": { "cases": 303, "passed": 287, "skipped": 16, "assertions_passed": 101192 },
+    "debug_focused": { "cases_passed": 40, "assertions_passed": 5852 },
+    "native_UI_release_debug": "passed_real_Win32_controls_DPI96_120_144_192_scroll_checkbox_types_FPS_roundtrip_fullscreen_default_recovery_merge",
+    "final_delivered_candidate_checks": { "passed": 5, "failed": 0, "scope": "launcher UI, normal idle without assets, architecture, strict GL3.3 sampler, startup provenance" },
+    "actual_shared_launcher_offline_UI": "passed_on_development_PC_not_a_Windows10_user_gameplay_run",
+    "clean_extracted_portable_smoke": "passed",
+    "skips": "explicit_opt_in_original_asset_controls_not_passes",
+    "git_diff_check": "passed",
+    "full_4250_registration_suite": "not_rerun_for_this_launcher_change",
+    "manual_Windows10_final_binary": "not_run",
+    "agent_live_Steam_gameplay_connections": 0
+  },
+  "delivery": {
+    "client_sha256": "7765414555A74E4AB5CD3BDF7DDCE9DA03D998C4BA76659ACF43FCE92022CD22",
+    "launcher_sha256": "88412CCFB80256837194B01C2EF41A5233C95B8673AACD5BD34E56A8D214DFEE",
+    "helper_unchanged": true,
+    "local": "D:/DEV/CPP/HL-Client-engine/build/bin/Release",
+    "shared": "\\\\192.168.0.104\\storage\\HLClient-Win10-Test",
+    "local_shared_identical_core_EXE_DLL_count": 4,
+    "shared_payload_hashes_verified": 17,
+    "canonical_portable_directory": "dist/HLClientEngine",
+    "canonical_zip": "dist/HLClientEngine-Win10.zip",
+    "zip_sha256": "A458169809AEF0AA85C7BE80C71A40A72D26480A1BB15439ED879789FE73D2F5",
+    "local_and_all_shared_per_PC_settings_hashes_unchanged": true,
+    "old_portable_rollback": "dist/archive/before-launcher-fps-windowed-20261023",
+    "old_shared_rollback": "manual-artifacts/task-records/launcher-fps-windowed-20261023/baseline/shared-before-controls"
+  },
+  "records": "manual-artifacts/task-records/launcher-fps-windowed-20261023",
+  "staged_committed_or_pushed": false
+}

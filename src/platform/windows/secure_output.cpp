@@ -124,7 +124,10 @@ private:
     if (written == 0U || written >= required) return false;
     opened.resize(written);
     constexpr std::wstring_view extended_prefix{L"\\\\?\\"};
-    if (opened.starts_with(extended_prefix)) {
+    constexpr std::wstring_view extended_unc_prefix{L"\\\\?\\UNC\\"};
+    if (opened.starts_with(extended_unc_prefix)) {
+        opened.replace(0U, extended_unc_prefix.size(), L"\\\\");
+    } else if (opened.starts_with(extended_prefix)) {
         opened.erase(0U, extended_prefix.size());
     }
     const auto expected_name = expected.native();

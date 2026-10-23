@@ -14,11 +14,14 @@ struct ExternalLaunchConfiguration final {
     std::string name{"Player"};
     std::string asset_root{"D:\\DEV\\HLCLIENT-RESEARCH\\Half-Life"};
     std::string steam_api_runtime{"D:\\DEV\\HLCLIENT-RESEARCH\\Half-Life\\steam_api.dll"};
-    VideoSettings video;
+    // The launcher starts fullscreen; standalone CLI/video defaults remain
+    // windowed. Explicit modes in existing profiles are decoded unchanged.
+    VideoSettings video{.mode=VideoWindowMode::borderless};
     ImageAdjustments image;
     HudScaleSettings hud_scale;
     unsigned volume{35};
     bool movement_diagnostics{};
+    bool show_fps{};
     friend bool operator==(const ExternalLaunchConfiguration&,const ExternalLaunchConfiguration&)=default;
 };
 struct ExternalLaunchConfigurationResult final {

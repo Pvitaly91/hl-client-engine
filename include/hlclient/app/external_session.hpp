@@ -32,6 +32,7 @@ namespace hlclient::app {
     options.hud_scale=config.hud_scale;
     options.audio_volume=config.volume;
     options.movement_diagnostics=config.movement_diagnostics;
+    options.show_fps=config.show_fps;
     options.net_trace=true; // bounded diagnostics, redacted by existing callbacks
     return true;
 }

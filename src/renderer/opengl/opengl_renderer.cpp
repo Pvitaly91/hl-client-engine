@@ -21,10 +21,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <optional>
@@ -85,7 +88,8 @@ void require_no_gl_error(
     if (error != GL_NO_ERROR) {
         fail(code,
             std::string{operation} + " failed with " +
-                std::string{gl_error_name(error)});
+                std::string{gl_error_name(error)}+" (GL error="+
+                std::to_string(static_cast<unsigned>(error))+")");
     }
 }
 
@@ -238,7 +242,9 @@ public:
         glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &buffer_);
         glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture_);
         glActiveTexture(GL_TEXTURE0); glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture_zero_);
-        glGetIntegeri_v(GL_SAMPLER_BINDING, 0U, &sampler_zero_);
+        // GL3.3 queries the sampler on the active unit. The indexed form
+        // requires ARB_direct_state_access / core4.5, not merely this function.
+        glGetIntegerv(GL_SAMPLER_BINDING, &sampler_zero_);
         glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack_buffer_);
         glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack_alignment_);
         glGetIntegerv(GL_UNPACK_ROW_LENGTH, &unpack_row_length_);
@@ -484,6 +490,99 @@ void main()
 }
 )GLSL";
 
+// This program is used only for static-world opaque, non-sky materials when
+// there are no dynamic lights. It is separate from the established world
+// shaders so their source, compilation and fallback behaviour stay intact.
+inline constexpr char kOpaqueUnlitWorldVertexShader[] = R"GLSL(#version 330 core
+layout(location = 0) in vec3 in_position;
+layout(location = 2) in vec2 in_base_uv;
+layout(location = 3) in vec2 in_lightmap_uv;
+
+uniform mat4 u_model_view_projection;
+
+out vec2 fragment_base_uv;
+out vec2 fragment_lightmap_uv;
+
+void main()
+{
+    gl_Position = u_model_view_projection * vec4(in_position, 1.0);
+    fragment_base_uv = in_base_uv;
+    fragment_lightmap_uv = in_lightmap_uv;
+}
+)GLSL";
+
+inline constexpr char kOpaqueUnlitWorldFragmentShader[] = R"GLSL(#version 330 core
+in vec2 fragment_base_uv;
+in vec2 fragment_lightmap_uv;
+
+uniform sampler2D u_base_texture;
+uniform sampler2DArray u_lightmap_texture;
+uniform int u_lightmap_enabled;
+uniform int u_lightmap_layer;
+
+out vec4 output_color;
+
+void main()
+{
+    vec4 base_sample = texture(u_base_texture, fragment_base_uv);
+    vec3 light_factor = vec3(1.0);
+    if (u_lightmap_enabled != 0) {
+        light_factor = texture(
+            u_lightmap_texture,
+            vec3(fragment_lightmap_uv, float(u_lightmap_layer))).rgb;
+    }
+    output_color = vec4(base_sample.rgb * light_factor, base_sample.a);
+}
+)GLSL";
+
+// Opaque static-world draws with dynamic lights need world position, but not
+// the sky branch or masked-alpha discard. Keep the original light expressions
+// and their order unchanged; masked materials and brushes retain the general
+// program. This variant is prepared once with the immutable GPU resources.
+inline constexpr char kOpaqueLitWorldFragmentShader[] = R"GLSL(#version 330 core
+in vec2 fragment_base_uv;
+in vec2 fragment_lightmap_uv;
+in vec3 fragment_world_position;
+
+uniform sampler2D u_base_texture;
+uniform sampler2DArray u_lightmap_texture;
+uniform int u_lightmap_enabled;
+uniform int u_lightmap_layer;
+uniform vec3 u_point_light_center;
+uniform vec3 u_point_light_color;
+uniform float u_point_light_radius;
+uniform float u_point_light_intensity;
+uniform int u_effect_light_count;
+uniform vec4 u_effect_light_center_radius[8];
+uniform vec4 u_effect_light_color_intensity[8];
+
+out vec4 output_color;
+
+void main()
+{
+    vec4 base_sample = texture(u_base_texture, fragment_base_uv);
+    vec3 light_factor = vec3(1.0);
+    if (u_lightmap_enabled != 0) {
+        light_factor = texture(
+            u_lightmap_texture,
+            vec3(fragment_lightmap_uv, float(u_lightmap_layer))).rgb;
+    }
+    if (u_point_light_radius > 0.0) {
+        float falloff = max(0.0, 1.0 - length(fragment_world_position -
+            u_point_light_center) / u_point_light_radius);
+        light_factor += u_point_light_color *
+            (u_point_light_intensity * falloff * falloff);
+    }
+    for (int i=0; i<u_effect_light_count && i<8; ++i) {
+        float falloff=max(0.0,1.0-length(fragment_world_position-
+            u_effect_light_center_radius[i].xyz)/u_effect_light_center_radius[i].w);
+        light_factor+=u_effect_light_color_intensity[i].rgb *
+            (u_effect_light_color_intensity[i].w*falloff*falloff);
+    }
+    output_color = vec4(base_sample.rgb * light_factor, base_sample.a);
+}
+)GLSL";
+
 [[nodiscard]] GlObject compile_shader(
     const GLenum type,
     const char* const source,
@@ -521,6 +620,8 @@ void main()
 struct ProgramState {
     GlObject program;
     bool omits_dynamic_lights{};
+    bool ordinary_opaque_no_dynamic{};
+    bool ordinary_opaque_dynamic{};
     GLint model_view_projection{-1};
     GLint model_transform{-1};
     GLint base_texture{-1};
@@ -639,6 +740,136 @@ struct ProgramState {
     require_no_gl_error(
         OpenGlRendererErrorCode::program_link_failed,
         "OpenGL sampler-uniform initialization");
+    return result;
+}
+
+[[nodiscard]] ProgramState create_opaque_unlit_world_program()
+{
+    auto vertex = compile_shader(
+        GL_VERTEX_SHADER, kOpaqueUnlitWorldVertexShader,
+        "Opaque static-world vertex shader");
+    auto fragment = compile_shader(
+        GL_FRAGMENT_SHADER, kOpaqueUnlitWorldFragmentShader,
+        "Opaque static-world fragment shader");
+
+    const GLuint name = glCreateProgram();
+    require_no_gl_error(
+        OpenGlRendererErrorCode::program_link_failed,
+        "Opaque static-world program creation");
+    if (name == 0U) {
+        fail(OpenGlRendererErrorCode::program_link_failed,
+            "Unable to create the opaque static-world shader program");
+    }
+    auto program = GlObject::adopt(GlObjectKind::program, name);
+    glAttachShader(name, vertex.name());
+    glAttachShader(name, fragment.name());
+    glLinkProgram(name);
+    require_no_gl_error(
+        OpenGlRendererErrorCode::program_link_failed,
+        "Opaque static-world program link");
+    GLint linked = GL_FALSE;
+    glGetProgramiv(name, GL_LINK_STATUS, &linked);
+    require_no_gl_error(
+        OpenGlRendererErrorCode::program_link_failed,
+        "Opaque static-world program-status query");
+    if (linked != GL_TRUE) {
+        const auto log = bounded_driver_log(name, false);
+        fail(OpenGlRendererErrorCode::program_link_failed,
+            std::string{"Opaque static-world shader link failed"} +
+                (log.empty() ? std::string{} : ": " + log));
+    }
+
+    ProgramState result;
+    result.program = std::move(program);
+    result.omits_dynamic_lights = true;
+    result.ordinary_opaque_no_dynamic = true;
+    result.model_view_projection =
+        glGetUniformLocation(name, "u_model_view_projection");
+    result.base_texture = glGetUniformLocation(name, "u_base_texture");
+    result.lightmap_texture = glGetUniformLocation(name, "u_lightmap_texture");
+    result.lightmap_enabled = glGetUniformLocation(name, "u_lightmap_enabled");
+    result.lightmap_layer = glGetUniformLocation(name, "u_lightmap_layer");
+    require_no_gl_error(
+        OpenGlRendererErrorCode::program_link_failed,
+        "Opaque static-world uniform lookup");
+    if (result.model_view_projection < 0 || result.base_texture < 0 ||
+        result.lightmap_texture < 0 || result.lightmap_enabled < 0 ||
+        result.lightmap_layer < 0) {
+        fail(OpenGlRendererErrorCode::program_link_failed,
+            "Opaque static-world shader did not retain every required uniform");
+    }
+    glUseProgram(name);
+    glUniform1i(result.base_texture, 0);
+    glUniform1i(result.lightmap_texture, 1);
+    glUseProgram(0U);
+    require_no_gl_error(
+        OpenGlRendererErrorCode::program_link_failed,
+        "Opaque static-world sampler-uniform initialization");
+    return result;
+}
+
+[[nodiscard]] ProgramState create_opaque_lit_world_program()
+{
+    auto vertex = compile_shader(
+        GL_VERTEX_SHADER, kWorldVertexShader,
+        "Opaque dynamic-light static-world vertex shader");
+    auto fragment = compile_shader(
+        GL_FRAGMENT_SHADER, kOpaqueLitWorldFragmentShader,
+        "Opaque dynamic-light static-world fragment shader");
+    const GLuint name = glCreateProgram();
+    require_no_gl_error(OpenGlRendererErrorCode::program_link_failed,
+        "Opaque dynamic-light static-world program creation");
+    if (name == 0U) {
+        fail(OpenGlRendererErrorCode::program_link_failed,
+            "Unable to create the opaque dynamic-light static-world program");
+    }
+    auto program = GlObject::adopt(GlObjectKind::program, name);
+    glAttachShader(name, vertex.name());
+    glAttachShader(name, fragment.name());
+    glLinkProgram(name);
+    require_no_gl_error(OpenGlRendererErrorCode::program_link_failed,
+        "Opaque dynamic-light static-world program link");
+    GLint linked = GL_FALSE;
+    glGetProgramiv(name, GL_LINK_STATUS, &linked);
+    require_no_gl_error(OpenGlRendererErrorCode::program_link_failed,
+        "Opaque dynamic-light static-world program-status query");
+    if (linked != GL_TRUE) {
+        const auto log = bounded_driver_log(name, false);
+        fail(OpenGlRendererErrorCode::program_link_failed,
+            std::string{"Opaque dynamic-light static-world shader link failed"} +
+                (log.empty() ? std::string{} : ": " + log));
+    }
+    ProgramState result;
+    result.program = std::move(program);
+    result.ordinary_opaque_dynamic = true;
+    result.model_view_projection = glGetUniformLocation(name, "u_model_view_projection");
+    result.model_transform = glGetUniformLocation(name, "u_model_transform");
+    result.base_texture = glGetUniformLocation(name, "u_base_texture");
+    result.lightmap_texture = glGetUniformLocation(name, "u_lightmap_texture");
+    result.lightmap_enabled = glGetUniformLocation(name, "u_lightmap_enabled");
+    result.lightmap_layer = glGetUniformLocation(name, "u_lightmap_layer");
+    result.point_light_center = glGetUniformLocation(name, "u_point_light_center");
+    result.point_light_color = glGetUniformLocation(name, "u_point_light_color");
+    result.point_light_radius = glGetUniformLocation(name, "u_point_light_radius");
+    result.point_light_intensity = glGetUniformLocation(name, "u_point_light_intensity");
+    result.effect_lights = detail::EffectLightUniforms::locate(name);
+    require_no_gl_error(OpenGlRendererErrorCode::program_link_failed,
+        "Opaque dynamic-light static-world uniform lookup");
+    if (result.model_view_projection < 0 || result.model_transform < 0 ||
+        result.base_texture < 0 || result.lightmap_texture < 0 ||
+        result.lightmap_enabled < 0 || result.lightmap_layer < 0 ||
+        result.point_light_center < 0 || result.point_light_color < 0 ||
+        result.point_light_radius < 0 || result.point_light_intensity < 0 ||
+        !result.effect_lights.valid()) {
+        fail(OpenGlRendererErrorCode::program_link_failed,
+            "Opaque dynamic-light static-world shader did not retain every required uniform");
+    }
+    glUseProgram(name);
+    glUniform1i(result.base_texture, 0);
+    glUniform1i(result.lightmap_texture, 1);
+    glUseProgram(0U);
+    require_no_gl_error(OpenGlRendererErrorCode::program_link_failed,
+        "Opaque dynamic-light static-world sampler-uniform initialization");
     return result;
 }
 
@@ -1080,6 +1311,8 @@ struct GpuWorldResources {
     world_render::WorldRendererResourceIdentity identity{};
     ProgramState program;
     std::optional<ProgramState> no_dynamic_light_program;
+    std::optional<ProgramState> ordinary_opaque_no_dynamic_program;
+    std::optional<ProgramState> ordinary_opaque_dynamic_program;
     GeometryState geometry;
     std::vector<GlObject> base_textures;
     std::vector<GlObject> lightmap_pages;
@@ -1102,8 +1335,13 @@ struct GpuSceneResources {
     GpuWorldResources result;
     result.identity = package.resource_identity();
     result.program = create_world_program();
-    if (prepare_no_dynamic_light_program)
+    if (prepare_no_dynamic_light_program) {
         result.no_dynamic_light_program.emplace(create_world_program(true));
+        result.ordinary_opaque_no_dynamic_program.emplace(
+            create_opaque_unlit_world_program());
+        result.ordinary_opaque_dynamic_program.emplace(
+            create_opaque_lit_world_program());
+    }
     result.geometry = upload_geometry(package);
 
     const auto textures = package.textured_world().textures.textures();
@@ -1262,18 +1500,36 @@ void draw_package_range(
             "Visible draw command has an invalid package range");
     }
     const auto& material = materials[material_index];
-    const ProgramState& program =
+    const bool use_ordinary_opaque_no_dynamic =
+        state.use_no_dynamic_light_world_program &&
+        resources.ordinary_opaque_no_dynamic_program &&
+        material.base_texture_alpha_mode ==
+            assets::WorldTextureAlphaMode::opaque &&
+        !material.sky_surface;
+    const ProgramState& program = use_ordinary_opaque_no_dynamic
+        ? *resources.ordinary_opaque_no_dynamic_program
+        : !state.use_no_dynamic_light_world_program &&
+              resources.ordinary_opaque_dynamic_program &&
+              material.base_texture_alpha_mode ==
+                  assets::WorldTextureAlphaMode::opaque &&
+              !material.sky_surface
+            ? *resources.ordinary_opaque_dynamic_program
+        :
         state.use_no_dynamic_light_world_program &&
         resources.no_dynamic_light_program
             ? *resources.no_dynamic_light_program : resources.program;
+    const bool ordinary_opaque = program.ordinary_opaque_no_dynamic ||
+        program.ordinary_opaque_dynamic;
 
     if(state.bound_resources!=&resources || state.bound_program!=&program) {
         glUseProgram(program.program.name());
         ++counters.program_binds;
         glBindVertexArray(resources.geometry.vertex_array.name());
         ++counters.vertex_array_binds;
-        glUniform3f(program.camera_position,state.sky_eye.x,state.sky_eye.y,state.sky_eye.z);
-        ++counters.camera_uploads;
+        if (!ordinary_opaque) {
+            glUniform3f(program.camera_position,state.sky_eye.x,state.sky_eye.y,state.sky_eye.z);
+            ++counters.camera_uploads;
+        }
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_CUBE_MAP,state.sky_texture);
         ++counters.sky_texture_binds;
@@ -1305,9 +1561,11 @@ void draw_package_range(
     }
     const GLint sky_surface=state.sky_texture && material.sky_surface ? 1 : 0;
     if(state.sky_surface!=sky_surface) {
-        glUniform1i(program.sky_surface,sky_surface);
+        if (!ordinary_opaque) {
+            glUniform1i(program.sky_surface,sky_surface);
+            ++counters.material_uniform_uploads;
+        }
         state.sky_surface=sky_surface;
-        ++counters.material_uniform_uploads;
     }
     if(!state.transforms_valid || state.model_view_projection!=model_view_projection) {
         glUniformMatrix4fv(program.model_view_projection,1,GL_FALSE,
@@ -1316,10 +1574,12 @@ void draw_package_range(
         ++counters.transform_uploads;
     }
     if(!state.transforms_valid || state.model_transform!=model_transform) {
-        glUniformMatrix4fv(program.model_transform,1,GL_FALSE,
-            model_transform.values.data());
+        if (!program.ordinary_opaque_no_dynamic) {
+            glUniformMatrix4fv(program.model_transform,1,GL_FALSE,
+                model_transform.values.data());
+            ++counters.transform_uploads;
+        }
         state.model_transform=model_transform;
-        ++counters.transform_uploads;
     }
     state.transforms_valid=true;
 
@@ -1353,9 +1613,11 @@ void draw_package_range(
     const GLint masked_alpha=material.base_texture_alpha_mode==
         assets::WorldTextureAlphaMode::masked_index_255 ? 1 : 0;
     if(state.masked_alpha!=masked_alpha) {
-        glUniform1i(program.masked_alpha,masked_alpha);
+        if (!ordinary_opaque) {
+            glUniform1i(program.masked_alpha,masked_alpha);
+            ++counters.material_uniform_uploads;
+        }
         state.masked_alpha=masked_alpha;
-        ++counters.material_uniform_uploads;
     }
 
     const auto byte_offset = checked_index_byte_offset(first_index);
@@ -1427,6 +1689,44 @@ OpenGlRendererErrorCode OpenGlRendererError::code() const noexcept
 
 class OpenGlRenderer::Implementation final {
 public:
+    void record_startup_context(const GLint profile) const {
+        const auto fact=[&](const char* key,const std::string& value){
+            std::fprintf(stderr,"[opengl-startup] context=%llu %s=%s\n",
+                static_cast<unsigned long long>(startup_context_),key,value.c_str());
+        };
+        const auto bounded_string=[](GLenum name){
+            const auto* raw=reinterpret_cast<const unsigned char*>(glGetString(name));
+            std::string out;
+            if(!raw)return std::string{"unavailable"};
+            for(std::size_t i=0;i<256U && raw[i];++i)out+=raw[i]>=32U && raw[i]!=127U?static_cast<char>(raw[i]):'_';
+            return out;
+        };
+        fact("vendor",bounded_string(GL_VENDOR));fact("renderer",bounded_string(GL_RENDERER));
+        fact("version",bounded_string(GL_VERSION));fact("glsl",bounded_string(GL_SHADING_LANGUAGE_VERSION));
+        GLint major{},minor{},extensions{};
+        glGetIntegerv(GL_MAJOR_VERSION,&major);glGetIntegerv(GL_MINOR_VERSION,&minor);
+        glGetIntegerv(GL_NUM_EXTENSIONS,&extensions);
+        bool dsa=false;
+        if(extensions>=0 && extensions<=16384)for(GLint i=0;i<extensions;++i){
+            const auto* name=reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS,static_cast<GLuint>(i)));
+            if(name && std::strncmp(name,"GL_ARB_direct_state_access",sizeof("GL_ARB_direct_state_access"))==0){dsa=true;break;}
+        }
+        fact("actual_version",std::to_string(major)+"."+std::to_string(minor));
+        fact("profile_mask",std::to_string(profile));
+        fact("indexed_sampler_query_capability",(major>4 || (major==4 && minor>=5) || dsa)?"supported":"not_advertised");
+        fact("sampler_query_path","GL33_active_unit_GetIntegerv");
+        std::fflush(stderr);
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"OpenGL startup context facts");
+    }
+    void begin_startup_frame() noexcept {
+        startup_checks_=startup_frame_<3U;
+        if(startup_checks_)++startup_frame_;
+    }
+    void startup_boundary(const std::string_view stage) const {
+        if(startup_checks_)require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+            "OpenGL startup context="+std::to_string(startup_context_)+" frame="+
+            std::to_string(startup_frame_)+" stage="+std::string{stage});
+    }
     GLuint prepare_sky(const std::shared_ptr<const assets::SkyboxAsset>& sky) {
         if(!sky) {sky_asset_.reset();sky_texture_.reset();return 0;}
         if(sky_asset_==sky)return sky_texture_.name();
@@ -1436,6 +1736,7 @@ public:
         for(const auto& face:sky->faces)if(face.width!=size || face.height!=size ||
             face.pixel_format!=assets::ImagePixelFormat::rgba8 || face.pixels.size()!=std::size_t(size)*size*4)return 0;
         HudGlStateGuard state;
+        startup_boundary("sky_upload_sampler_snapshot_GL_SAMPLER_BINDING_0x8919");
         glActiveTexture(GL_TEXTURE0);
         GLint old_cube{};glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP,&old_cube);
         struct RestoreCube {GLint old;~RestoreCube(){glBindTexture(GL_TEXTURE_CUBE_MAP,static_cast<GLuint>(old));}} restore{old_cube};
@@ -1470,6 +1771,7 @@ public:
         if(!right)fail(OpenGlRendererErrorCode::camera_invalid,"Environment camera side invalid");
         const auto up=cross(*right,*forward);
         HudGlStateGuard state;
+        startup_boundary("sky_draw_sampler_snapshot_GL_SAMPLER_BINDING_0x8919");
         glActiveTexture(GL_TEXTURE0);GLint old_cube{};glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP,&old_cube);
         const auto seamless=glIsEnabled(GL_TEXTURE_CUBE_MAP_SEAMLESS);
         struct RestoreCube {GLint old;GLboolean seamless;~RestoreCube(){glBindTexture(GL_TEXTURE_CUBE_MAP,static_cast<GLuint>(old));if(!seamless)glDisable(GL_TEXTURE_CUBE_MAP_SEAMLESS);}} restore{old_cube,seamless};
@@ -1775,6 +2077,7 @@ void main() {
         // desktop/palette gamma or implicit sRGB conversion is introduced.
         HudGlStateGuard state;
         ImageCopyGlStateGuard copy_state;
+        startup_boundary("image_adjustment_sampler_snapshot_GL_SAMPLER_BINDING_0x8919");
         if(!image_program_.name()) {
             constexpr char vertex[]=R"GLSL(#version 330 core
 void main() {
@@ -1929,7 +2232,7 @@ void main() {
                 glGetIntegerv(GL_CURRENT_PROGRAM,&program);glGetIntegerv(GL_VERTEX_ARRAY_BINDING,&array);
                 glGetIntegerv(GL_ARRAY_BUFFER_BINDING,&buffer);glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
                 glActiveTexture(GL_TEXTURE0);glGetIntegerv(GL_TEXTURE_BINDING_2D,&texture);
-                glGetIntegeri_v(GL_SAMPLER_BINDING,0U,&sampler);
+                glGetIntegerv(GL_SAMPLER_BINDING,&sampler);
                 glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING,&unpack_buffer);
                 glGetIntegerv(GL_UNPACK_ALIGNMENT,&unpack_alignment);glGetIntegerv(GL_UNPACK_ROW_LENGTH,&unpack_row_length);
                 glGetIntegerv(GL_UNPACK_SKIP_ROWS,&unpack_skip_rows);glGetIntegerv(GL_UNPACK_SKIP_PIXELS,&unpack_skip_pixels);
@@ -1950,6 +2253,7 @@ void main() {
                 glPixelStorei(GL_UNPACK_SKIP_ROWS,unpack_skip_rows);glPixelStorei(GL_UNPACK_SKIP_PIXELS,unpack_skip_pixels);
             }
         } restore;
+        startup_boundary("decal_sampler_snapshot_GL_SAMPLER_BINDING_0x8919");
         if (!decal_program_.name()) create_decal_program();
         auto texture_cache=std::find_if(decal_textures_.begin(),decal_textures_.end(),[&](const auto& e) {
             return e && e->asset==decals.texture;
@@ -2527,6 +2831,7 @@ void main(){
         if(color[3]<=0.0F)return;
         const HudGlStateGuard state;
         const ImageCopyGlStateGuard extra_state;
+        startup_boundary("screen_overlay_sampler_snapshot_GL_SAMPLER_BINDING_0x8919");
         if(!hud_program_.name())create_hud_program();
         if(!screen_overlay_array_.name()) {
             screen_overlay_array_=create_vertex_array();screen_overlay_buffer_=create_buffer();
@@ -2566,6 +2871,7 @@ void main(){
         if(extent.width<=0||extent.height<=0||ui.commands.empty())return;
         const HudGlStateGuard state;
         const ImageCopyGlStateGuard extra_state;
+        startup_boundary("console_UI_sampler_snapshot_GL_SAMPLER_BINDING_0x8919");
         if(!hud_program_.name())create_hud_program();
         if(!screen_ui_array_.name()) {
             screen_ui_array_=create_vertex_array();screen_ui_buffer_=create_buffer();
@@ -2680,6 +2986,7 @@ void main(){
             return;
         }
         const HudGlStateGuard state_guard;
+        startup_boundary("HUD_sampler_snapshot_GL_SAMPLER_BINDING_0x8919");
         ++hud_cache_clock_;
         if (!hud_commands_ || *hud_commands_ != hud || extent != hud_extent_) {
             hud_commands_ = hud;
@@ -3366,6 +3673,10 @@ private:
     OpenGlGpuTimingStatistics gpu_timing_;
     bool gpu_timing_failed_{};
     bool gpu_timing_unsupported_{};
+    inline static std::atomic_uint64_t next_startup_context_{1U};
+    const std::uint64_t startup_context_{next_startup_context_.fetch_add(1U)};
+    unsigned startup_frame_{};
+    bool startup_checks_{};
 };
 
 OpenGlRenderer::OpenGlRenderer()
@@ -3403,6 +3714,7 @@ OpenGlRenderer::OpenGlRenderer()
         information_.device = open_gl_string(GL_RENDERER);
         information_.version = open_gl_string(GL_VERSION);
         implementation_ = std::make_unique<Implementation>();
+        implementation_->record_startup_context(context_profile_mask);
     } catch (...) {
         implementation_.reset();
         gladLoaderUnloadGL();
@@ -3469,6 +3781,7 @@ const OpenGlGpuTimingStatistics& OpenGlRenderer::gpu_timing_statistics() const n
 
 void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
 {
+    implementation_->begin_startup_frame();
     if(!core::valid_image_adjustments(scene.image_adjustments))
         throw std::invalid_argument{"Image adjustments are outside the finite bounded contract"};
     if(!valid_render_screen_effects(scene.screen_effects))
@@ -3589,14 +3902,16 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     }
     implementation_->gpu_world_subpass_boundary(OpenGlWorldGpuSubpass::sky);
     const auto sky_texture=implementation_->prepare_sky(scene.skybox);
+    implementation_->startup_boundary("sky_prepared");
     implementation_->render_sky(sky_texture,view_camera,{width,height});
+    implementation_->startup_boundary("sky_drawn");
     // Unit2 and seamless cube filtering are owned for this frame. Portal sky
     // polygons keep their actual depth: entities behind a sky brush stay hidden.
     struct SkyDrawState {
         GLint active{},binding{},sampler{};GLboolean seamless{};
         SkyDrawState() {
             glGetIntegerv(GL_ACTIVE_TEXTURE,&active);glActiveTexture(GL_TEXTURE2);
-            glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP,&binding);glGetIntegeri_v(GL_SAMPLER_BINDING,2,&sampler);
+            glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP,&binding);glGetIntegerv(GL_SAMPLER_BINDING,&sampler);
             seamless=glIsEnabled(GL_TEXTURE_CUBE_MAP_SEAMLESS);glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
             glBindSampler(2,0);glActiveTexture(active);
         }
@@ -3606,6 +3921,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             if(!seamless)glDisable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
         }
     } sky_draw_state;
+    implementation_->startup_boundary("SkyDrawState_sampler_snapshot_GL_SAMPLER_BINDING_0x8919");
     if (!scene.static_world) {
         implementation_->release_world_resources();
         const auto additional=std::min<std::size_t>(scene.additional_world_decals.size(),64U);
@@ -3681,6 +3997,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             glDepthMask(GL_TRUE);
         }
         implementation_->gpu_pass_boundary(OpenGlGpuPass::msaa_resolve);
+        implementation_->startup_boundary("before_scene_resolve");
         const auto resolved_color=implementation_->scene_target.resolve(
             target_frame,scene.image_adjustments!=core::ImageAdjustments{});
         require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Native scene resolve");
@@ -3691,6 +4008,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         if (scene.basic_hud)
             implementation_->render_hud(*scene.basic_hud, {width, height},scene.hud_sprite_bindings);
         if(scene.screen_ui)implementation_->render_screen_ui(*scene.screen_ui,{width,height});
+        implementation_->startup_boundary("HUD_console_state_restored");
         ++statistics.rendered_frame_count;
         return;
     }
@@ -4241,6 +4559,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         glDepthMask(GL_TRUE);
     }
     implementation_->gpu_pass_boundary(OpenGlGpuPass::msaa_resolve);
+    implementation_->startup_boundary("before_scene_resolve");
     const auto resolved_color=implementation_->scene_target.resolve(
         target_frame,scene.image_adjustments!=core::ImageAdjustments{});
     require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Native scene resolve");
@@ -4258,6 +4577,7 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     }
 
     if(scene.screen_ui)implementation_->render_screen_ui(*scene.screen_ui,{width,height});
+    implementation_->startup_boundary("HUD_console_state_restored");
     ++statistics.rendered_frame_count;
     statistics.draw_call_count += frame.draw_calls;
     statistics.brush_draw_call_count += frame.brush_draw_calls;

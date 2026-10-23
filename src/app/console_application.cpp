@@ -50,6 +50,8 @@ ConsoleApplication::ConsoleApplication(core::CommandLineOptions options,ConsoleT
         options_.video.width,options_.video.height,hidden,options_.video.display_index,
         options_.video.mode,options_.video.vsync,options_.video.msaa_samples}),theme_(std::move(theme)),
         monotonic_seconds_(std::move(monotonic_seconds)) {
+    const auto requested_show_fps=options_.show_fps;
+    show_fps_=requested_show_fps.value_or(false);
     shared_baseline_.endpoint=options_.connect_endpoint.value_or(shared_baseline_.endpoint);
     shared_baseline_.name=options_.player_name;
     if(options_.base_directory)shared_baseline_.asset_root=*options_.base_directory;
@@ -57,6 +59,7 @@ ConsoleApplication::ConsoleApplication(core::CommandLineOptions options,ConsoleT
     shared_baseline_.video=options_.video;shared_baseline_.image=options_.image;
     shared_baseline_.hud_scale=options_.hud_scale;shared_baseline_.volume=options_.audio_volume;
     shared_baseline_.movement_diagnostics=options_.movement_diagnostics;
+    shared_baseline_.show_fps=show_fps_;
 #ifdef _WIN32
     if(use_user_config)shared_settings_path_=platform::windows::default_external_settings_path();
     if(shared_settings_path_)config_=std::make_unique<ConsoleConfigStore>(shared_settings_path_->parent_path()/"console");
@@ -84,6 +87,14 @@ ConsoleApplication::ConsoleApplication(core::CommandLineOptions options,ConsoleT
         for(unsigned step=0;step<32;++step)
             (void)executor_.process(state_,generation_,32,[this](auto line){model_.append(line);});
         executor_.discard_pending();
+        startup_config_=false;
+    }
+    if(requested_show_fps){
+        // An explicit launcher/CLI selection wins over an old console.cfg.
+        // Use the same typed cvar callback without writing settings at startup.
+        const std::array<std::string,1> value{*requested_show_fps?"1":"0"};
+        startup_config_=true;
+        (void)cvars_.execute("cl_showfps",value,{});
         startup_config_=false;
     }
     (void)window_.set_text_input_enabled(true);
@@ -332,7 +343,12 @@ void ConsoleApplication::compose(renderer::RenderScene& scene,bool scene_ready_f
         automatic.commands.insert(automatic.commands.end(),std::make_move_iterator(frame.commands.begin()),std::make_move_iterator(frame.commands.end()));
         frame=std::move(automatic);
     }
-    if(show_fps_)frame.commands.emplace_back(renderer::ScreenUiText{std::to_string(static_cast<unsigned>(std::isfinite(fps_)?std::clamp(fps_,0.0,99999.0):0.0))+" FPS",float(width)-90,8,1,6,9,{1,1,0,1},{}});
+    if(show_fps_){
+        const auto text=std::to_string(static_cast<unsigned>(std::round(std::isfinite(fps_)?std::clamp(fps_,0.0,99999.0):0.0)))+" FPS";
+        constexpr float fps_scale=1.5F,fps_advance=9.0F;
+        const auto x=std::max(8.0F,float(width)-8.0F-float(text.size())*fps_advance);
+        frame.commands.emplace_back(renderer::ScreenUiText{text,x,8,fps_scale,fps_advance,13.5F,{1,1,0,1},{}});
+    }
     if(!frame.commands.empty())scene.screen_ui=std::move(frame);
 }
 void ConsoleApplication::present_idle(){
@@ -342,8 +358,26 @@ void ConsoleApplication::present_idle(){
 }
 void ConsoleApplication::pace(){
     cvars_.observe_applied("hlc_msaa",std::int64_t{renderer_.scene_target_statistics().actual_samples});
-    const auto now=Clock::now();const auto duration=std::chrono::duration<double>{now-last_present_}.count();
-    if(duration>0)fps_=1.0/duration;last_present_=now;
+    const auto now=Clock::now();
+    const auto presented=seconds();
+    if(!std::isfinite(presented)||(fps_last_present_&&presented<*fps_last_present_)){
+        fps_last_present_.reset();fps_window_elapsed_=0;fps_window_frames_=0;fps_=0;
+    }
+    if(std::isfinite(presented)){
+        if(fps_last_present_){
+            const auto duration=presented-*fps_last_present_;
+            if(duration>0){
+                fps_window_elapsed_+=duration;++fps_window_frames_;
+                // Only the readout is averaged and held at 2 Hz. Rendering,
+                // VSync, limiter deadlines and simulation remain untouched.
+                if(fps_window_elapsed_>=0.5){
+                    fps_=static_cast<double>(fps_window_frames_)/fps_window_elapsed_;
+                    fps_window_elapsed_=0;fps_window_frames_=0;
+                }
+            }
+        }
+        fps_last_present_=presented;
+    }
     if(options_.movement_diagnostics){++pacing_statistics_.observations;pacing_statistics_.last_wait_us=0;}
     if(fps_max_>0){const auto target=frame_started_+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>{1.0/fps_max_});
         if(target>now){
@@ -367,6 +401,7 @@ void ConsoleApplication::persist_shared_settings(){
     if(!shared_settings_path_)return;
     auto edited=shared_baseline_;edited.image=options_.image;edited.video=options_.video;
     edited.hud_scale=options_.hud_scale;edited.volume=options_.audio_volume;
+    if(!startup_config_)edited.show_fps=show_fps_;
     const auto parent=platform::windows::open_secure_output_directory(shared_settings_path_->parent_path().parent_path());
     std::error_code error;
     if(parent)std::filesystem::create_directory(shared_settings_path_->parent_path(),error);
@@ -431,7 +466,10 @@ void ConsoleApplication::register_settings(){
     add("volume","Audio master 0..1",double(options_.audio_volume)/100.0,ValueType::real,0,1,
         [this](const auto& value,auto& actual){options_.audio_volume=static_cast<unsigned>(std::lround(std::get<double>(value)*100));actual=double(options_.audio_volume)/100;persist_shared_settings();return CommandResult{};},true);
     const auto boolean=[&](const char* name,bool& setting){add(name,"0 off, 1 on",setting,ValueType::boolean,0,1,[&setting](const auto& value,auto& actual){setting=std::get<bool>(value);actual=value;return CommandResult{};});};
-    boolean("crosshair",options_.crosshair);boolean("hud_draw",options_.hud_draw);boolean("hud_fastswitch",options_.hud_fastswitch);boolean("cl_showfps",show_fps_);
+    boolean("crosshair",options_.crosshair);boolean("hud_draw",options_.hud_draw);boolean("hud_fastswitch",options_.hud_fastswitch);
+    add("cl_showfps","Show FPS counter (shared with launcher)",show_fps_,ValueType::boolean,0,1,
+        [this](const auto& value,auto& actual){show_fps_=std::get<bool>(value);options_.show_fps=show_fps_;actual=value;
+            if(!startup_config_)persist_shared_settings();return CommandResult{};},true);
     add("fps_max","Presentation frame cap; 0 unlimited, does not change usercmd timestep",fps_max_,ValueType::real,0,1000,
         [this](const auto& value,auto& actual){const auto fps=std::get<double>(value);if(fps>0&&fps<20)return CommandResult{false,"fps_max must be 0 or 20..1000"};fps_max_=fps;actual=value;return CommandResult{};});
     const auto image_setting=[&](const char* name,float& setting,double low,double high){add(name,"Local image-correction control (shared with launcher)",double(setting),ValueType::real,low,high,

@@ -1,0 +1,42 @@
+{
+  "schema": "hlclient.shared-windows-test-evidence.v1",
+  "destination": "\\\\192.168.0.104\\storage\\HLClient-Win10-Test",
+  "entrypoint": "HLClientLauncher.exe",
+  "storage": "test-data/<computer>-<user>-<identity>/startup and runs",
+  "status": "ready_for_windows10_user_test",
+  "client_rebuilt": true,
+  "prior_gameplay_acceptance_claimed": false,
+  "credentials_included": false,
+  "client_sha256": "83DB6619D782741F6429690F5CB0CADC2475F9FF9A1E9AE3905042AA716FBD56",
+  "launcher_sha256": "44BB0846544B2731F491BCBDEACF6CBC69BAA0F8641E39B7ADDA51ACC4EEA982",
+  "payload_files": 17,
+  "log_monitor": {
+    "automation_id": "windows-10",
+    "interval_minutes": 5,
+    "stop_after_first_real_windows10_result": true
+  },
+  "changes": [
+    "Explicit fixed sidecar opts launcher, client and console into per-computer/per-user shared storage.",
+    "Startup errors are flushed during the child lifetime, with existing bounded filtering.",
+    "Both optional diagnostics default on for shared tests and remain switchable.",
+    "Extended UNC paths normalize before output identity comparison and binary component walking.",
+    "Stable legacy handle file IDs support SMB servers which reject FileIdInfo with ERROR_INVALID_PARAMETER; all metadata, link, path, hash and process identity checks remain.",
+    "ExecuteFile added only to the test package EXE/DLL file ACLs. No share/server security settings changed."
+  ],
+  "validation": {
+    "host_os_build": 26300,
+    "windows10_runtime": "awaiting_user_test",
+    "secure_output_local": "passed: 52 assertions in 4 cases",
+    "secure_output_actual_smb": "passed: 52 assertions in 4 cases; own disposable output fixtures",
+    "binary_identity_local": "passed: 260 assertions in 8 cases; symbolic-link assertion skipped because host cannot create symlinks",
+    "remote_payload_hashes": "all passed",
+    "actual_smb_native_ui_check": "passed; exit 0",
+    "actual_smb_launcher_client_helper": "passed; exit 0",
+    "intentional_child_error": "SDL initialization failed: hlclient-offline-missing-driver not available; exit 1; fatal text retained on share",
+    "system_archive": "helper_exited_0 and archive_ready=true on share",
+    "final_offline_run_id": "66924eb0e010b8ac478233180b343f3c",
+    "final_startup_id": "20261023T143540Z-11720-257547500",
+    "live_gameplay_tests": 0,
+    "steam_auth_tests": 0
+  }
+}
