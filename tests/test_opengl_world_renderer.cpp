@@ -1970,12 +1970,34 @@ TEST_CASE("E4.1 transient light changes nearby wall pixels without changing a di
 }
 
 TEST_CASE("Opaque dynamic world shaders match the legacy brush color and resolved depth",
-          "[opaque-dynamic][renderer][opengl][actual-context][no-stock]")
+          "[opaque-dynamic][msaa4-zero-light][msaa4-unrolled-effects][renderer][opengl][actual-context][no-stock]")
 {
     auto context=try_create_context();
     if(!context)SKIP("OpenGL 3.3 Core unavailable");
     context->initialize_renderer();
     auto& gpu=context->renderer();
+    static PFNGLSHADERSOURCEPROC original_unrolled_shader_source{};
+    static unsigned compiled_unrolled_effect_sources{};
+    original_unrolled_shader_source=glad_glShaderSource;
+    struct UnrolledEffectSourceProbe {
+        UnrolledEffectSourceProbe() {
+            compiled_unrolled_effect_sources=0U;
+            glad_glShaderSource=&source;
+        }
+        ~UnrolledEffectSourceProbe(){glad_glShaderSource=original_unrolled_shader_source;}
+        static void GLAD_API_PTR source(const GLuint shader,const GLsizei count,
+            const GLchar* const* strings,const GLint* lengths) {
+            std::string combined;
+            for(GLsizei i=0;i<count;++i) {
+                if(lengths && lengths[i]>=0)
+                    combined.append(strings[i],static_cast<std::size_t>(lengths[i]));
+                else combined.append(strings[i]);
+            }
+            if(combined.find("#define HLC_FULL_EIGHT_EFFECT_LIGHTS")!=std::string::npos)
+                ++compiled_unrolled_effect_sources;
+            original_unrolled_shader_source(shader,count,strings,lengths);
+        }
+    } unrolled_effect_source_probe;
     // Capture only the target identity during clear. All readbacks/resolves
     // below are offline correctness work, outside the production render path.
     static PFNGLCLEARPROC original_clear{};
@@ -2007,6 +2029,22 @@ TEST_CASE("Opaque dynamic world shaders match the legacy brush color and resolve
                 --remaining_world_draws;++skipped_world_draws;return;
             }
             ++forwarded_brush_draws;
+            original_draw_elements(mode,count,type,indices);
+        }
+    };
+    static std::uint64_t observed_no_light_draws{},observed_lit_draws{};
+    struct WorldProgramProbe {
+        WorldProgramProbe() {
+            observed_no_light_draws=observed_lit_draws=0U;
+            glad_glDrawElements=&draw;
+        }
+        ~WorldProgramProbe(){glad_glDrawElements=original_draw_elements;}
+        static void GLAD_API_PTR draw(const GLenum mode,const GLsizei count,
+            const GLenum type,const void* indices) {
+            GLint program{};glGetIntegerv(GL_CURRENT_PROGRAM,&program);
+            if(glGetUniformLocation(static_cast<GLuint>(program),"u_effect_light_count")<0)
+                ++observed_no_light_draws;
+            else ++observed_lit_draws;
             original_draw_elements(mode,count,type,indices);
         }
     };
@@ -2085,6 +2123,7 @@ TEST_CASE("Opaque dynamic world shaders match the legacy brush color and resolve
         }
     }
     constexpr std::array sample_modes{0U,2U,4U,8U};
+    constexpr unsigned light_states=35U;
     std::array<unsigned,4U> actual_modes{},compared_pairs{};
     for(std::size_t mode=0;mode<sample_modes.size();++mode) {
         const auto samples=sample_modes[mode];
@@ -2104,7 +2143,7 @@ TEST_CASE("Opaque dynamic world shaders match the legacy brush color and resolve
             instance.transformed_bounds=package->bounds();
             brushes->instances.push_back(instance);
             REQUIRE(world_scene::valid_runtime_brush_frame(*brushes,*map));
-            for(unsigned state=0;state<10U;++state) {
+            for(unsigned state=0;state<light_states;++state) {
                 CAPTURE(samples,layout,state);
                 scene.camera=camera;scene.transient_world_light.reset();
                 scene.world_effect_light_count=0U;
@@ -2147,16 +2186,127 @@ TEST_CASE("Opaque dynamic world shaders match the legacy brush color and resolve
                     scene.world_effect_lights[3].intensity=0;
                     scene.world_effect_lights[4].color[0]=std::numeric_limits<float>::infinity();
                 }
-                if(state>=8U) {
+                // Conservative zero-contribution controls. These same inputs
+                // run against B0 and B2: the unchanged identity-brush shader is
+                // the independent color/depth oracle, not another optimized
+                // static-world render. Program receipts distinguish whether
+                // a savings path actually ran without making B0 fail merely
+                // for retaining its original lit program.
+                if(state>=10U) {
+                    scene.world_effect_light_count=1U;
+                    scene.world_effect_lights[0]=nearby_light;
+                }
+                if(state==10U)scene.world_effect_lights[0]={{0,-1,0},1,.75F,{1,1,1}};
+                if(state==11U)scene.world_effect_lights[0]={{0,-1.125F,0},1,.75F,{1,1,1}};
+                if(state==12U)scene.world_effect_lights[0]={{0,-4,0},1,.75F,{1,1,1}};
+                if(state==13U) {
+                    scene.world_effect_light_count=2U;
+                    scene.world_effect_lights[1]={{1000,1000,1000},1,.75F,{1,1,1}};
+                }
+                if(state==14U) {
+                    scene.world_effect_light_count=8U;
+                    for(std::size_t i=0;i<scene.world_effect_lights.size();++i)
+                        scene.world_effect_lights[i]={{1000+static_cast<float>(i),1000,1000},
+                            1,.75F,{1,1,1}};
+                    scene.transient_world_light=scene.world_effect_lights[0];
+                    std::reverse(scene.world_effect_lights.begin(),scene.world_effect_lights.end());
+                }
+                if(state==15U)scene.world_effect_lights[0].center={2097152,0,0};
+                if(state==16U) {
+                    scene.world_effect_light_count=3U;
+                    scene.world_effect_lights[0].intensity=0;
+                    scene.world_effect_lights[1]=nearby_light;
+                    scene.world_effect_lights[1].radius_units=0;
+                    scene.world_effect_lights[2]=nearby_light;
+                    scene.world_effect_lights[2].center.x=std::numeric_limits<float>::quiet_NaN();
+                }
+                if(state==17U)scene.world_effect_lights[0].color={0,0,0};
+                // Numeric edge controls preserve the original arithmetic for
+                // tiny radii and huge deltas. Odd-sized viewports
+                // also exercise the central pixel of the symmetric world quad.
+                if(state==18U)scene.world_effect_lights[0]={{0,3.0e-30F,0},
+                    1.0e-30F,.45F,{.25F,.5F,.75F}};
+                if(state==19U) {
+                    const auto tiny=std::numeric_limits<float>::denorm_min();
+                    scene.world_effect_lights[0]={{0,3.0F*tiny,0},
+                        tiny,.45F,{.25F,.5F,.75F}};
+                }
+                if(state==20U)scene.world_effect_lights[0]={{0,-3,0},
+                    std::nextafter(1.0F,0.0F),.75F,{1,1,1}};
+                if(state==21U)scene.world_effect_lights[0]={{0,-2,0},1,.75F,{1,1,1}};
+                if(state==22U)scene.world_effect_lights[0]={{0,
+                    -std::nextafter(2.0F,std::numeric_limits<float>::infinity()),0},
+                    1,.75F,{1,1,1}};
+                if(state==23U)scene.world_effect_lights[0]={{0,-.25F,0},
+                    4,.25F,{.1F,.3F,.2F}};
+                if(state==24U)scene.world_effect_lights[0]={{0,-8192,0},
+                    4096,.75F,{1,1,1}};
+                if(state==25U)scene.world_effect_lights[0]={{0,
+                    -std::nextafter(8192.0F,std::numeric_limits<float>::infinity()),0},
+                    4096,.75F,{1,1,1}};
+                if(state==26U)scene.world_effect_lights[0]={{1.0e18F,0,0},1,.75F,{1,1,1}};
+                if(state==27U)scene.world_effect_lights[0]={{
+                    std::nextafter(1.0e18F,0.0F),0,0},1,.75F,{1,1,1}};
+                if(state==28U)scene.world_effect_lights[0]={{1.0e20F,0,0},1,.75F,{1,1,1}};
+                if(state==29U) {
+                    scene.transient_world_light=nearby_light;
+                    scene.transient_world_light->radius_units=std::numeric_limits<float>::quiet_NaN();
+                    scene.world_effect_lights[0].center.x=std::numeric_limits<float>::infinity();
+                }
+                if(state==30U) {
+                    scene.world_effect_light_count=8U;
+                    for(auto& light:scene.world_effect_lights)
+                        light={{1000,1000,1000},1,.2F,{1,1,1}};
+                    scene.world_effect_lights[0].radius_units=std::numeric_limits<float>::quiet_NaN();
+                    scene.world_effect_lights[3].intensity=0;
+                    scene.world_effect_lights[7]=nearby_light;
+                    scene.transient_world_light=nearby_light;
+                }
+                if(state==31U) {
+                    scene.transient_world_light=renderer::RenderPointLight{{0,3.0e-30F,0},
+                        1.0e-30F,.45F,{.25F,.5F,.75F}};
+                    scene.world_effect_light_count=2U;
+                    scene.world_effect_lights[0]={{1000,1000,1000},1,.2F,{1,1,1}};
+                    scene.world_effect_lights[1]=nearby_light;
+                }
+                if(state>=32U) {
+                    // Complete the 0..8 compacted-count matrix. Distinct,
+                    // low-intensity colors/centers make each ordered slot
+                    // observable without washing the whole frame to white.
+                    scene.world_effect_light_count=state==32U ? 4U:state==33U ? 5U:7U;
+                    for(std::size_t i=0;i<scene.world_effect_light_count;++i) {
+                        const auto slot=static_cast<float>(i);
+                        scene.world_effect_lights[i]={{-.45F+.12F*slot,
+                            -.2F-.025F*slot,.2F-.04F*slot},1.3F+.1F*slot,
+                            .02F+.009F*slot,{.15F+.08F*slot,.65F-.06F*slot,.25F+.03F*slot}};
+                    }
+                    scene.transient_world_light=nearby_light;
+                    scene.transient_world_light->intensity=.03F;
+                    scene.transient_world_light->color={.35F,.25F,.15F};
+                }
+                if(state>=8U && state<=9U) {
                     scene.image_adjustments={.1F,1.04F,1.1F};
                     scene.screen_effects.overlay_rgba={.8F,.2F,.1F,.25F};
                 }
                 const auto extent=state==7U ? renderer::RenderExtent{64,48}:
-                    renderer::RenderExtent{96,96};
+                    (state==18U || state==19U || state==31U) ?
+                        renderer::RenderExtent{95,95}:renderer::RenderExtent{96,96};
                 const auto before_world=gpu.statistics().draw_call_count;
-                const auto optimized=capture(scene,extent);
+                Pixels optimized;
+                {WorldProgramProbe probe;optimized=capture(scene,extent);}
                 const auto world_draws=gpu.statistics().draw_call_count-before_world;
                 REQUIRE(world_draws!=0U);
+                CHECK(observed_no_light_draws+observed_lit_draws==world_draws);
+                if(layout<2U) {
+                    // Tangent/near-boundary, mixed contributing lights, and
+                    // out-of-proof-domain inputs must retain the lit shader.
+                    if(state==10U || state==11U || state==13U || state==15U || state==17U)
+                        CHECK(observed_no_light_draws==0U);
+                    std::cout<<"[msaa4-zero-light-program] samples="<<samples
+                        <<" layout="<<layout<<" state="<<state
+                        <<" no_light_draws="<<observed_no_light_draws
+                        <<" lit_draws="<<observed_lit_draws<<'\n';
+                }
                 actual_modes[mode]=gpu.scene_target_statistics().actual_samples;
                 if(gpu.scene_target_statistics().actual_samples!=samples) {
                     WARN("Requested MSAA mode is unavailable; mode comparison not run");
@@ -2181,6 +2331,11 @@ TEST_CASE("Opaque dynamic world shaders match the legacy brush color and resolve
                 CHECK(forwarded_brush_draws==brush_draws);
                 CHECK(optimized.color==reference.color);
                 CHECK(optimized.depth==reference.depth);
+                std::cout<<"[msaa4-fragment-light-guard-case] requested="<<samples
+                    <<" actual="<<gpu.scene_target_statistics().actual_samples
+                    <<" layout="<<layout<<" state="<<state
+                    <<" color_exact="<<(optimized.color==reference.color)
+                    <<" depth_exact="<<(optimized.depth==reference.depth)<<'\n';
                 ++compared_pairs[mode];
             }
         }
@@ -2188,7 +2343,9 @@ TEST_CASE("Opaque dynamic world shaders match the legacy brush color and resolve
     for(std::size_t mode=0;mode<sample_modes.size();++mode)
         std::cout<<"[opaque-dynamic-coverage] requested="<<sample_modes[mode]
             <<" actual="<<actual_modes[mode]<<" exact_color_resolved_depth_pairs="
-            <<compared_pairs[mode]<<" expected_pairs=40\n";
+            <<compared_pairs[mode]<<" expected_pairs="<<packages.size()*light_states<<'\n';
+    std::cout<<"[msaa4-unrolled-effects] compiled_sources="<<compiled_unrolled_effect_sources
+        <<" tested_states="<<light_states<<" layouts="<<packages.size()<<'\n';
     context->release_renderer();
     CHECK(glGetError()==GL_NO_ERROR);
 }
@@ -2213,7 +2370,7 @@ TEST_CASE("Opaque dynamic shader failures release partial resources and recover 
     original_source=glad_glShaderSource;original_shader_status=glad_glGetShaderiv;
     original_attach=glad_glAttachShader;original_program_status=glad_glGetProgramiv;
     static GLuint targeted_shader{},targeted_program{};
-    static bool fail_compile{};
+    static bool fail_compile{},target_full_eight{};
     struct InjectFailure {
         InjectFailure() {
             targeted_shader=targeted_program=0U;
@@ -2234,7 +2391,8 @@ TEST_CASE("Opaque dynamic shader failures release partial resources and recover 
             // Identify the new lit opaque fragment, never a generic shader
             // allocation ordinal that another independent pass could change.
             if(text.find("uniform int u_effect_light_count;")!=std::string_view::npos &&
-                text.find("u_sky_surface")==std::string_view::npos)
+                text.find("u_sky_surface")==std::string_view::npos &&
+                (text.find("#define HLC_FULL_EIGHT_EFFECT_LIGHTS")!=std::string_view::npos)==target_full_eight)
                 targeted_shader=shader;
         }
         static void GLAD_API_PTR shader_status(const GLuint shader,const GLenum name,GLint* value) {
@@ -2250,9 +2408,9 @@ TEST_CASE("Opaque dynamic shader failures release partial resources and recover 
             if(!fail_compile && program==targeted_program && name==GL_LINK_STATUS)*value=GL_FALSE;
         }
     };
-    for(const bool compile_failure:{true,false}) {
-        CAPTURE(compile_failure);
-        gpu.reset_session_resources();fail_compile=compile_failure;
+    for(const bool full_eight:{false,true}) for(const bool compile_failure:{true,false}) {
+        CAPTURE(full_eight,compile_failure);
+        gpu.reset_session_resources();fail_compile=compile_failure;target_full_eight=full_eight;
         glEnable(GL_SCISSOR_TEST);glScissor(3,4,20,21);
         GLint before_read{},before_draw{};
         glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&before_read);

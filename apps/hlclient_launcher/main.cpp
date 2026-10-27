@@ -41,6 +41,11 @@ enum Control : int {server=101,name,display,resolution,mode,vsync,brightness,gam
     startup_folder,startup_export,show_fps};
 struct Positioned {HWND control{};int x{},y{},w{},h{};};
 struct Progress {bool finished{},success{},started{},cancel_timed_out{},system_diagnostics_requested{},system_archive_ready{};std::string stage{"checking_resources"},reason,system_helper_status{"not_requested"};std::filesystem::path report,system_run_folder;std::optional<core::SceneAntialiasingObservation> antialiasing;};
+bool fullscreen_close_confirmed(const Progress& progress) noexcept
+{
+    return progress.finished && progress.success &&
+        (progress.reason=="normal_close_completed" || progress.reason=="application_closed");
+}
 struct Worker {
     std::thread thread;std::mutex mutex;Progress progress;std::atomic_bool cancel{},force{};
     ~Worker(){if(thread.joinable())thread.join();}
@@ -636,7 +641,12 @@ void tick(Ui&ui)
     // stale launch snapshot back over those newer values on normal close.
     const auto loaded=native::load_external_settings(ui.settings,ui.configuration);
     if(loaded.status=="loaded"){ui.configuration=loaded.configuration;ui.settings_status="loaded";fill(ui);}
-    if(borderless){if(p.success && (p.reason=="normal_close_completed" || p.reason=="application_closed") && ::MessageBoxW(ui.window,L"Повноекранне зображення було правильним? Зберегти цей режим для наступних запусків?",L"Перевірка відеорежиму",MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION)==IDYES){static_cast<void>(::DeleteFileW((ui.storage/L"pending-video.json").c_str()));}
+    if(borderless){if(fullscreen_close_confirmed(p)){
+            // Borderless never changes the desktop mode. A normal application
+            // close confirms it without a default-No dialog reverting the profile.
+            if(!::DeleteFileW((ui.storage/L"pending-video.json").c_str()) && ::GetLastError()!=ERROR_FILE_NOT_FOUND)
+                status+=L"\r\nНе вдалося прибрати маркер відновлення відеорежиму.";
+        }
         else{const auto before=ui.configuration;ui.configuration.video.mode=core::VideoWindowMode::windowed;static_cast<void>(native::merge_external_settings(ui.settings,before,ui.configuration));fill(ui);}}
     text(ui,status_label,status);
     if(ui.close_after)::DestroyWindow(ui.window);
@@ -746,8 +756,67 @@ bool offline_scroll_check(Ui&ui)
         core::encode_external_launch_configuration(ui.configuration)==original_config && !ui.worker && !ui.lifecycle.busy();
     return check.passed;
 }
+bool offline_fullscreen_close_check(Ui&ui)
+{
+    // Exercise the real completion path with a worker that owns no thread or
+    // child. Only this fresh temporary directory is writable by the fixture.
+    const auto id=native::new_external_run_id();if(id.empty())return false;
+    std::array<wchar_t,32768> temp{};const DWORD count=::GetTempPathW(static_cast<DWORD>(temp.size()),temp.data());
+    if(!count || count>=temp.size())return false;
+    const auto root=std::filesystem::path{temp.data()}/(L"HLClientFullscreenClose-"+native::external_widen(id));
+    if(!::CreateDirectoryW(root.c_str(),nullptr))return false;
+    struct Restore {
+        Ui&ui;std::filesystem::path root,settings,storage,last_report;
+        core::ExternalLaunchConfiguration configuration,baseline;
+        core::ExternalLauncherLifecycle lifecycle;std::optional<core::VideoSettings> recovery;
+        std::string settings_status;
+        ~Restore(){
+            ui.worker.reset();ui.settings=settings;ui.storage=storage;ui.last_report=last_report;
+            ui.configuration=configuration;ui.settings_baseline=baseline;ui.lifecycle=lifecycle;
+            ui.recovery_video_baseline=recovery;ui.settings_status=settings_status;fill(ui);enable_controls(ui,true);
+            static_cast<void>(::DeleteFileW((root/L"launcher.json").c_str()));
+            static_cast<void>(::DeleteFileW((root/L"pending-video.json").c_str()));
+            static_cast<void>(::RemoveDirectoryW(root.c_str()));
+        }
+    } restore{ui,root,ui.settings,ui.storage,ui.last_report,ui.configuration,ui.settings_baseline,
+        ui.lifecycle,ui.recovery_video_baseline,ui.settings_status};
+    ui.storage=root;ui.settings=root/L"launcher.json";ui.recovery_video_baseline.reset();
+    auto fullscreen=ui.configuration;fullscreen.video.mode=core::VideoWindowMode::borderless;
+    const auto run_case=[&](const char*reason,bool success,bool external_windowed,bool pending){
+        ui.configuration=fullscreen;fill(ui);
+        auto persisted=fullscreen;persisted.show_fps=!persisted.show_fps;
+        if(external_windowed)persisted.video.mode=core::VideoWindowMode::windowed;
+        if(!native::save_external_settings(ui.settings,persisted))return false;
+        if(pending && !native::save_external_settings(root/L"pending-video.json",fullscreen))return false;
+        if(!ui.lifecycle.begin())return false;
+        ui.worker=std::make_unique<Worker>();Progress p;p.finished=true;p.success=success;p.reason=reason;
+        ui.worker->publish(p);tick(ui);
+        const bool expect_windowed=!success || external_windowed;
+        auto expected=persisted;expected.video.mode=expect_windowed?core::VideoWindowMode::windowed:core::VideoWindowMode::borderless;
+        const auto disk=native::load_external_settings(ui.settings,fullscreen);
+        const bool marker=::GetFileAttributesW((root/L"pending-video.json").c_str())!=INVALID_FILE_ATTRIBUTES;
+        return !ui.worker && !ui.lifecycle.busy() && disk.status=="loaded" &&
+            core::encode_external_launch_configuration(disk.configuration)==core::encode_external_launch_configuration(expected) &&
+            core::encode_external_launch_configuration(ui.configuration)==core::encode_external_launch_configuration(expected) &&
+            ::SendMessageW(get(ui,mode),BM_GETCHECK,0,0)==(expect_windowed?BST_CHECKED:BST_UNCHECKED) &&
+            marker==(!success && pending);
+    };
+    return run_case("application_closed",true,false,true) &&
+        run_case("normal_close_completed",true,false,true) &&
+        run_case("application_closed",true,true,true) &&
+        run_case("application_closed",true,false,false) &&
+        run_case("client_exit_1",false,false,true);
+}
 bool offline_control_check(Ui&ui)
 {
+    for(const auto& reason:{"normal_close_completed","application_closed"}){
+        Progress completed;completed.finished=true;completed.success=true;completed.reason=reason;
+        if(!fullscreen_close_confirmed(completed))return false;
+        completed.success=false;if(fullscreen_close_confirmed(completed))return false;
+        completed.success=true;completed.finished=false;if(fullscreen_close_confirmed(completed))return false;
+    }
+    Progress rejected;rejected.finished=true;rejected.success=true;rejected.reason="cancelled_before_gameplay";
+    if(fullscreen_close_confirmed(rejected))return false;
     if(!hlclient::launcher::StartupJournal::is_startup_error("[opengl-startup] context=1 vendor=Intel") ||
         hlclient::launcher::StartupJournal::is_startup_error("[opengl-startup] password=private") ||
         hlclient::launcher::StartupJournal::is_startup_error("[info] unrelated server text"))return false;
@@ -807,7 +876,8 @@ bool offline_control_check(Ui&ui)
     if(!recovered || recovered->video.mode!=core::VideoWindowMode::windowed ||
         ::SendMessageW(get(ui,mode),BM_GETCHECK,0,0)!=BST_CHECKED)return false;
     ui.recovery_video_baseline.reset();ui.configuration=before_recovery;fill(ui);
-    std::fprintf(stdout,"launcher_fps_windowed_check=passed default=borderless windowed_checkbox=verified fps_roundtrip=verified windowed_recovery_merge=verified\n");
+    if(!offline_fullscreen_close_check(ui))return false;
+    std::fprintf(stdout,"launcher_fps_windowed_check=passed default=borderless windowed_checkbox=verified fps_roundtrip=verified windowed_recovery_merge=verified normal_close_keeps_fullscreen=verified\n");
     return ::IsWindowEnabled(get(ui,resolution)) && !::IsWindowEnabled(get(ui,hud_scale)) && collect(ui,false) && ui.configuration.image==core::ImageAdjustments{} && ui.configuration.hud_scale==core::HudScaleSettings{} && ui.configuration.video.mode==core::VideoWindowMode::windowed && !ui.configuration.show_fps && !ui.worker && !ui.lifecycle.busy();
 }
 LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam)

@@ -20,6 +20,12 @@
 #include <utility>
 #include <vector>
 
+// Shipping merge retains the pre-experiment implementation. Historical isolated
+// experiment projects explicitly select their own counter contract.
+#ifndef HLCLIENT_CPU_STUDIO_MERGE_OPTIMIZED
+#define HLCLIENT_CPU_STUDIO_MERGE_OPTIMIZED 0
+#endif
+
 namespace {
 
 namespace assets = hlclient::assets;
@@ -136,6 +142,153 @@ evaluate(const assets::SkeletalModelAssetData& model,
     return std::move(*result.pose);
 }
 
+// Independent retained oracle for the pre-optimization algorithm: evaluate
+// the complete child, then overwrite its palette in the retained merge order.
+// These arithmetic expressions deliberately retain the old float order, so
+// identical results are compared bitwise rather than with widened tolerances.
+[[nodiscard]] studio::StudioMatrix3x4 merge_oracle_local(
+    const studio::ModelBoneLocalPose& local)
+{
+    auto q=local.rotation;
+    const auto length=static_cast<double>(q.x)*q.x+static_cast<double>(q.y)*q.y+
+        static_cast<double>(q.z)*q.z+static_cast<double>(q.w)*q.w;
+    const auto inverse=static_cast<float>(1.0/std::sqrt(length));
+    q.x*=inverse;q.y*=inverse;q.z*=inverse;q.w*=inverse;
+    const auto xx=q.x*q.x,yy=q.y*q.y,zz=q.z*q.z,xy=q.x*q.y,xz=q.x*q.z,yz=q.y*q.z;
+    const auto wx=q.w*q.x,wy=q.w*q.y,wz=q.w*q.z;
+    return {{{1.F-2.F*(yy+zz),2.F*(xy-wz),2.F*(xz+wy),local.translation.x,
+        2.F*(xy+wz),1.F-2.F*(xx+zz),2.F*(yz-wx),local.translation.y,
+        2.F*(xz-wy),2.F*(yz+wx),1.F-2.F*(xx+yy),local.translation.z}}};
+}
+
+[[nodiscard]] std::vector<studio::ModelBoneWorldPose> merge_oracle_palette(
+    const studio::StudioPoseState& parent,const studio::StudioPoseState& child,
+    const studio::StudioBoneMergeMapping& mapping)
+{
+    std::vector<studio::ModelBoneWorldPose> output(child.world_bones().begin(),child.world_bones().end());
+    for(const auto index:mapping.evaluation_order) {
+        const auto match=mapping.parent_bones[index];
+        if(match>=0) {output[index]=parent.world_bones()[static_cast<std::size_t>(match)];continue;}
+        const auto local=merge_oracle_local(child.local_bones()[index]);
+        const auto ancestor=mapping.child_parents[index];
+        auto& transform=output[index].transform;
+        if(ancestor==-1)transform=local;
+        else {
+            const auto& p=output[static_cast<std::size_t>(ancestor)].transform.values;
+            for(std::size_t row=0;row<3;++row) {
+                for(std::size_t column=0;column<3;++column)
+                    transform.values[row*4+column]=p[row*4]*local.values[column]+
+                        p[row*4+1]*local.values[4+column]+p[row*4+2]*local.values[8+column];
+                transform.values[row*4+3]=p[row*4]*local.values[3]+p[row*4+1]*local.values[7]+
+                    p[row*4+2]*local.values[11]+p[row*4+3];
+            }
+        }
+        const auto& m=transform.values;
+        output[index].normal_rotation={m[0],m[1],m[2],m[4],m[5],m[6],m[8],m[9],m[10]};
+    }
+    return output;
+}
+
+TEST_CASE("Studio merge matches the retained full-child oracle and its selected counter contract",
+    "[goldsrc-studio][pose][bone-merge][studio-merge-contract]")
+{
+    studio::StudioPoseEvaluator evaluator;
+    std::size_t checked=0;
+    for(const auto blends:{1U,2U,4U})for(const bool unmatched:{false,true}) {
+        auto parent_model=pose_model(blends,true,true),child=pose_model(blends,true,true);
+        if(unmatched) {child.bones[1].name="weapon_tip";child.bones[2].name="weapon_root";}
+        const studio::StudioPoseModelIdentity child_id{"models/merge_oracle.mdl",{123U,456U}};
+        studio::StudioBoneMergeCache cache;
+        const auto mapping=cache.prepare(model_identity(),parent_model,child_id,child);REQUIRE(mapping);
+        for(const auto frame:{0.0,.25,1.5,2.75}) {
+            studio::StudioPoseInput input;input.frame_coordinate=frame;input.body_value=3;input.skin_family_index=1;
+            input.blending_values={97,161};
+            auto parent_input=input;parent_input.frame_coordinate=frame+.125;
+            const auto parent=evaluate(parent_model,parent_input);
+            const auto child_full=evaluator.evaluate(child_id,child,input);REQUIRE(child_full);
+            const auto expected=merge_oracle_palette(parent,*child_full.pose,*mapping.mapping);
+            const auto actual=evaluator.merge(parent,child,*mapping.mapping,input);REQUIRE(actual);
+            REQUIRE(actual.pose->world_bones().size()==expected.size());
+            for(std::size_t bone=0;bone<expected.size();++bone) {
+                for(std::size_t n=0;n<12;++n)
+                    CHECK(std::bit_cast<std::uint32_t>(actual.pose->world_bones()[bone].transform.values[n])==
+                        std::bit_cast<std::uint32_t>(expected[bone].transform.values[n]));
+                for(std::size_t n=0;n<9;++n)
+                    CHECK(std::bit_cast<std::uint32_t>(actual.pose->world_bones()[bone].normal_rotation[n])==
+                        std::bit_cast<std::uint32_t>(expected[bone].normal_rotation[n]));
+                const auto& a=actual.pose->local_bones()[bone];const auto& e=child_full.pose->local_bones()[bone];
+                CHECK(std::array{a.translation.x,a.translation.y,a.translation.z,a.rotation.x,a.rotation.y,a.rotation.z,a.rotation.w}==
+                    std::array{e.translation.x,e.translation.y,e.translation.z,e.rotation.x,e.rotation.y,e.rotation.z,e.rotation.w});
+            }
+            CHECK(actual.pose->frame_sample().normalized_frame_coordinate==child_full.pose->frame_sample().normalized_frame_coordinate);
+            REQUIRE(actual.pose->body_selection().bodyparts.size()==child_full.pose->body_selection().bodyparts.size());
+            for(std::size_t n=0;n<actual.pose->body_selection().bodyparts.size();++n) {
+                const auto& a=actual.pose->body_selection().bodyparts[n];const auto& e=child_full.pose->body_selection().bodyparts[n];
+                CHECK(std::array{a.bodypart_index,a.local_model_index,a.submodel_index}==std::array{e.bodypart_index,e.local_model_index,e.submodel_index});
+            }
+            CHECK(actual.pose->skin_selection().texture_indices_by_skin_reference==child_full.pose->skin_selection().texture_indices_by_skin_reference);
+            CHECK(actual.pose->statistics().channel_sample_count==child_full.pose->statistics().channel_sample_count);
+            CHECK(actual.pose->statistics().world_matrix_count==child.bones.size());
+#if defined(HLCLIENT_CPU_STUDIO_MERGE_OPTIMIZED) && HLCLIENT_CPU_STUDIO_MERGE_OPTIMIZED
+            CHECK(actual.pose->statistics().world_build_calls_v2==1U);
+            CHECK(actual.pose->statistics().world_matrices_built_v2==(unmatched ? 2U : 0U));
+#else
+            CHECK(actual.pose->statistics().world_build_calls_v2==child_full.pose->statistics().world_build_calls_v2);
+            CHECK(actual.pose->statistics().world_matrices_built_v2==child_full.pose->statistics().world_matrices_built_v2);
+#endif
+            ++checked;
+        }
+    }
+    std::cout<<"[studio-merge-contract] bitwise_oracle_samples="<<checked
+        <<" old_full_child_pass=1 old_merge_pass=1 old_counter_excludes_merge=true\n";
+}
+
+TEST_CASE("Studio merge preserves typed validation before matched bones can hide rejected child samples",
+    "[goldsrc-studio][pose][bone-merge][studio-merge-contract][rejection]")
+{
+    const auto parent_model=pose_model();const auto parent=evaluate(parent_model);
+    const std::vector retained_parent(parent.world_bones().begin(),parent.world_bones().end());
+    const studio::StudioPoseModelIdentity child_id{"models/merge_validation.mdl",{12U,34U}};
+    auto child=parent_model;studio::StudioBoneMergeCache cache;
+    const auto prepared=cache.prepare(model_identity(),parent_model,child_id,child);REQUIRE(prepared);
+    auto mapping=*prepared.mapping;
+    studio::StudioPoseEvaluator evaluator;
+    const auto reject_same_as_full=[&](const studio::StudioPoseInput& input,
+        const studio::StudioPoseEvaluationLimits& limits=studio::StudioPoseEvaluationLimits{}) {
+        const auto full=evaluator.evaluate(child_id,child,input,limits);
+        const auto merge=evaluator.merge(parent,child,mapping,input,limits);
+        REQUIRE_FALSE(full);REQUIRE_FALSE(merge);REQUIRE(full.error);REQUIRE(merge.error);
+        CHECK(merge.error->code==full.error->code);
+        CHECK(merge.error->sequence_index==full.error->sequence_index);
+        for(std::size_t bone=0;bone<retained_parent.size();++bone)
+            CHECK(parent.world_bones()[bone].transform.values==retained_parent[bone].transform.values);
+    };
+    studio::StudioPoseInput invalid;invalid.frame_coordinate=std::numeric_limits<double>::quiet_NaN();reject_same_as_full(invalid);
+    invalid={};invalid.sequence_index=999;reject_same_as_full(invalid);
+    invalid={};invalid.body_value=-1;reject_same_as_full(invalid);
+    studio::StudioPoseEvaluationLimits small;small.maximum_bones=2;reject_same_as_full({},small);
+    auto& tracks=child.sequences[0].animation_blends[0].bone_tracks;
+    tracks[0].channels[0].source_default=3.0e38F;tracks[0].channels[5].source_default=0;
+    tracks[1].channels[0].source_default=3.0e38F;reject_same_as_full({});
+    // Finite extreme samples retain successful full-world validation, even all-matched.
+    tracks[0].channels[0].source_default=20'000;tracks[1].channels[0].source_default=20'000;
+    const auto guarded=evaluator.merge(parent,child,mapping,{});REQUIRE(guarded);
+#if defined(HLCLIENT_CPU_STUDIO_MERGE_OPTIMIZED) && HLCLIENT_CPU_STUDIO_MERGE_OPTIMIZED
+    CHECK(guarded.pose->statistics().world_build_calls_v2==2U);
+    CHECK(guarded.pose->statistics().world_matrices_built_v2==child.bones.size());
+#else
+    const auto guarded_full=evaluator.evaluate(child_id,child,{});REQUIRE(guarded_full);
+    CHECK(guarded.pose->statistics().world_build_calls_v2==guarded_full.pose->statistics().world_build_calls_v2);
+    CHECK(guarded.pose->statistics().world_matrices_built_v2==guarded_full.pose->statistics().world_matrices_built_v2);
+#endif
+    mapping.evaluation_order={0U,0U,2U};
+    const auto duplicate=evaluator.merge(parent,child,mapping,{});REQUIRE_FALSE(duplicate);REQUIRE(duplicate.error);
+    CHECK(duplicate.error->code==studio::StudioPoseErrorCode::invalid_hierarchy);
+    mapping=*prepared.mapping;mapping.parent_bones[1]=-2;
+    const auto bad_match=evaluator.merge(parent,child,mapping,{});REQUIRE_FALSE(bad_match);REQUIRE(bad_match.error);
+    CHECK(bad_match.error->code==studio::StudioPoseErrorCode::invalid_composition);
+}
+
 TEST_CASE(
     "Studio fractional channels sample defaults values and run boundaries",
     "[goldsrc-studio][pose][fractional]")
@@ -185,6 +338,50 @@ TEST_CASE(
         sample_fractional_frame(boundary, 2.0);
     REQUIRE_FALSE(invalid);
     CHECK(invalid.error->code == studio::StudioPoseErrorCode::invalid_frame);
+}
+
+TEST_CASE("Rotation endpoint reuse preserves moving samples and strict failures",
+    "[history-rotation-oracle][goldsrc-studio][pose]") {
+  std::uint64_t signature=14695981039346656037ULL;
+  const auto integer=[&](std::uint64_t value) {
+    for(unsigned b=0;b<8;++b){signature^=(value>>(b*8))&255U;signature*=1099511628211ULL;}
+  };
+  std::size_t successes=0,failures=0;
+  for(unsigned blends:{1U,2U,4U})for(unsigned mode=0;mode<9;++mode) {
+    auto model=pose_model(blends,false,true);
+    for(auto& blend:model.sequences[0].animation_blends) {
+      auto& track=blend.bone_tracks[1];
+      if(mode==1)track.channels[3]=channel(assets::ModelAnimationChannelSemantic::rotation_x,3,0,1,{0,0,1});
+      if(mode==2)track.channels[4].source_default=-0.0F;
+      if(mode==3)track.channels[5].source_default=std::nextafter(1.0F,2.0F);
+      if(mode==4)track.channels[3].source_default=1.0e20F;
+      if(mode==5)track.channels[5].source_default=std::numeric_limits<float>::infinity();
+      if(mode==6)track.channels[5].semantic=assets::ModelAnimationChannelSemantic::rotation_x;
+      if(mode==7)track.channels[5].frame_coverage=2;
+      if(mode==8)track.channels[5].source_default=std::numeric_limits<float>::quiet_NaN();
+    }
+    for(double frame:{0.0,.25,.999,1.0,1.25,2.0}) {
+      studio::StudioPoseInput input;input.frame_coordinate=frame;input.blending_values={77,181};
+      const auto evaluated=studio::StudioPoseEvaluator{}.evaluate(model_identity(),model,input);
+      integer(bool(evaluated));
+      if(!evaluated) {
+        ++failures;REQUIRE(evaluated.error);integer(unsigned(evaluated.error->code));
+        integer(evaluated.error->sequence_index.value_or(999));integer(evaluated.error->bone_index.value_or(999));continue;
+      }
+      ++successes;const auto& pose=*evaluated.pose;
+      for(const auto& bone:pose.world_bones())for(float v:bone.transform.values)integer(std::bit_cast<std::uint32_t>(v));
+      integer(pose.statistics().channel_sample_count);integer(pose.statistics().channel_runs_examined);
+      const auto counters=[&]<class P>(const P& p) {
+        if constexpr(requires{p.statistics().rotation_endpoint_reuses_v3;}) {
+          CHECK(p.statistics().rotation_endpoint_reuses_v3>0);
+          CHECK(p.statistics().rotation_endpoint_conversions_v3+p.statistics().rotation_endpoint_reuses_v3==
+              p.statistics().channel_sample_count/3U);
+        }
+      };counters(pose);
+    }
+  }
+  CHECK(successes>0);CHECK(failures>0);
+  std::cout<<"[rotation-oracle] {\"signature\":\""<<signature<<"\",\"successes\":"<<successes<<",\"failures\":"<<failures<<"}\n";
 }
 
 TEST_CASE("Studio pose wraps or clamps frames and evaluates finite hierarchy",

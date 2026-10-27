@@ -451,6 +451,10 @@ TEST_CASE("OpenGL Sprite rejects unsupported and degenerate billboard bases",
         entity::RuntimeEntityVisualKind::studio_model);
     CHECK(degenerate.frame->draw_commands()[1U].visual_kind ==
         entity::RuntimeEntityVisualKind::studio_model);
+    CHECK(degenerate.frame->draw_commands().front().draw_class ==
+        entity::EntityDrawClass::studio_opaque);
+    CHECK(degenerate.frame->draw_commands()[1U].draw_class ==
+        entity::EntityDrawClass::studio_masked);
     CHECK(degenerate.frame->draw_commands().back().visual_kind ==
         entity::RuntimeEntityVisualKind::sprite);
 
@@ -504,6 +508,8 @@ TEST_CASE("OpenGL Sprite rejects unsupported and degenerate billboard bases",
     CHECK(recovered.entity_frame_count == retained.entity_frame_count + 1U);
     CHECK(recovered.studio_draw_count == retained.studio_draw_count + 4U);
     CHECK(recovered.sprite_draw_count == retained.sprite_draw_count + 1U);
+    // The metadata-only plan preserves the original four GL binds/draws;
+    // it does not reuse driver state, even for adjacent matching textures.
     CHECK(recovered.model_texture_bind_count ==
         retained.model_texture_bind_count + 4U);
     CHECK(recovered.sprite_texture_bind_count ==

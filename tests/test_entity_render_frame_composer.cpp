@@ -7,9 +7,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
+#include <algorithm>
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -26,6 +30,117 @@ namespace studio = hlclient::goldsrc::studio;
 namespace fixture = hlclient::tests::entity_render_fixture;
 namespace visual_fixture = hlclient::tests::entity_visual_fixture;
 using hlclient::tests::ScopedLocalResourceTestRoot;
+
+// Frozen pre-50b5 bounds arithmetic: deliberately calculate rotation within
+// each corner. Keep this independent of the production invariant hoist.
+[[nodiscard]] std::optional<assets::WorldBounds> original_corner_bounds(
+    const assets::WorldBounds& source,
+    const render::EntityRenderTransform& transform)
+{
+    const auto finite = [](const assets::AssetVector3& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    if (!render::finite_entity_render_bounds(source) ||
+        !render::finite_entity_render_transform(transform)) return {};
+    assets::WorldBounds result{
+        {std::numeric_limits<float>::max(),std::numeric_limits<float>::max(),std::numeric_limits<float>::max()},
+        {std::numeric_limits<float>::lowest(),std::numeric_limits<float>::lowest(),std::numeric_limits<float>::lowest()}};
+    for(std::uint32_t corner=0U;corner<8U;++corner) {
+        assets::AssetVector3 local{
+            (corner&1U)!=0U ? source.maximum.x : source.minimum.x,
+            (corner&2U)!=0U ? source.maximum.y : source.minimum.y,
+            (corner&4U)!=0U ? source.maximum.z : source.minimum.z};
+        local.x*=transform.uniform_scale;local.y*=transform.uniform_scale;local.z*=transform.uniform_scale;
+        constexpr double radians=0.017453292519943295769;
+        const double x=static_cast<double>(transform.rotation_degrees.x)*radians;
+        const double y=static_cast<double>(transform.rotation_degrees.y)*radians;
+        const double z=static_cast<double>(transform.rotation_degrees.z)*radians;
+        const double cx=std::cos(x),sx=std::sin(x),cy=std::cos(y),sy=std::sin(y),cz=std::cos(z),sz=std::sin(z);
+        const double source_x=local.x,source_y=local.y,source_z=local.z;
+        const double x_rotated=source_x;
+        const double y_rotated=cx*source_y-sx*source_z;
+        const double z_rotated=sx*source_y+cx*source_z;
+        const double x_twice=cy*x_rotated+sy*z_rotated;
+        const double y_twice=y_rotated;
+        const double z_twice=-sy*x_rotated+cy*z_rotated;
+        assets::AssetVector3 world{static_cast<float>(cz*x_twice-sz*y_twice),
+            static_cast<float>(sz*x_twice+cz*y_twice),static_cast<float>(z_twice)};
+        world.x+=transform.origin.x;world.y+=transform.origin.y;world.z+=transform.origin.z;
+        if(!finite(world))return {};
+        result.minimum.x=std::min(result.minimum.x,world.x);
+        result.minimum.y=std::min(result.minimum.y,world.y);
+        result.minimum.z=std::min(result.minimum.z,world.z);
+        result.maximum.x=std::max(result.maximum.x,world.x);
+        result.maximum.y=std::max(result.maximum.y,world.y);
+        result.maximum.z=std::max(result.maximum.z,world.z);
+    }
+    return render::finite_entity_render_bounds(result) ? std::optional{result} : std::nullopt;
+}
+
+void require_exact_corner_bounds(const assets::WorldBounds& source,
+    const render::EntityRenderTransform& transform)
+{
+    const auto expected=original_corner_bounds(source,transform);
+    const auto actual=render::transform_entity_render_bounds(source,transform);
+    REQUIRE(actual.has_value()==expected.has_value());
+    if(!actual)return;
+    const std::array actual_values{actual->minimum.x,actual->minimum.y,actual->minimum.z,
+        actual->maximum.x,actual->maximum.y,actual->maximum.z};
+    const std::array expected_values{expected->minimum.x,expected->minimum.y,expected->minimum.z,
+        expected->maximum.x,expected->maximum.y,expected->maximum.z};
+    for(std::size_t i=0;i<actual_values.size();++i)
+        CHECK(std::bit_cast<std::uint32_t>(actual_values[i])==std::bit_cast<std::uint32_t>(expected_values[i]));
+}
+
+TEST_CASE("50b5 invariant bounds rotation preserves exact corner results and rejection",
+    "[entity-render][composer][50b5-bounds][no-stock]")
+{
+    const float largest=std::numeric_limits<float>::max();
+    const float tiny=std::numeric_limits<float>::denorm_min();
+    const std::array<assets::WorldBounds,5> bounds{{
+        {{-16.0F,-16.0F,-36.0F},{16.0F,16.0F,36.0F}},
+        {{-4.0F,1.5F,-7.25F},{12.5F,31.0F,-0.5F}},
+        {{-0.0F,-0.0F,-0.0F},{0.0F,0.0F,0.0F}},
+        {{-tiny,-tiny,-tiny},{tiny,tiny,tiny}},
+        {{-largest,-largest,-largest},{largest,largest,largest}}}};
+    const std::array<assets::AssetVector3,10> rotations{{
+        {0,0,0},{-0.0F,0,-0.0F},{90,180,270},{-90,-180,-270},
+        {-4.5F,18.2F,0},{-3.2F,27,0},{33.3333F,-78.125F,141.75F},
+        {360,720,-1080},{largest,-largest,largest},{tiny,-tiny,tiny}}};
+    const std::array scales{tiny,std::numeric_limits<float>::min(),0.125F,1.0F,2.0F,largest};
+    for(const auto& source:bounds)for(const auto& angles:rotations)for(const auto scale:scales) {
+        require_exact_corner_bounds(source,{{0,0,0},angles,scale});
+        require_exact_corner_bounds(source,{{-917.7095947265625F,224.34974670410156F,-1471.982666015625F},angles,scale});
+    }
+    // Fixed seed, explicit integer-to-float mapping: identical inputs on all
+    // compilers, no platform-dependent random_distribution implementation.
+    std::uint32_t state=0x50B5FFE1U;
+    const auto sample=[&](float magnitude) {
+        state=state*1664525U+1013904223U;
+        return (static_cast<float>(state>>8U)/16777216.0F*2.0F-1.0F)*magnitude;
+    };
+    for(unsigned i=0;i<4096U;++i) {
+        const assets::AssetVector3 a{sample(128),sample(128),sample(128)};
+        const assets::AssetVector3 b{sample(128),sample(128),sample(128)};
+        const assets::WorldBounds source{{std::min(a.x,b.x),std::min(a.y,b.y),std::min(a.z,b.z)},
+            {std::max(a.x,b.x),std::max(a.y,b.y),std::max(a.z,b.z)}};
+        const render::EntityRenderTransform transform{{sample(8192),sample(8192),sample(8192)},
+            {sample(1080),sample(1080),sample(1080)},std::abs(sample(16))+0.001F};
+        require_exact_corner_bounds(source,transform);
+    }
+    const auto nan=std::numeric_limits<float>::quiet_NaN();
+    const auto inf=std::numeric_limits<float>::infinity();
+    for(const auto invalid:{0.0F,-1.0F,nan,inf})
+        require_exact_corner_bounds(bounds[0],{{0,0,0},{0,0,0},invalid});
+    for(const auto invalid:{nan,inf,-inf}) {
+        require_exact_corner_bounds(bounds[0],{{invalid,0,0},{0,0,0},1});
+        require_exact_corner_bounds(bounds[0],{{0,0,0},{0,invalid,0},1});
+        require_exact_corner_bounds({{invalid,0,0},{1,1,1}},{{0,0,0},{0,0,0},1});
+        require_exact_corner_bounds({{0,0,0},{1,invalid,1}},{{0,0,0},{0,0,0},1});
+    }
+    require_exact_corner_bounds({{1,0,0},{-1,1,1}},{{0,0,0},{0,0,0},1});
+    require_exact_corner_bounds(bounds[4],{{largest,largest,largest},{45,45,45},largest});
+}
 
 struct ComposerPackage {
     std::shared_ptr<const assets::ModelAsset> model;

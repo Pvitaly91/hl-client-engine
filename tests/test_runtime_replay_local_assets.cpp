@@ -52,6 +52,9 @@
 #include <limits>
 #include <memory>
 #include <utility>
+#ifdef HLCLIENT_HISTORY_COST_FIXTURE
+#include "history_projection_allocation.hpp"
+#endif
 
 namespace {
 namespace app = hlclient::app;
@@ -4150,6 +4153,290 @@ std::vector<std::byte> e17_owned_remote_model(bool weapon) {
   }
   fixture::studio_write_i32le(bytes,72U,static_cast<std::int32_t>(bytes.size()));
   return bytes;
+}
+
+// Fixed synthetic normal-call-chain workload. This is not an exact replay of
+// historical frame7775: imported owned models/world and a scripted server
+// timeline deliberately exercise the real HL remote/p-model/viewmodel path.
+// Preparation, imports, assertions, fingerprints and JSON encoding are outside
+// warmed intervals. The same TU is linked unchanged against frozen B0 and B1.
+struct CpuStudioPipelineCost {
+  B080Cost values;
+  double cold_prepare_us{};
+  std::size_t no_rx_frames{},no_rx_pose_changes{},pose_changes{},published_matrices_high_water{};
+  std::size_t published_palette_count_high_water{},published_matrix_capacity_high_water{};
+  std::size_t remote_samples{},merged_attachments{};
+  std::uint64_t diagnostic_events{};
+#ifdef HLCLIENT_HISTORY_COST_FIXTURE
+  std::array<std::vector<double>,16> stages;
+  std::array<std::uint64_t,15> operations{};
+  std::array<std::vector<history_allocation::Count>,2> allocations;
+  std::array<std::vector<double>,4> rx_durations;
+  unsigned new_rx_frames{};
+#endif
+};
+
+[[nodiscard]] CpuStudioPipelineCost cpu_studio_pipeline(std::uint32_t actors,bool diagnostics,bool burst,
+    unsigned initial_history=0,bool profile=false,bool actual=false,bool fixed_history=false) {
+  using Clock=std::chrono::steady_clock;
+  constexpr std::uint32_t warm=64,samples=256,total=warm+samples;
+  const auto cold_begin=Clock::now();
+  LocalContext local{true,"BRUSH_ONLY",false,std::uint8_t{168U}};
+  const auto read_model=[](const char* name) {
+    std::ifstream file{std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life/valve/models"}/name,std::ios::binary};
+    REQUIRE(file);std::vector<char> raw{std::istreambuf_iterator<char>{file},{}};
+    std::vector<std::byte> bytes(raw.size());std::memcpy(bytes.data(),raw.data(),raw.size());return bytes;
+  };
+  const auto player=actual ? read_model("player/gordon/gordon.mdl") : e17_owned_remote_model(false);
+  const auto weapon=actual ? read_model("p_shotgun.mdl") : e17_owned_remote_model(true);
+  const auto viewmodel=e16_owned_mp5_viewmodel();
+  local.root.write("valve","models/player.mdl",player);
+  local.root.write("valve","models/p_shotgun.mdl",weapon);
+  local.root.write("valve","models/v_9mmAR.mdl",viewmodel);
+  const auto resources=readiness::parse_resource_list({
+      {2,"maps/test_map.bsp",9,static_cast<std::uint32_t>(local.map.size()),0},
+      {2,"models/player.mdl",7,static_cast<std::uint32_t>(player.size()),0},
+      {2,"models/p_shotgun.mdl",22,static_cast<std::uint32_t>(weapon.size()),0},
+      {2,"models/v_9mmAR.mdl",21,static_cast<std::uint32_t>(viewmodel.size()),0},
+      {2,"*1",27,0,0}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,b080_server_info(actors+1),
+      local.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(created.projection);auto& assets=*created.projection;
+  const auto set_profile=[&]<class A>(A& a) {if constexpr(requires { a.capture_presentation_cost(profile); })a.capture_presentation_cost(profile);};
+  set_profile(assets);
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({1,1,1});host.set_movement_audio_time_origin(0);
+  app::MovementIncidentRecorder recorder{diagnostics};
+  assets.set_diagnostic_sink(diagnostics ? &recorder : nullptr,1);
+  host.set_diagnostic_sink(diagnostics ? &recorder : nullptr);
+  client::ClientWorldState world;world.set_camera({{512,-256,160},{72,16,16},{0,0,1}});
+  const auto state_for=[&](std::uint32_t record) {
+    const double t=double(record-1)*.02;
+    auto state=e16_mp5_viewmodel_state();
+    auto source=e10_observation(record,1+t,0,0,0,false);
+    state.publication_revision=source.publication_revision;state.entity_metadata=source.entity_metadata;
+    state.server_time_metadata=source.server_time_metadata;state.server_time_seconds=source.server_time_seconds;
+    const auto base=source.packet_entities.front();state.packet_entities.clear();
+    state.packet_entities.push_back(base);
+    for(std::uint32_t actor=0;actor<actors;++actor) {
+      auto entity=base;entity.entity_number=actor+2;
+      entity.origin={32+double(actor)*7+t*24,double(actor%4)*6,16+double(actor%2)*t*4};
+      entity.angles={0,double(actor*9U)+t*12,0};
+      entity.sequence=(actor+record/12U)%3U;entity.gait_sequence=entity.sequence==0 ? 0U : 1U;
+      entity.frame=double((record+actor)%16U)*4;entity.animation_time_seconds=1+t;entity.frame_rate=1;
+      entity.weapon_model_index=22;entity.controllers={127,127,127,127};entity.blending={127,127};
+      state.packet_entities.push_back(entity);
+    }
+    auto brush=source.packet_entities.back();brush.entity_number=80;brush.origin.z=t*8;
+    state.packet_entities.push_back(brush);
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    return state;
+  };
+  std::vector<client::RuntimeClientObservationState> states;states.reserve(100);
+  for(std::uint32_t record=1;record<=100;++record)states.push_back(state_for(record));
+  REQUIRE(assets.reset_generation(states.front(),world));
+  const auto metadata=assets.presentation_model_handle(1,21);REQUIRE(metadata);
+  host.bind_model_handle(metadata);host.observe(states.front(),0);
+  for(unsigned h=1;h<initial_history;++h) {
+    REQUIRE(assets.observe_entities(states[h]));host.observe(states[h],double(h)*.02);
+  }
+  CpuStudioPipelineCost cost;
+  cost.cold_prepare_us=std::chrono::duration<double,std::micro>(Clock::now()-cold_begin).count();
+  for(auto& scope:cost.values.durations)scope.reserve(samples);
+  std::uint32_t record_index=initial_history ? initial_history-1 : 0;
+  std::optional<std::array<float,16>> previous_pose;
+  for(std::uint32_t frame_index=0;frame_index<total;++frame_index) {
+    const double now=double(frame_index)*(fixed_history ? .0002 : .005);
+    // Steady updates: one record per four renders. Burst control: four ordered
+    // records per sixteen renders. All intervening renders keep advancing time.
+    const bool update=!fixed_history && frame_index>0 && frame_index%(burst ? 16U : 4U)==0;
+#ifdef HLCLIENT_HISTORY_COST_FIXTURE
+    history_allocation::start();
+#endif
+    const auto begin=Clock::now();
+    bool retained=true;
+    if(update)for(std::uint32_t i=0;i<(burst ? 4U : 1U);++i) {
+      ++record_index;retained=retained && bool(assets.observe_entities(states[record_index]));
+    }
+    const auto observed=Clock::now();
+#ifdef HLCLIENT_HISTORY_COST_FIXTURE
+    const auto commit_alloc=history_allocation::stop();history_allocation::start();
+#endif
+    const auto presented=assets.present_entities(host,now,1,world,{1920,1080},diagnostics);
+    const auto remote_done=Clock::now();
+#ifdef HLCLIENT_HISTORY_COST_FIXTURE
+    const auto present_alloc=history_allocation::stop();
+#endif
+    host.bind_model_handle(metadata);host.observe(states[record_index],now);
+    const auto visual=host.sample(now);
+    const auto intent=host.viewmodel_handle(states[record_index],metadata,now,visual.visual);
+    const auto local_view=assets.materialize_viewmodel(intent,hlclient::assets::AssetVector3{32,16,24});
+    const auto view_done=Clock::now();
+    app::MovementFrameRecord frame;frame.frame_number=frame_index+1;frame.monotonic_us=std::uint64_t(frame_index)*5000;
+    frame.network_generation=frame.map_generation=1;frame.frame_interval_ms=5;frame.entities=actors+2;
+    static_cast<void>(recorder.observe(frame));
+    if(diagnostics)if(const auto remote=assets.remote_movement_observations())
+      static_cast<void>(recorder.observe_remote(frame,*remote));
+    const auto end=Clock::now();
+    REQUIRE(retained);REQUIRE(presented);REQUIRE(local_view);REQUIRE(local_view->frame);REQUIRE(world.entity_frame());
+    const auto& output=*world.entity_frame();
+    if(output.studio_instances().size()!=actors*2U) {
+      for(const auto& [status,n]:assets.summary().coverage)INFO("coverage="<<app::to_string(status)<<" n="<<n);
+      for(std::size_t i=0;i<assets.summary().remote_player_count;++i)INFO("remote status="<<unsigned(assets.summary().remote_players[i].status));
+    }
+    REQUIRE(output.studio_instances().size()==actors*2U);
+    REQUIRE(output.studio_poses().size()>=actors*2U);
+    const auto& body=e10_instance(world,2);
+    const auto& sample=output.studio_poses()[body.pose_index].bone_matrices[10];
+    if(previous_pose && sample!=*previous_pose) {
+      ++cost.pose_changes;if(!update)++cost.no_rx_pose_changes;
+    }
+    previous_pose=sample;if(!update)++cost.no_rx_frames;
+    std::size_t matrices=0,matrix_capacity=0;
+    for(const auto& pose:output.studio_poses()) {
+      matrices+=pose.bone_matrices.size();matrix_capacity+=pose.bone_matrices.capacity();
+    }
+    for(const auto& pose:local_view->frame->studio_poses()) {
+      matrices+=pose.bone_matrices.size();matrix_capacity+=pose.bone_matrices.capacity();
+    }
+    cost.published_matrices_high_water=std::max(cost.published_matrices_high_water,matrices);
+    cost.published_matrix_capacity_high_water=std::max(cost.published_matrix_capacity_high_water,matrix_capacity);
+    cost.published_palette_count_high_water=std::max(cost.published_palette_count_high_water,
+        output.studio_poses().size()+local_view->frame->studio_poses().size());
+    CHECK(matrix_capacity>=matrices);
+    if(frame_index>=warm) {
+#ifdef HLCLIENT_HISTORY_COST_FIXTURE
+      cost.allocations[0].push_back(commit_alloc);cost.allocations[1].push_back(present_alloc);
+      if(update) {
+        ++cost.new_rx_frames;
+        cost.rx_durations[0].push_back(std::chrono::duration<double,std::micro>(observed-begin).count());
+        cost.rx_durations[1].push_back(std::chrono::duration<double,std::micro>(remote_done-observed).count());
+        cost.rx_durations[2].push_back(std::chrono::duration<double,std::micro>(end-begin).count());
+      } else cost.rx_durations[3].push_back(std::chrono::duration<double,std::micro>(end-begin).count());
+      const auto collect=[&]<class A>(const A& a) {
+        if constexpr(requires {a.presentation_cost();}) {
+          const auto& p=a.presentation_cost();
+          for(std::size_t n=0;n<p.microseconds.size();++n)cost.stages[n].push_back(p.microseconds[n]);
+          const std::array<std::uint64_t,15> ops{p.history_visits,p.history_lookups,p.history_world_calls,p.model_lookups,
+            p.entity_visits,p.pose_evaluations,p.bounds_evaluations,p.attachment_evaluations,
+            p.support_rebuilds,p.support_hits,p.ordinary_pose_hits,p.new_source?1U:0U,update?1U:0U,p.rotation_conversions,p.rotation_reuses};
+          for(std::size_t n=0;n<ops.size();++n)cost.operations[n]+=ops[n];
+        }
+      };collect(assets);
+#endif
+      const std::array points{begin,observed,remote_done,view_done,end};
+      for(std::size_t scope=0;scope<4;++scope)
+        cost.values.durations[scope].push_back(std::chrono::duration<double,std::micro>(points[scope+1]-points[scope]).count());
+      cost.values.durations[4].push_back(std::chrono::duration<double,std::micro>(end-begin).count());
+      cost.values.integer(states[record_index].canonical_state_hash);
+      const auto mix_frame=[&](const hlclient::entity_render::EntityRenderFrame& value) {
+        cost.values.integer(value.frame_signature());
+        cost.values.integer(value.studio_instances().size());cost.values.integer(value.studio_poses().size());
+        for(const auto& instance:value.studio_instances()) {
+          cost.values.integer(instance.entity_number);cost.values.integer(instance.subinstance_ordinal);
+          cost.values.integer(instance.pose_index);cost.values.integer(instance.body_value);cost.values.integer(instance.skin_family_index);
+          cost.values.integer(static_cast<unsigned>(instance.material_support_status));
+          cost.values.real(instance.transform.origin.x);cost.values.real(instance.transform.origin.y);cost.values.real(instance.transform.origin.z);
+          cost.values.real(instance.transform.rotation_degrees.x);cost.values.real(instance.transform.rotation_degrees.y);cost.values.real(instance.transform.rotation_degrees.z);
+          for(const auto point:{instance.interpolated_bounds.minimum,instance.interpolated_bounds.maximum}) {
+            cost.values.real(point.x);cost.values.real(point.y);cost.values.real(point.z);
+          }
+          for(const auto light:instance.static_light_rgb.value_or(std::array<float,3>{-1,-1,-1}))cost.values.real(light);
+        }
+        for(const auto& pose:value.studio_poses())for(const auto& matrix:pose.bone_matrices)
+          for(const auto scalar:matrix)cost.values.real(scalar);
+      };
+      mix_frame(output);mix_frame(*local_view->frame);
+      for(const auto& socket:assets.remote_weapon_poses()) {
+        cost.values.integer(socket.entity);cost.values.integer(socket.model_slot);cost.values.integer(socket.server_sequence);
+        cost.values.integer(static_cast<unsigned>(socket.source));
+        for(const auto point:{socket.muzzle.origin,socket.shell.origin}) {
+          cost.values.real(point.x);cost.values.real(point.y);cost.values.real(point.z);
+        }
+      }
+      cost.remote_samples+=assets.summary().remote_player_count;
+      for(std::size_t n=0;n<assets.summary().remote_player_count;++n)
+        if(assets.summary().remote_players[n].attachment_matched_bones>=11)++cost.merged_attachments;
+    }
+  }
+  if(!fixed_history) { CHECK(cost.pose_changes>8);CHECK(cost.no_rx_pose_changes>8); }
+  cost.values.capture_bytes=recorder.statistics().total_capacity_bytes;
+  cost.diagnostic_events=recorder.multiplayer_statistics().accepted;
+  host.set_diagnostic_sink(nullptr);assets.set_diagnostic_sink(nullptr);
+  host.teardown();return cost;
+}
+
+#ifdef HLCLIENT_HISTORY_COST_FIXTURE
+TEST_CASE("History projection integrated CPU attribution", "[history-projection-cost][benchmark]") {
+  const auto number=[](const char* key,unsigned fallback) {
+    char* p=nullptr;std::size_t size{};
+    if(_dupenv_s(&p,&size,key)!=0 || !p)return fallback;
+    const auto value=unsigned(std::strtoul(p,nullptr,10));std::free(p);return value;
+  };
+  const unsigned actors=number("HLC_COST_ACTORS",16),history=number("HLC_COST_HISTORY",16);
+  const bool diag=number("HLC_COST_DIAG",0)!=0,profile=number("HLC_COST_PROFILE",0)!=0;
+  const bool fixed=number("HLC_COST_FIXED",1)!=0,actual=number("HLC_COST_ACTUAL",1)!=0;
+  REQUIRE(actors>=1);REQUIRE(actors<=16);REQUIRE(history>=1);REQUIRE(history<=16);
+  const auto c=cpu_studio_pipeline(actors,diag,false,history,profile,actual,fixed);
+  constexpr std::array<const char*,16> labels{"history","player_sample","ordinary_sample","support","validation","setup","entity_work",
+    "appearance","remote_intent","pose","posed_bounds","attachment","frame_build","publication","diagnostics","total"};
+  const auto emit=[&](std::string_view label,const std::vector<double>& raw) {
+    if(raw.empty())return;auto v=raw;std::sort(v.begin(),v.end());
+    std::cout<<"[history-cost] {\"actors\":"<<actors<<",\"history\":"<<history<<",\"diagnostics\":"<<diag<<",\"profile\":"<<profile
+      <<",\"fixed_history\":"<<fixed<<",\"actual_models\":"<<actual<<",\"scope\":\""<<label<<"\",\"samples\":"<<v.size()
+      <<",\"p50_us\":"<<v[(v.size()-1)*50/100]<<",\"p95_us\":"<<v[(v.size()-1)*95/100]<<",\"p99_us\":"<<v[(v.size()-1)*99/100]<<",\"max_us\":"<<v.back()
+      <<",\"signature\":\""<<c.values.signature<<"\",\"no_rx_pose_changes\":"<<c.no_rx_pose_changes<<",\"raw_us\":[";
+    for(std::size_t i=0;i<raw.size();++i) {if(i)std::cout<<',';std::cout<<raw[i];}std::cout<<"]}\n";
+  };
+  for(unsigned i=0;i<16;++i)emit(labels[i],c.stages[i]);
+  constexpr std::array<const char*,5> outer{"commit","present","local_host_viewmodel","diagnostic_collection","parent_visual_update_subset"};
+  for(unsigned i=0;i<5;++i)emit(outer[i],c.values.durations[i]);
+  constexpr std::array<const char*,4> rx_labels{"commit_new_rx","present_new_rx","parent_new_rx","parent_no_rx"};
+  for(unsigned i=0;i<4;++i)emit(rx_labels[i],c.rx_durations[i]);
+  std::cout<<"[history-operations] {\"values\":[";
+  for(unsigned i=0;i<c.operations.size();++i) {if(i)std::cout<<',';std::cout<<c.operations[i];}
+  std::cout<<"],\"allocations\":[";
+  for(unsigned i=0;i<2;++i) {
+    std::uint64_t calls=0,bytes=0;for(auto v:c.allocations[i]){calls+=v.calls;bytes+=v.bytes;}
+    if(i)std::cout<<',';std::cout<<"{\"calls\":"<<calls<<",\"bytes\":"<<bytes<<'}';
+  }
+  std::cout<<"],\"new_rx_frames\":"<<c.new_rx_frames<<",\"matrix_capacity_high_water\":"<<c.published_matrix_capacity_high_water<<",\"capture_bytes\":"<<c.values.capture_bytes<<"}\n";
+}
+#endif
+
+TEST_CASE("CPU Studio warmed normal remote p-model and local viewmodel path preserves time without RX",
+    "[cpu-studio-pipeline][benchmark][runtime-presentation][local-capture-assets][no-stock]") {
+  constexpr std::array<std::string_view,5> scopes{"observe_history","present_entities_including_diagnostic_producers",
+      "local_host_and_viewmodel","diagnostic_collection","owned_visual_update_subset"};
+  for(const auto actors:{1U,4U,8U,12U,16U})for(const bool burst:{false,true}) {
+    if(burst && actors!=16U)continue; // One representative burst, not a Cartesian timing matrix.
+    std::array<CpuStudioPipelineCost,2> modes;
+    for(unsigned order=0;order<2;++order) {
+      const unsigned mode=(order+(actors==16 ? 1U : 0U))%2;
+      modes[mode]=cpu_studio_pipeline(actors,mode!=0,burst);
+    }
+    CHECK(modes[0].values.signature==modes[1].values.signature);
+    CHECK(modes[0].no_rx_pose_changes==modes[1].no_rx_pose_changes);
+    for(unsigned mode=0;mode<2;++mode)for(std::size_t scope=0;scope<scopes.size();++scope) {
+      const auto& c=modes[mode];const auto& values=c.values.durations[scope];REQUIRE(values.size()==256);
+      auto sorted=values;std::sort(sorted.begin(),sorted.end());
+      std::cout<<"[cpu-studio-pipeline] {\"fixture\":\"owned_synthetic_normal_hl_chain\",\"remote_actors\":"<<actors
+        <<",\"diagnostics\":"<<(mode ? "true" : "false")<<",\"rx\":\""<<(burst ? "four_record_burst" : "steady_50hz")
+        <<"\",\"scope\":\""<<scopes[scope]<<"\",\"warmup_frames\":64,\"samples\":256,\"p50_us\":"<<sorted[127]
+        <<",\"p95_us\":"<<sorted[243]<<",\"p99_us\":"<<sorted[253]<<",\"max_us\":"<<sorted.back()
+        <<",\"cold_prepare_us\":"<<c.cold_prepare_us<<",\"output_signature\":\""<<c.values.signature
+        <<"\",\"no_rx_frames\":"<<c.no_rx_frames<<",\"no_rx_pose_changes\":"<<c.no_rx_pose_changes
+        <<",\"pose_changes\":"<<c.pose_changes<<",\"merged_attachment_samples\":"<<c.merged_attachments
+        <<",\"published_matrix_high_water\":"<<c.published_matrices_high_water
+        <<",\"published_palette_count_high_water\":"<<c.published_palette_count_high_water
+        <<",\"published_matrix_capacity_high_water\":"<<c.published_matrix_capacity_high_water
+        <<",\"published_palette_capacity_bytes_high_water\":"<<c.published_matrix_capacity_high_water*16U*sizeof(float)
+        <<",\"capture_capacity_bytes\":"<<c.values.capture_bytes<<",\"diagnostic_events\":"<<c.diagnostic_events
+        <<",\"raw_us\":[";
+      for(std::size_t n=0;n<values.size();++n) {if(n)std::cout<<',';std::cout<<values[n];}
+      std::cout<<"]}\n";
+    }
+  }
 }
 
 void e17_remote_socket_fire(hlclient::game_api::GameClientHost& host,

@@ -1,0 +1,235 @@
+RUNTIME TEXT POLICY — B6 ПРОТИ B6
+28.10.2026 Europe/Kyiv; записи UTC 27.10.2026
+РІШЕННЯ: ACCEPTED / DELIVERED_ALL_DESTINATIONS
+
+Один мінімальний кандидат реалізовано й перевірено фактичним NVIDIA A/B/B/A.
+Середній Present-start інтервал: 2.040618674 -> 1.695909320 мс.
+delta_logging = 0.344709354 мс, або 16.892394% від rebuilt A.
+Обидва B швидші за обидва A; ефект більший за міжзапусковий розкид;
+стійкої tail-регресії немає. Потрібна семантика й детерміновані color/depth
+збережені. Оновлення доставлено в local/shared/dist/ZIP з backup і SHA-256.
+Це instrumented DXGI Present cadence, НЕ gameplay FPS і НЕ чистий CPU/GPU час.
+
+1. ЩО САМЕ ЗМІНЕНО
+
+Callsites звірено за символами на прийнятій isolated B6:
+- main підключає LiveRuntimeStageTraceCallback до log_live_runtime_trace;
+- LiveRuntimeStage::Impl::emit_trace синхронно викликає trace_callback_
+  (isolated src/goldsrc/live_runtime_stage.cpp:6392/6398);
+- log_live_runtime_trace формує рядки й викликає core::log;
+- core::log бере output_mutex і пише std::clog (src/core/log.cpp:80-81);
+- camera observer виконує облік, після нього формувався camera stdout.
+Optional diagnostics OFF не вимикали цей повторюваний текстовий шлях.
+
+Перевірка startup bool тепер стоїть ДО ostringstream/to_string/складання
+рядків і logger для чотирьох runtime event categories та camera:
+1) committed_effect_observed: [effect-wire];
+2) service_payload_received: live_service_payloads_received;
+3) runtime_record_applied: runtime_record_applied і повторюваний
+   [session-progress] runtime_publication=succeeded;
+4) usercmd_packet_submitted: live_usercmd_transmission=active;
+5) live_visual_camera_sample.
+runtime_record_applied створював два рядки. Уже готовий текст у sink не
+відкидається: непотрібний текст узагалі не створюється.
+
+Одноразова startup policy: HLC_RUNTIME_TEXT_POLICY=off|legacy|verbose.
+До прийняття absent-env default був legacy; після прийняття — off.
+Явний CLI --net-trace відновлює подробиці навіть з off. Внутрішній net_trace
+external config не вважається явним запитом цих подробиць. Невідоме значення
+policy дає помилку/exit 2. Покадрового пошуку env/config немає.
+Logger/framework/buffering/threads, renderer/shaders/AA/copy/resolve,
+simulation/prediction, limiter/yield/sleep і порядок кадру не змінено.
+
+2. CALLBACKS, RECEIPTS, LIFECYCLE ТА CORRECTNESS
+
+Callback залишається підключеним. Усі п'ять runtime receipt facts збережено:
+spawn_request_transmitted/acknowledged, signon_reply_transmitted/acknowledged,
+live_service_payloads_received. Останній виконується ДО off-guard.
+Gameplay/state publication і потрібні side effects не пропускаються.
+Camera observer до text helper байтово еквівалентний: accounting, counters,
+extrema й зміна потрібного стану збережені. Інші receipt callsites незмінні.
+Збережено warnings/errors/fatal, реальні відмови, запуск/connect,
+spawn/signon/baselines/readiness/handoff/disconnect/close. Це не global mute.
+
+Focused tests: 346 assertions PASS. Усі 25 runtime event kinds, 5 receipt
+kinds, збережені facts/mailbox/reconnect isolation; B formatter entries=0;
+A/verbose/explicit trace byteexact target output; severity output збережено.
+Лічильники під test-only macro, якого немає у client binary.
+
+Image/state control: 138693 assertions PASS. Один 96x96 GL3.3 AA0 context,
+lit quad, три fixed cameras, дев'ять actual callback events; повні RGBA та
+float-depth bits і state/receipts exact у legacy/off/verbose/off+trace/repeat.
+Це synthetic correctness на Intel RaptorLake-S, НЕ NVIDIA live-world perf.
+
+Actual client null replay A/B/verbose і п'ять фінальних startup cases:
+exit 0, input 4/applied 4/failed 0/visual_failed 0/pending 0/updates 2,
+finish_count 1, canonical_hash 18197719904158225405. Null replay сам не
+перевіряє live callbacks: для них окремі focused tests і live OFF control.
+Live OFF check b6-20261027T221813559Z-ac8ddf: фактична NVIDIA, visible gameplay,
+retry/reconnect, штатне F12 quit/exit 0, target rows 0, rollback true.
+Wrapper ready не залежить від приглушених рядків: однакові UI/scene qualification
+та чинні startup/lifecycle/process receipts. B не мав окремої важкої діагностики.
+
+3. ТОЧНИЙ DIFF І BUILD PROVENANCE
+
+Прийнята isolated база: world-local-lights-b6-20261026/b6-isolated/source
+та frozen Release-libs. Повторний 1590 files/132 libraries audit не робився.
+Попередній доставлений B6 client:
+c349dc7beb24a28ed45b1d1b6ed7da2a2eed80587e4a8d0cdca8bb34489850bc.
+Dirty root і rejected experiments збережено, до нового випуску не перенесено.
+Змінено лише task-owned main TU; frozen archives байтово незмінні:
+136 ordered / 117 unique link archives, inventory 132. Release/Win32,
+MSVC 14.34.31933 / cl 19.34.31948. Збережено actual 532 include identities,
+input/link manifests, build.binlog, map та input snapshots.
+
+У ВСІХ чотирьох A/B/B/A вимірювався один rebuilt EXE, а не буквально старий:
+build-client-20261027T221254671Z-2e2f44/bin/hlclient.exe
+SHA 28059b4778d7cbcbf76d4c8e6df53306ceb324cd839acd82257afdced029a4c6.
+Measured main SHA:
+d08dc91a86097e684539e338182346331cb696a142aa33f3ba0e21c60641cf77.
+Єдина різниця A/B — startup env legacy/off. source-delta-verification.json
+реконструює frozen main поза allowlisted policy delta; camera bookkeeping,
+receipts, renderer/simulation/limiter не змінено.
+
+Фінальна default-OFF Release:
+build-client-20261027T232140333Z-45bcc8/bin/hlclient.exe
+SHA 24a55d8e041d0cce0a651d09d064c73611c8b7b9f648b2560e7347de616e5ace,
+5588480 bytes. Production main:
+8f5fd9fee33997f6f256ce1cf979b3838557265fe9dd9e16635426badd55a7a1.
+Build record SHA:
+b356fe527fd3de3cc24745bad520ef6a2fddc7416f0a2a6ff91ca947960e047d.
+Від measured main РІВНО дві зміни: global true->false і absent-env legacy->off.
+final-default-verification.json PASS: actual default/off byteequal stdout,
+stderr/state; legacy/verbose/explicit trace detailed=true; production tests
+346 PASS. Інших TU змін немає. Фінальна компіляція не вимірювалася повторно:
+її default обирає той самий виміряний B path. Точний diff до frozen B6:
+B6_TO_PRODUCTION_MAIN.diff. Dirty HEAD — тільки контекст, не clean-source claim.
+
+Невдалі attempts збережено: C4996 getenv виправлено через Windows _dupenv_s,
+без послаблення warnings. Перший final test очікував legacy й закономірно впав
+після default-off; змінено лише цю assert, нова production test build 346 PASS.
+Попередні outputs не видалено й не приховано.
+
+4. ФАКТИЧНИЙ A/B/B/A НА NVIDIA
+
+Broker: pm-broker-20261027T224314575Z-346f0f.
+METRIC_POLICY.json заморожений до A1, SHA:
+c495e206b78f7ea31b5ced5fca1bed91815df36c98a4552f3853629daaf6948c.
+PM 2.6.0 x64, quiet warmup >=30s; raw 24s = 2+20+2. Точні 20s межі QPC
+визначені до аналізу. Повні інтервали мають обидва endpoints у вікні;
+nearest-rank quantiles; outliers не відкидалися.
+Та сама порожня courtyard Crossfire: origin 32,320,-1819.97,
+eye Z -1791.98, yaw 121.998/pitch 0; before/after scene evidence.
+1920x1080 borderless, AAOff, VSyncOff, fps_max 1000, optional diagnostics OFF.
+Однакові argv/settings, redirected stdout/stderr та reader/pipe drain.
+Під час quiet warmup/timed window — без screenshots/build/аналізу/інших клієнтів.
+
+Фактичний GPU КОЖНОГО leg: NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2,
+nvoglv32.dll 32.0.15.8186. Перевірено renderer/ICD саме нового EXE path.
+Тимчасовий per-app preference точно відновлено; global GPU state не мінявся.
+Presentation КОЖНОГО leg: Hardware Composed: Independent Flip,
+PM Runtime DXGI, SyncInterval 0, AllowsTearing 1.
+EXE SHA КОЖНОГО leg: 28059b4778d7cbcbf76d4c8e6df53306ceb324cd839acd82257afdced029a4c6.
+
+leg policy PID      N       sumdt(s)    mean(ms)   N/sumdt     p50     p95     p99      max(ms)
+A1 legacy  48560   10124    19.9978004   1.9752865  506.255678  1.6977  3.7597  5.8695   13.3555
+B1 off     27980   12456    19.9983634   1.6055205  622.850968  1.4897  2.4470  3.4235   15.9039
+B2 off     36644   11127    19.9962661   1.7970941  556.453887  1.6121  3.0931  4.5279   17.1689
+A2 legacy  37652    9475    19.9962850   2.1104259  473.838015  1.7781  4.7814  6.1670   18.7417
+
+>20/>33/>50 ms = 0/0/0 у КОЖНОМУ leg. Rate = N/sumdt, не mean instantaneous
+FPS або reciprocal median. Runs у порядку:
+b6-20261027T224302416Z-65b71e; b6-20261027T224822154Z-bc8165;
+b6-20261027T230049264Z-59a4e4; b6-20261027T230811999Z-91ab49.
+Raw CSV SHA відповідно:
+775a27243a07059ff041b86f2798a6f025baf5ab515a96d7f89d5cc2445d98d2
+3d51efe6a5b8fb609eb7c03d43e3ef636bfadb6ff05f0a1be916af7645b15283
+f3f8cbfbe0a1cff563cdcf08d4b25d7e972c0ede6da6f3b86ca7f8355bce9280
+7e40d7621e4eb3f4ecbb93fcb984c475245e91a8ba293027b6cf0e57acd5fd10.
+
+Усі primary gates PASS. QPC reversals/duplicates/display NA/invalid = 0;
+raw interval відповідає timestamp dt; internal observed gap = 0;
+жодного in-window row exclusion. Head/tail rows поза вікном:
+A1 852/1246; B1 1185/1316; B2 1098/1205; A2 833/1025.
+У кожного 2 partial boundary intervals виключені. Sumdt трохи <20s —
+нормальна сума тільки повних інтервалів, не зміна заданої тривалості вікна.
+Dropped field ВІДСУТНІЙ: dropped count unavailable, НЕ zero loss.
+ETW loss невідомий; CSV consistency не доводить відсутності втрат.
+
+Pooled A: N 19599, sum 39.9940854s, mean 2.040618674ms, rate 490.047461/s.
+Pooled B: N 23583, sum 39.9946295s, mean 1.695909320ms, rate 589.654168/s.
+delta_logging 0.344709354ms; mean -16.892394%, rate +20.325931%.
+Розкид mean A: 1.975286488..2.110425858, range 0.135139370ms.
+Розкид mean B: 1.605520504..1.797094104, range 0.191573600ms.
+Delta більша за максимальний range на 0.153135754ms. Обидва B нижче обох A.
+B p95/p99 нижче обох A. Максимуми B вищі за A1, але нижчі за A2;
+вони не обрізані. Не стверджується, що кожна точка хвоста краща.
+
+5. ОБСЯГ ЛОГІВ — ОКРЕМО
+
+Whole-lifetime stdout+stderr, НЕ 20s:
+leg bytes       all physical rows    recurring target rows
+A1   4587005    40913                40383
+B1    428506     1789                    0
+B2    214574      901                    0
+A2   7227582    63060                62308
+log-volume-whole-lifetime.json містить SHA/bytes/categories усіх 8 raw logs.
+Різні lifetime/retries не нормалізовані: totals не приписуються 20s, не
+використовуються як per-line cost. Lifecycle/marker не включено в target.
+
+6. ВИСНОВОК І МЕЖІ ДОКАЗУ
+
+Цей текстовий шлях пояснює вимірювану частину вартості B6 у НОВОМУ matched
+B6/B6 контролі. Це net effect formatting+output разом, не окремо доведена
+ціна mutex/flush/syscalls/GUI redraw/blocking I/O. CPU/GPU не додавалися.
+Старі B6/HL 1.818072/1.270363ms і gap 0.547710ms належать іншій серії:
+нову delta НЕ віднімали як точний залишок старого gap. Stock HL, WPR,
+ReadyThread, BSP/sky, Studio та light-list кампанії не повторювались.
+Два 20s повтори на arm — не population confidence interval і не обіцянка
+такого самого gameplay FPS на іншому CPU/GPU/MSAA/сцені.
+Scene/focus підтверджено before/after UI, не continuous native telemetry.
+Після B1 after-scene screenshot виявлено перемикання фокусу користувачем
+поза capture evidence; безперервної інструментальної гарантії foreground немає.
+
+Початковий A1 b6-20261027T222701933Z-cf249f виключено з основної серії:
+900s preparation watchdog завершив target під час capture після тривалого
+пошуку natural spawn. Failed raw/broker/exit -1/emergencyclose збережено.
+Основний ABBA почато заново з 1200s preparation budget. Це не відбір за
+кращим performance числом. Усі чотири valid runs штатно закриті, exit 0,
+rollback true; їхні raw незмінні.
+
+7. РІШЕННЯ, ПАКЕТ І ФАКТИЧНА ДОСТАВКА
+
+ACCEPTED: predeclared mean/spread/tail gates та correctness виконано.
+Оновлено D:\DEV\CPP\HL-Client-engine\build\bin\Release,
+\\192.168.0.104\storage\HLClient-Win10-Test,
+dist/HLClientEngine і canonical dist/HLClientEngine-Win10.zip.
+8 binary hashes порівняно в усіх 3 directories; client SHA 24a55... однаковий.
+Сім companion binaries незмінні, зокрема єдиний native launcher SHA:
+9d401a751adc933831f86bcd52d6c468fb801981d1af4fb499e44530ce1fb9da.
+ZIP 4189269 bytes, SHA:
+bcd91e13e01a8e63df3f782fbd9be2c199d0d3f143025a6ae554cc9d1c05d373.
+Offline dependency/import/extracted Unicode-path smoke/checksums PASS;
+system diagnostics fake-child 112 checks PASS. Нового user runtime тесту на
+Windows 10 не було: development OS smoke ним не називається.
+
+Перед першим overwrite усі 10 замінюваних old files збережено й звірено:
+delivery-rollback-20261027T233100842Z-e471bdab/backup.
+40 операцій: 10 replace_after_backup + 30 skip_identical. Exclusive handles
+утримували binaries обох PCs/змінювані targets; source/evidence read-locked.
+Налаштування/auth/resources/logs/shared test-data не копіювались і не
+перезаписувались. Нічого матеріального не видалялось; old B6 відновлюваний.
+
+Stage: delivery-stage-20261027T232925243Z-670b51/staging-receipt.json.
+Publication: delivery-rollback-20261027T233100842Z-e471bdab/publication-receipt.json.
+Postverification: post-delivery-verification-20261027T233119278Z-a60446.json PASS.
+Pinned acceptance/default/build/stage records не переписані: historical
+pending labels не фінальний статус; COMPLETION.json і publication/verifier
+фіксують фактичне завершення. Metadata містить їхні незмінні SHA.
+
+Локальний запуск:
+D:\DEV\CPP\HL-Client-engine\build\bin\Release\HLClientLauncher.exe
+Інший ПК:
+\\192.168.0.104\storage\HLClient-Win10-Test\HLClientLauncher.exe
+Короткі startup/error logs і optional diagnostics одного лаунчера збережені.
+Settings кожного ПК лишились окремими. Коміт/push не виконувався.

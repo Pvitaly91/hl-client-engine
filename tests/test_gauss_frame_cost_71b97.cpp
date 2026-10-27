@@ -247,6 +247,21 @@ std::optional<std::uint64_t> material_uniform_delta(const Statistics& before,
   else
     return std::nullopt;
 }
+template<class Target,class Image>
+void color_input_receipt(const Target& target,const Image& image) {
+  std::cout<<"[254e-color-input] {\"color_copies\":"<<image.framebuffer_color_copies
+    <<",\"resolved_texture_reads\":"<<image.resolved_texture_reads
+    <<",\"copy_storage_reallocations\":"<<image.storage_reallocations;
+  if constexpr(requires{target.single_sample_frames;target.output_depth_blits;
+      target.retained_attachment_bytes;target.peak_attachment_bytes;image.single_sample_texture_reads;}) {
+    std::cout<<",\"single_sample_texture_reads\":"<<image.single_sample_texture_reads
+      <<",\"single_sample_frames\":"<<target.single_sample_frames
+      <<",\"output_depth_blits\":"<<target.output_depth_blits
+      <<",\"retained_attachment_bytes\":"<<target.retained_attachment_bytes
+      <<",\"peak_attachment_bytes\":"<<target.peak_attachment_bytes;
+  }
+  std::cout<<"}\n";
+}
 }
 
 TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production preparation and GPU costs",
@@ -272,6 +287,8 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
   const auto timing_mode=optional_environment("HLCLIENT_9DE_TIMING");
   REQUIRE((timing_mode.empty()||timing_mode=="on"||timing_mode=="off"));
   const bool timed=timing_mode!="off";
+  const auto neutral_setting=optional_environment("HLCLIENT_0C29_NEUTRAL_IMAGE");
+  REQUIRE((neutral_setting.empty()||neutral_setting=="1"));
   const auto capture_mode=optional_environment("HLCLIENT_9DE_CAPTURE");
   REQUIRE((capture_mode.empty()||capture_mode=="local"||capture_mode=="remote"));
 #ifdef _WIN32
@@ -355,6 +372,16 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
   views.push_back({"9de_primary_fixed",{-952.3203125F,1120.1875F,-1472.F},-6.3167515,-10.773334});
   views.push_back({"9de_secondary_fixed",{-952.3203125F,1120.1875F,-1472.F},-40.81675,-10.773334});
   views.push_back({"9de_primary_sweep",{-952.3203125F,1120.1875F,-1472.F},-6.3167515,-10.773334});
+  // Only the recorded camera is retained. Actors/materials/lights/time below
+  // remain the explicit fixed fixture, not a replay of the Windows10 match.
+  views.push_back({"50b5_frame2875_camera_fixed_fixture",
+      {-898.7626342773438F,54.29488754272461F,-1471.9969482421875F},18.2,-4.5});
+  views.push_back({"50b5_frame2908_camera_fixed_fixture",
+      {-917.7095947265625F,224.34974670410156F,-1471.982666015625F},27.0,-3.2});
+  // Only position and pitch-up/yaw are a historical seed. Fixed fixture time,
+  // actors and explicit light profiles below are NOT a reconstruction of 12854.
+  views.push_back({"254e_frame12854_camera_fixed_fixture",
+      {569.95849609375F,458.0836486816406F,-1791.98046875F},108.69914,-3.5});
   // A read-only map-derived sloped-surface control; it is explicitly NOT
   // identified as the user's Shotgun ramp without a recorded camera position.
   const auto& map=*assets.surface_scene();
@@ -427,7 +454,8 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       const auto presented=Clock::now();
       scene=cl::build_render_scene(world);scene.skybox=assets.skybox();
       scene.first_person_entities=assets.materialize_viewmodel(held,view.eye);
-      scene.requested_msaa_samples=requested_msaa;scene.image_adjustments={.1F,1.04F,1.1F};
+      scene.requested_msaa_samples=requested_msaa;scene.image_adjustments=neutral_setting=="1"
+          ?hlclient::core::ImageAdjustments{}:hlclient::core::ImageAdjustments{.1F,1.04F,1.1F};
       apply_dynamic_profile(scene,view,dynamic_profile,i);
       const auto light_inputs=light_signature(scene);
       const auto prepared=Clock::now();
@@ -635,6 +663,7 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
     const auto visibility=sidecar(map,scene.camera);
     const auto& v=visibility.statistics();const auto& target=renderer.scene_target_statistics();
     const auto& timing=renderer.gpu_timing_statistics();const auto& summary=assets.summary();
+    color_input_receipt(target,renderer.image_adjustment_statistics());
     REQUIRE(world.entity_scene()->presentation_studio_sources().size()==expected_appearance_owners);
     std::uint64_t studio_triangles{},studio_vertices{},studio_bones{};
     const auto geometry=[&](const rr::RenderDynamicEntities& entities) {
@@ -702,6 +731,9 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
     if(depth_range)std::cout<<'['<<(*depth_range)[0]<<','<<(*depth_range)[1]<<']';else std::cout<<"null";
     std::cout
       <<",\"msaa\":"<<target.actual_samples<<",\"target_allocations\":"<<target.storage_allocations
+      <<",\"resolved_frames\":"<<target.resolved_frames
+      <<",\"output_color_blits\":"<<target.output_color_blits
+      <<",\"direct_adjustment_frames\":"<<target.direct_adjustment_frames
       <<",\"width\":"<<target.scene_extent.width<<",\"height\":"<<target.scene_extent.height
       <<",\"resolve_width\":"<<target.resolve_extent.width<<",\"resolve_height\":"<<target.resolve_extent.height
       <<",\"hud_width\":"<<target.hud_extent.width<<",\"hud_height\":"<<target.hud_extent.height

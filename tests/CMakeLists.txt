@@ -716,6 +716,19 @@ if(HLCLIENT_BUILD_GAME_HALFLIFE)
         COMMAND hlclient_reload_tests "[reload-sync]" --reporter compact)
 endif()
 
+add_executable(hlclient_studio_submission_0c29_tests test_studio_submission_0c29.cpp)
+target_link_libraries(hlclient_studio_submission_0c29_tests PRIVATE ${_e33_test_links})
+target_compile_features(hlclient_studio_submission_0c29_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_studio_submission_0c29_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_studio_submission_0c29_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
+hlclient_enable_warnings(hlclient_studio_submission_0c29_tests)
+hlclient_enable_address_sanitizer(hlclient_studio_submission_0c29_tests)
+add_test(NAME hlclient_studio_submission_0c29_offline
+    COMMAND hlclient_studio_submission_0c29_tests "[0c29-submission]" --reporter compact)
+set_tests_properties(hlclient_studio_submission_0c29_offline PROPERTIES
+    LABELS "renderer;opengl;studio;submission;no-stock" TIMEOUT 90 RUN_SERIAL TRUE)
+
 add_executable(hlclient_gauss_71b97_tests test_gauss_frame_cost_71b97.cpp
     gauss_world_visibility_control.cpp
     test_runtime_world_visibility.cpp

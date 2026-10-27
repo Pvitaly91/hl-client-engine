@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -819,6 +820,61 @@ TEST_CASE("Entity render boundary exposes no paths snapshots or GL handles",
     STATIC_REQUIRE_FALSE(HasOpenGlHandle<render::EntitySceneRenderPackage>);
     STATIC_REQUIRE_FALSE(HasOpenGlHandle<render::EntityRenderFrame>);
     STATIC_REQUIRE_FALSE(HasOpenGlHandle<render::StudioRenderPose>);
+}
+
+TEST_CASE("Frame signature preserves scalar bits errors and delayed immutable readers",
+    "[frame-hash-padding][entity-render][frame][ownership]")
+{
+    auto scene=fixture::scene_package(fixture::render_assets());REQUIRE(scene);
+    std::uint32_t random=0x73A49D21U;
+    const auto next=[&] {random^=random<<13;random^=random>>17;random^=random<<5;return random;};
+    constexpr std::array<std::uint32_t,12> edge_bits{0U,0x80000000U,1U,0x80000001U,
+        0x00800000U,0x80800000U,0x3F800000U,0x3F800001U,0x3F7FFFFFU,0x7F7FFFFFU,0xFF7FFFFFU,0xBF800000U};
+    std::array<std::shared_ptr<const render::EntityRenderFrame>,5> readers;
+    std::array<std::uint64_t,5> identities{};
+    std::size_t accepted=0,rejected=0;
+    for(std::uint32_t ordinal=0;ordinal<1024;++ordinal) {
+        auto input=mixed_frame_input(*scene.package);
+        input.resource_id=0x8000ULL+(static_cast<std::uint64_t>(next())<<16U);
+        input.resource_revision=ordinal+1U;
+        for(std::size_t i=0;i<16;++i) {
+            auto bits=ordinal%3==0 ? edge_bits[(ordinal+i)%edge_bits.size()] : next();
+            if((bits&0x7F800000U)==0x7F800000U)bits&=0xFF7FFFFFU;
+            input.studio_poses[0].bone_matrices[0][i]=std::bit_cast<float>(bits);
+        }
+        input.studio_instances[0].body_value=next();
+        input.studio_instances[0].skin_family_index=ordinal%2;
+        const auto original_bits=std::bit_cast<std::uint32_t>(input.studio_poses[0].bone_matrices[0][0]);
+        switch(ordinal%20) {
+        case 0:input.studio_poses[0].bone_matrices[0][0]=std::numeric_limits<float>::quiet_NaN();break;
+        case 1:input.studio_poses[0].bone_matrices[0][7]=std::numeric_limits<float>::infinity();break;
+        case 2:input.studio_instances[0].opacity=std::numeric_limits<float>::quiet_NaN();break;
+        case 3:input.studio_instances[0].entity_number=0;break;
+        case 4:input.studio_instances[0].pose_index=999;break;
+        case 5:input.resource_revision=0;break;
+        case 6:++input.studio_poses[0].model_resource_identity.revision;break;
+        case 7:input.studio_instances[0].skin_family_index=999;break;
+        case 8:input.resource_id=0;break;
+        case 9:input.studio_instances[0].blend_mode=static_cast<render::StudioBlendMode>(255);break;
+        default:break;
+        }
+        auto result=render::EntityRenderFrameBuilder{}.build(*scene.package,input);
+        if(result) {
+            ++accepted;
+            const auto index=ordinal%readers.size();
+            identities[index]=result.frame->frame_signature();
+            readers[index]=std::make_shared<const render::EntityRenderFrame>(std::move(*result.frame));
+            input.studio_poses[0].bone_matrices[0][0]=17;
+            input.studio_instances.clear();
+            CHECK(std::bit_cast<std::uint32_t>(readers[index]->studio_poses()[0].bone_matrices[0][0])==original_bits);
+            std::cout<<"[frame-hash-oracle] {\"case\":"<<ordinal<<",\"accepted\":true,\"signature\":\""<<identities[index]<<"\",\"draws\":"<<readers[index]->draw_commands().size()<<"}\n";
+        } else {
+            ++rejected;REQUIRE(result.error);
+            std::cout<<"[frame-hash-oracle] {\"case\":"<<ordinal<<",\"accepted\":false,\"error\":"<<static_cast<unsigned>(result.error->code)<<",\"entity\":"<<result.error->entity_number.value_or(0)<<"}\n";
+        }
+        for(std::size_t i=0;i<readers.size();++i)if(readers[i])CHECK(readers[i]->frame_signature()==identities[i]);
+    }
+    CHECK(accepted>0);CHECK(rejected>0);
 }
 
 } // namespace

@@ -124,6 +124,20 @@ namespace {
 
 using hlclient::core::LogLevel;
 
+// One startup decision for recurring diagnostic text only. No logger, game,
+// receipt or render policy is changed by this switch. Keep legacy until the
+// isolated A/B candidate has been qualified.
+bool detailed_runtime_text_enabled{false};
+[[nodiscard]] std::optional<bool> runtime_text_enabled_for_startup(
+    const std::string_view mode, const bool explicit_trace) noexcept {
+  if (mode == "legacy" || mode == "verbose") return true;
+  if (mode == "off") return explicit_trace;
+  return std::nullopt;
+}
+#if defined(HLCLIENT_RUNTIME_TEXT_POLICY_TEST)
+std::uint64_t runtime_text_formatting_calls{}, camera_text_formatting_calls{};
+#endif
+
 [[nodiscard]] constexpr hlclient::app::MovementGpuPassStatus movement_gpu_status(
     hlclient::renderer::opengl::OpenGlGpuTimingStatus status) noexcept {
   using Source=hlclient::renderer::opengl::OpenGlGpuTimingStatus;
@@ -2493,7 +2507,11 @@ void log_live_runtime_trace(
   const auto &metadata = event.metadata;
   switch (metadata.type) {
   case Type::committed_effect_observed:
+    if (!detailed_runtime_text_enabled) return;
     if(metadata.effect_diagnostic) {
+#if defined(HLCLIENT_RUNTIME_TEXT_POLICY_TEST)
+      ++runtime_text_formatting_calls;
+#endif
       const auto& d=*metadata.effect_diagnostic;
       std::ostringstream row;
       row<<"[effect-wire] record="<<metadata.payload_ordinal<<" bit="<<metadata.message_bit_offset
@@ -2540,6 +2558,10 @@ void log_live_runtime_trace(
     return;
   case Type::service_payload_received:
     receipt_fact_observed(hlclient::app::SessionReceiptFact::live_service_payloads_received);
+    if (!detailed_runtime_text_enabled) return;
+#if defined(HLCLIENT_RUNTIME_TEXT_POLICY_TEST)
+    ++runtime_text_formatting_calls;
+#endif
     hlclient::core::log(
         LogLevel::info,
         "[live-runtime] live_service_payloads_received=true "
@@ -2562,6 +2584,10 @@ void log_live_runtime_trace(
                         "[session-progress] baselines=succeeded");
     return;
   case Type::runtime_record_applied:
+    if (!detailed_runtime_text_enabled) return;
+#if defined(HLCLIENT_RUNTIME_TEXT_POLICY_TEST)
+    ++runtime_text_formatting_calls;
+#endif
     hlclient::core::log(
         LogLevel::info,
         "[live-runtime] runtime_record_applied=true payload_ordinal=" +
@@ -2590,6 +2616,10 @@ void log_live_runtime_trace(
                         "[session-progress] live_usercmd_handoff=succeeded");
     return;
   case Type::usercmd_packet_submitted:
+    if (!detailed_runtime_text_enabled) return;
+#if defined(HLCLIENT_RUNTIME_TEXT_POLICY_TEST)
+    ++runtime_text_formatting_calls;
+#endif
     hlclient::core::log(LogLevel::info,
                         "[session-progress] live_usercmd_transmission=active",
                         hlclient::core::LogChannel::diagnostic);
@@ -2612,6 +2642,33 @@ void log_live_runtime_trace(
   case Type::protocol_error:
     return;
   }
+}
+
+void log_live_visual_camera_text(
+    const hlclient::app::LiveVisualCameraSample &sample) {
+  if (!detailed_runtime_text_enabled) return;
+#if defined(HLCLIENT_RUNTIME_TEXT_POLICY_TEST)
+  ++camera_text_formatting_calls;
+#endif
+  std::cout << "live_visual_camera_sample generation=" << sample.generation
+            << " publication_revision=" << sample.publication_revision
+            << " source_sequence="
+            << sample.source.source_transport_sequence << " server_time=";
+  if (sample.server_time_seconds)
+    std::cout << *sample.server_time_seconds;
+  else
+    std::cout << "unavailable";
+  std::cout << " origin=" << sample.origin.x << ',' << sample.origin.y
+            << ',' << sample.origin.z << " view_offset="
+            << sample.view_offset.x << ',' << sample.view_offset.y
+            << ',' << sample.view_offset.z << " eye="
+            << sample.eye_position.x << ',' << sample.eye_position.y
+            << ',' << sample.eye_position.z << " local_angles="
+            << sample.local_yaw_degrees << ','
+            << sample.local_pitch_degrees
+            << " server_angle_correction="
+            << sample.server_angle_correction_applied
+            << " freshness=observed_in_record\n";
 }
 
 void log_precache_manifest_trace(
@@ -5868,25 +5925,7 @@ int run_live_visual_control(
     maximum_eye_y = maximum_eye_y
                         ? std::max(*maximum_eye_y, u.sample->eye_position.y)
                         : u.sample->eye_position.y;
-    std::cout << "live_visual_camera_sample generation=" << u.sample->generation
-              << " publication_revision=" << u.sample->publication_revision
-              << " source_sequence="
-              << u.sample->source.source_transport_sequence << " server_time=";
-    if (u.sample->server_time_seconds)
-      std::cout << *u.sample->server_time_seconds;
-    else
-      std::cout << "unavailable";
-    std::cout << " origin=" << u.sample->origin.x << ',' << u.sample->origin.y
-              << ',' << u.sample->origin.z << " view_offset="
-              << u.sample->view_offset.x << ',' << u.sample->view_offset.y
-              << ',' << u.sample->view_offset.z << " eye="
-              << u.sample->eye_position.x << ',' << u.sample->eye_position.y
-              << ',' << u.sample->eye_position.z << " local_angles="
-              << u.sample->local_yaw_degrees << ','
-              << u.sample->local_pitch_degrees
-              << " server_angle_correction="
-              << u.sample->server_angle_correction_applied
-              << " freshness=observed_in_record\n";
+    log_live_visual_camera_text(*u.sample);
   };
 
   const auto session_started = Clock::now();
@@ -11047,6 +11086,35 @@ int application_main(const int argument_count,
     print_version();
     return 0;
   }
+
+#ifdef _WIN32
+  char *runtime_text_setting = nullptr;
+  std::size_t runtime_text_setting_size{};
+  if (::_dupenv_s(&runtime_text_setting, &runtime_text_setting_size,
+                 "HLC_RUNTIME_TEXT_POLICY") != 0) {
+    hlclient::core::log(LogLevel::error, "Unable to read runtime text startup policy");
+    return 2;
+  }
+  const std::unique_ptr<char, decltype(&std::free)> runtime_text_setting_owner{
+      runtime_text_setting, &std::free};
+#else
+  const auto *runtime_text_setting = std::getenv("HLC_RUNTIME_TEXT_POLICY");
+#endif
+  const std::string_view runtime_text_mode = runtime_text_setting
+      ? std::string_view{runtime_text_setting} : std::string_view{"off"};
+  // Only an explicit CLI trace request overrides off. External launch setup
+  // may internally enable net_trace; that is not a user verbose request.
+  const auto runtime_text_policy = runtime_text_enabled_for_startup(
+      runtime_text_mode, parsed.options->net_trace);
+  if (!runtime_text_policy) {
+    hlclient::core::log(LogLevel::error,
+        "HLC_RUNTIME_TEXT_POLICY must be legacy, off or verbose");
+    return 2;
+  }
+  detailed_runtime_text_enabled = *runtime_text_policy;
+  hlclient::core::log(LogLevel::info,
+      std::string{"[runtime-text-policy] requested="} + std::string{runtime_text_mode} +
+      " detailed=" + (detailed_runtime_text_enabled ? "true" : "false"));
 
   try {
     auto options=*parsed.options;

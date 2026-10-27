@@ -29,7 +29,19 @@ public:
 
     void add(const std::uint32_t value) noexcept
     {
-        add(static_cast<std::uint64_t>(value));
+        // The signature contract serializes even a uint32 as eight little-
+        // endian bytes. The upper four bytes are zero: four FNV-1a steps
+        // therefore equal one multiplication by prime^4 modulo 2^64.
+        // Preserve every bit and the existing padding/ordering, but avoid
+        // four redundant steps and variable-width uint64 shifts per scalar.
+        constexpr std::uint64_t prime = 1'099'511'628'211ULL;
+        constexpr auto squared = prime * prime;
+        constexpr auto fourth = squared * squared;
+        for (std::size_t index = 0U; index < sizeof(value); ++index) {
+            value_ ^= static_cast<std::uint8_t>(value >> (index * 8U));
+            value_ *= prime;
+        }
+        value_ *= fourth;
     }
 
     void add(const float value) noexcept

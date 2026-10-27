@@ -558,6 +558,16 @@ uniform vec4 u_effect_light_color_intensity[8];
 
 out vec4 output_color;
 
+#ifdef HLC_FULL_EIGHT_EFFECT_LIGHTS
+vec3 effect_contribution(int i)
+{
+    float falloff=max(0.0,1.0-length(fragment_world_position-
+        u_effect_light_center_radius[i].xyz)/u_effect_light_center_radius[i].w);
+    return u_effect_light_color_intensity[i].rgb *
+        (u_effect_light_color_intensity[i].w*falloff*falloff);
+}
+#endif
+
 void main()
 {
     vec4 base_sample = texture(u_base_texture, fragment_base_uv);
@@ -573,12 +583,27 @@ void main()
         light_factor += u_point_light_color *
             (u_point_light_intensity * falloff * falloff);
     }
+#ifdef HLC_FULL_EIGHT_EFFECT_LIGHTS
+    // Selected once per frame only for eight valid, positive sources. Retain
+    // the count uniform contract and exactly the original accumulation order.
+    if (u_effect_light_count == 8) {
+        light_factor+=effect_contribution(0);
+        light_factor+=effect_contribution(1);
+        light_factor+=effect_contribution(2);
+        light_factor+=effect_contribution(3);
+        light_factor+=effect_contribution(4);
+        light_factor+=effect_contribution(5);
+        light_factor+=effect_contribution(6);
+        light_factor+=effect_contribution(7);
+    }
+#else
     for (int i=0; i<u_effect_light_count && i<8; ++i) {
         float falloff=max(0.0,1.0-length(fragment_world_position-
             u_effect_light_center_radius[i].xyz)/u_effect_light_center_radius[i].w);
         light_factor+=u_effect_light_color_intensity[i].rgb *
             (u_effect_light_color_intensity[i].w*falloff*falloff);
     }
+#endif
     output_color = vec4(base_sample.rgb * light_factor, base_sample.a);
 }
 )GLSL";
@@ -808,13 +833,20 @@ struct ProgramState {
     return result;
 }
 
-[[nodiscard]] ProgramState create_opaque_lit_world_program()
+[[nodiscard]] ProgramState create_opaque_lit_world_program(const bool full_eight = false)
 {
     auto vertex = compile_shader(
         GL_VERTEX_SHADER, kWorldVertexShader,
         "Opaque dynamic-light static-world vertex shader");
+    std::string fragment_source{kOpaqueLitWorldFragmentShader};
+    if (full_eight) {
+        // Preprocessor specialization preserves the legacy program for 0..7
+        // sources: its hot fragment path pays no new uniform branch.
+        fragment_source.insert(fragment_source.find('\n') + 1U,
+            "#define HLC_FULL_EIGHT_EFFECT_LIGHTS\n");
+    }
     auto fragment = compile_shader(
-        GL_FRAGMENT_SHADER, kOpaqueLitWorldFragmentShader,
+        GL_FRAGMENT_SHADER, fragment_source.c_str(),
         "Opaque dynamic-light static-world fragment shader");
     const GLuint name = glCreateProgram();
     require_no_gl_error(OpenGlRendererErrorCode::program_link_failed,
@@ -1313,6 +1345,7 @@ struct GpuWorldResources {
     std::optional<ProgramState> no_dynamic_light_program;
     std::optional<ProgramState> ordinary_opaque_no_dynamic_program;
     std::optional<ProgramState> ordinary_opaque_dynamic_program;
+    std::optional<ProgramState> ordinary_opaque_eight_lights_program;
     GeometryState geometry;
     std::vector<GlObject> base_textures;
     std::vector<GlObject> lightmap_pages;
@@ -1341,6 +1374,8 @@ struct GpuSceneResources {
             create_opaque_unlit_world_program());
         result.ordinary_opaque_dynamic_program.emplace(
             create_opaque_lit_world_program());
+        result.ordinary_opaque_eight_lights_program.emplace(
+            create_opaque_lit_world_program(true));
     }
     result.geometry = upload_geometry(package);
 
@@ -1400,6 +1435,7 @@ struct FrameDrawState {
     const GLuint sky_texture;
     const assets::AssetVector3 sky_eye;
     bool use_no_dynamic_light_world_program{};
+    bool use_full_eight_effect_lights{};
     const GpuWorldResources* bound_resources{};
     const ProgramState* bound_program{};
     RenderMatrix4 model_view_projection;
@@ -1513,7 +1549,10 @@ void draw_package_range(
               material.base_texture_alpha_mode ==
                   assets::WorldTextureAlphaMode::opaque &&
               !material.sky_surface
-            ? *resources.ordinary_opaque_dynamic_program
+            ? (state.use_full_eight_effect_lights &&
+                  resources.ordinary_opaque_eight_lights_program
+                ? *resources.ordinary_opaque_eight_lights_program
+                : *resources.ordinary_opaque_dynamic_program)
         :
         state.use_no_dynamic_light_world_program &&
         resources.no_dynamic_light_program
@@ -4110,6 +4149,10 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         sky_texture,view_camera.position};
     draw_state.use_no_dynamic_light_world_program=
         no_positive_transient_light && effect_lights.empty();
+    draw_state.use_full_eight_effect_lights = effect_lights.size() == 8U &&
+        std::ranges::all_of(effect_lights, [](const auto& light) {
+            return valid_render_point_light(light) && light.intensity > 0.0F;
+        });
     if (scene.static_world->scene_package) {
         auto& resources = implementation_->ensure_scene_resources(
             scene.static_world->scene_package);
