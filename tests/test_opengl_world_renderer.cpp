@@ -2,6 +2,7 @@
 #include "missing_texture_test_fixture.hpp"
 #include "synthetic_goldsrc_bsp_fixture.hpp"
 #include "synthetic_goldsrc_wad3_fixture.hpp"
+#include "entity_render/entity_opengl_test_support.hpp"
 
 #include <hlclient/assets/asset_source.hpp>
 #include <hlclient/assets/world_lightmap_types.hpp>
@@ -2996,6 +2997,8 @@ TEST_CASE("Prepared static-world draws match original all-batch color and depth 
         ProjectionCase{1.0471975512F, 0.1F, 2.05F},
     };
     auto& gl_renderer = context->renderer();
+    // Unqualified BSP optimization must not become the normal renderer by
+    // accident: no explicit policy setter here, and no BSP cold preparation.
     const auto rejected_before = gl_renderer.statistics()
         .prepared_world_rejected_block_count;
     const auto bypass_before = gl_renderer.statistics()
@@ -3043,6 +3046,8 @@ TEST_CASE("Prepared static-world draws match original all-batch color and depth 
         bypass_before);
     CHECK(gl_renderer.statistics().prepared_world_probed_block_count > 0U);
     CHECK(gl_renderer.statistics().failed_upload_count == 0U);
+    CHECK(gl_renderer.statistics().bsp_preparation_count == 0U);
+    CHECK(gl_renderer.statistics().bsp_storage_allocation_count == 0U);
     auto receipt_scene=make_scene(packages[0U]);
     receipt_scene.static_world->scene_package=
         make_visibility_scene(packages[0U]);
@@ -3060,6 +3065,107 @@ TEST_CASE("Prepared static-world draws match original all-batch color and depth 
     CHECK_FALSE(receipt->prepared_rebuilds);
     context->release_renderer();
     CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("BSP draw commands reuse exact final selection and invalidate across camera and scene changes",
+    "[renderer][opengl][integration][prepared-world][bsp-command-cache]")
+{
+    auto context=try_create_context();
+    if (!context) SKIP("OpenGL 3.3 Core context unavailable on this host");
+    const auto version=current_actual_open_gl_version();
+    REQUIRE(version);
+    if (!supports_required_open_gl_version(*version))
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    const auto profile=current_actual_open_gl_profile_mask();
+    REQUIRE(profile);
+    if (!supports_required_open_gl_profile(*profile))
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    auto& gpu=context->renderer();
+    using Policy=opengl::OpenGlStaticWorldSelectionPolicy;
+    const auto world=make_prepared_render_package(3U);
+    auto scene=make_scene(world);
+    scene.static_world->scene_package=make_visibility_scene(world);
+    scene.camera.position={8.F,-20.F,0.F};
+    scene.camera.target={8.F,0.F,0.F};
+    scene.camera.vertical_field_of_view_radians=.35F;
+    scene.camera.far_plane=200.F;
+    const auto original_camera=scene.camera;
+    constexpr renderer::RenderExtent extent{96,96};
+    struct Pixels {std::vector<std::uint8_t> color;std::vector<std::uint32_t> depth;};
+    const auto capture=[&] {
+        Pixels result;
+        result.color.resize(96U*96U*4U);
+        std::vector<float> depth(96U*96U);
+        glReadBuffer(GL_BACK);
+        glReadPixels(0,0,96,96,GL_RGBA,GL_UNSIGNED_BYTE,result.color.data());
+        glReadPixels(0,0,96,96,GL_DEPTH_COMPONENT,GL_FLOAT,depth.data());
+        result.depth.reserve(depth.size());
+        for (const auto value:depth) result.depth.push_back(std::bit_cast<std::uint32_t>(value));
+        while (gpu.poll_gpu_timing()) {}
+        return result;
+    };
+    std::uint64_t frame=1000U;
+    const auto render=[&](bool expect_hit) {
+        gpu.set_static_world_selection_policy(Policy::prepared_bsp);
+        gpu.render_with_gpu_timing(scene,extent,frame++,true);
+        const auto receipt=gpu.statistics().last_static_world_frame;
+        REQUIRE(receipt);
+        REQUIRE(receipt->path==opengl::OpenGlStaticWorldPath::prepared_bsp);
+        CHECK(receipt->command_cache_hits==(expect_hit ? 1U : 0U));
+        CHECK(receipt->command_rebuilds==(expect_hit ? 0U : 1U));
+        const auto candidate=capture();
+        gpu.set_static_world_selection_policy(Policy::legacy_prepared_frustum);
+        gpu.render(scene,extent);
+        const auto legacy=capture();
+        CHECK(candidate.color==legacy.color);
+        CHECK(candidate.depth==legacy.depth);
+        CHECK(glGetError()==GL_NO_ERROR);
+        return *receipt;
+    };
+    const auto initial=render(false);
+    REQUIRE(initial.selected_surfaces==1U);
+    const auto repeated=render(true);
+    CHECK(repeated.prepared_allocations==0U);
+    CHECK(repeated.pvs_rebuilds==0U);
+
+    // Rotate within the same leaf: the selected count can stay equal while
+    // the selected surface identity changes. Counts/leaf are not cache keys.
+    scene.camera.target.x=40.F;
+    const auto yaw=render(false);
+    CHECK(yaw.selected_surfaces==initial.selected_surfaces);
+    CHECK(yaw.pvs_rebuilds==0U);
+    render(true);
+    scene.camera=original_camera;
+    render(false);
+    scene.camera.vertical_field_of_view_radians=1.8F;
+    const auto wide=render(false);
+    REQUIRE(wide.selected_surfaces>initial.selected_surfaces);
+    render(true);
+
+    scene.camera=original_camera;
+    render(false);
+    // Move to the other BSP leaf while retaining the same selected surface:
+    // compact offsets still require a rebuild for the new PVS context.
+    scene.camera.position.x=0.F;scene.camera.target.x=0.F;
+    const auto leaf=render(false);
+    CHECK(leaf.selected_surfaces==initial.selected_surfaces);
+    CHECK(leaf.pvs_rebuilds==1U);
+    render(true);
+
+    const auto original_scene=scene.static_world->scene_package;
+    scene.static_world->scene_package=make_visibility_scene(world);
+    const auto replaced=render(false);
+    CHECK(replaced.prepared_rebuilds==1U);
+    render(true);
+    scene.static_world->scene_package=original_scene;
+    render(false);
+    gpu.reset_session_resources();
+    const auto reset=render(false);
+    CHECK(reset.prepared_rebuilds==1U);
+    render(true);
+    context->release_renderer();
+    CHECK(glGetError()==GL_NO_ERROR);
 }
 
 TEST_CASE("OpenGL brush instances share one aggregate GPU upload",
@@ -3315,6 +3421,642 @@ TEST_CASE("OpenGL brush profiles and CPU visibility bound framebuffer work",
     // still current. HiddenOpenGlContext destroys the window only afterwards.
     context->release_renderer();
     CHECK(glGetError() == GL_NO_ERROR);
+}
+
+// These fixtures preserve every surface in both selection policies. Their only
+// experimental variable is static-world submission order, not BSP membership.
+struct SkyOrderQuad {
+    char kind{'o'}; // opaque, sky, masked, or non-sky special (water-like).
+    float y{};
+    float half_size{1.0F};
+    float center_x{};
+    float y_slope{};
+};
+
+[[nodiscard]] std::shared_ptr<const world_render::WorldRenderPackage>
+make_sky_order_package(const std::span<const SkyOrderQuad> quads)
+{
+    auto world = make_vertical_world();
+    const auto template_material = world.materials.front();
+    const auto template_surface = world.surfaces.front();
+    world.vertices.clear(); world.indices.clear();
+    world.materials.clear(); world.surfaces.clear();
+    std::vector<assets::WorldTextureAsset> textures;
+    std::vector<assets::WorldMaterialTextureBinding> bindings;
+    std::vector<assets::WorldSurfaceLightmapBinding> lightmaps;
+    for (std::size_t i = 0U; i < quads.size(); ++i) {
+        const auto& quad = quads[i];
+        const auto ordinal = static_cast<std::uint32_t>(i);
+        const auto name = std::string{quad.kind == 's' ? "sky" :
+            quad.kind == 'm' ? "{MASKED" : quad.kind == 'w' ? "!water" : "STONE"} +
+            std::to_string(i);
+        auto texture_set = make_frame_texture_set(quad.kind == 'm',
+            quad.kind == 's' ? 224U : quad.kind == 'm' ? 96U :
+            quad.kind == 'w' ? 128U : 48U, quad.kind == 's');
+        auto texture = texture_set.textures().front();
+        texture.name = name; texture.source_bsp_texture_index = ordinal;
+        textures.push_back(std::move(texture));
+        assets::WorldMaterialTextureBinding binding;
+        binding.material_index = ordinal;
+        binding.texture_asset_index = ordinal;
+        binding.source_bsp_texture_index = ordinal;
+        binding.status = assets::WorldMaterialTextureBindingStatus::resolved_embedded;
+        bindings.push_back(binding);
+        auto material = template_material;
+        material.texture_name = name;
+        material.source_texture_index = ordinal;
+        world.materials.push_back(std::move(material));
+        auto surface = template_surface;
+        surface.first_vertex = static_cast<std::uint32_t>(world.vertices.size());
+        surface.first_index = static_cast<std::uint32_t>(world.indices.size());
+        surface.material_index = ordinal;
+        surface.source_surface_ordinal = ordinal;
+        surface.special_surface = quad.kind == 's' || quad.kind == 'w';
+        const auto slope_length = std::sqrt(1.0F + quad.y_slope * quad.y_slope);
+        constexpr std::array<assets::AssetVector2, 4U> corners{{
+            {-1,-1}, {1,-1}, {1,1}, {-1,1}}};
+        for (std::size_t corner = 0U; corner < corners.size(); ++corner) {
+            const auto x = corners[corner].x * quad.half_size;
+            const assets::AssetVector3 p{quad.center_x + x,
+                quad.y + quad.y_slope * x, corners[corner].y * quad.half_size};
+            world.vertices.push_back({p,
+                {quad.y_slope / slope_length, -1.0F / slope_length, 0},
+                {(corners[corner].x + 1.0F) * 8.0F,
+                 (corners[corner].y + 1.0F) * 8.0F}});
+            if (corner == 0U) surface.bounds = {p,p};
+            else {
+                surface.bounds.minimum.x = std::min(surface.bounds.minimum.x,p.x);
+                surface.bounds.minimum.y = std::min(surface.bounds.minimum.y,p.y);
+                surface.bounds.minimum.z = std::min(surface.bounds.minimum.z,p.z);
+                surface.bounds.maximum.x = std::max(surface.bounds.maximum.x,p.x);
+                surface.bounds.maximum.y = std::max(surface.bounds.maximum.y,p.y);
+                surface.bounds.maximum.z = std::max(surface.bounds.maximum.z,p.z);
+            }
+        }
+        for (const auto index : std::array<std::uint32_t,6>{0,1,2,0,2,3})
+            world.indices.push_back(surface.first_vertex + index);
+        world.surfaces.push_back(surface);
+        if (i == 0U) world.bounds = surface.bounds;
+        else {
+            world.bounds.minimum.x = std::min(world.bounds.minimum.x,surface.bounds.minimum.x);
+            world.bounds.minimum.y = std::min(world.bounds.minimum.y,surface.bounds.minimum.y);
+            world.bounds.minimum.z = std::min(world.bounds.minimum.z,surface.bounds.minimum.z);
+            world.bounds.maximum.x = std::max(world.bounds.maximum.x,surface.bounds.maximum.x);
+            world.bounds.maximum.y = std::max(world.bounds.maximum.y,surface.bounds.maximum.y);
+            world.bounds.maximum.z = std::max(world.bounds.maximum.z,surface.bounds.maximum.z);
+        }
+        assets::WorldSurfaceLightmapBinding lightmap;
+        lightmap.surface_index = i;
+        lightmap.status = assets::WorldSurfaceLightmapBindingStatus::unlit_no_lightmap;
+        lightmap.sample_width = lightmap.sample_height = 2U;
+        lightmaps.push_back(lightmap);
+    }
+    world.statistics.emitted_vertex_count = world.vertices.size();
+    world.statistics.emitted_triangle_count = world.indices.size()/3U;
+    world.statistics.emitted_surface_count = world.surfaces.size();
+    world.statistics.material_count = world.materials.size();
+    auto texture_set = assets::WorldTextureSet::create(
+        std::move(textures),std::move(bindings),{},quads.size());
+    auto lightmap_set = assets::WorldLightmapSet::create({},std::move(lightmaps),quads.size());
+    REQUIRE(texture_set); REQUIRE(lightmap_set);
+    auto built = world_render::WorldRenderPackageBuilder{}.build(
+        {std::move(world),std::move(*texture_set.texture_set)},
+        std::move(*lightmap_set.lightmap_set));
+    REQUIRE(built); REQUIRE(built.package);
+    return std::make_shared<const world_render::WorldRenderPackage>(std::move(*built.package));
+}
+
+[[nodiscard]] std::shared_ptr<const world_scene::WorldSceneRenderPackage>
+make_sky_order_scene_package(
+    const std::shared_ptr<const world_render::WorldRenderPackage>& world,
+    std::shared_ptr<const world_render::WorldRenderPackage> brush = {})
+{
+    const assets::WorldBounds bounds{{-8192,-8192,-8192},{8192,8192,8192}};
+    world_spatial::WorldSpatialNode node;
+    node.children = {world_spatial::WorldSpatialNodeChild{
+        world_spatial::WorldSpatialNodeChildKind::leaf,2U},
+        world_spatial::WorldSpatialNodeChild{world_spatial::WorldSpatialNodeChildKind::leaf,1U}};
+    node.bounds = bounds;
+    std::vector<world_spatial::WorldSpatialLeaf> leaves(3U);
+    for (std::uint32_t i = 0U; i < 3U; ++i) {
+        auto& leaf = leaves[i];
+        leaf.source_leaf_index = i; leaf.bounds = bounds;
+        leaf.surface_membership.source_leaf_index = i;
+        leaf.solid_or_special = i == 0U;
+        if (i == 0U) continue;
+        leaf.pvs_row_index = 0U; leaf.pvs_bit_addressable = true;
+        leaf.surface_membership.source_marksurface_count =
+            static_cast<std::uint32_t>(world->surface_ranges().size());
+        for (std::uint32_t j = 0U; j < world->surface_ranges().size(); ++j)
+            leaf.surface_membership.world_surface_indices.push_back(j);
+    }
+    world_spatial::WorldSpatialPackage spatial{
+        {world_spatial::WorldSpatialPlane{{1,0,0},.25F,0}}, {node}, std::move(leaves),
+        world_spatial::WorldPvsTable{1U,2U,{{std::byte{3}}},{std::nullopt,0U,0U},0U},
+        {0U,2U,bounds}, {1U,1U,3U,2U*world->surface_ranges().size(),
+            2U*world->surface_ranges().size(),1U,1U},
+        world_spatial::WorldSpatialCompatibilityProfile::goldsrc_bsp_v30_leaf_one_is_pvs_bit_zero,
+        world_spatial::WorldSpatialEvidenceProfile::canonical_validated_bsp_records};
+    std::vector<world_scene::BrushSubmodelRenderModel> models;
+    if (brush) {
+        std::vector<std::uint32_t> surfaces;
+        for (std::uint32_t i = 0U; i < brush->surface_ranges().size(); ++i) surfaces.push_back(i);
+        models.emplace_back(1U,brush->bounds(),std::move(surfaces));
+    }
+    auto built = world_scene::WorldSceneRenderPackageBuilder{}.build(
+        world,std::move(spatial),{std::move(brush),std::move(models)},{});
+    REQUIRE(built); REQUIRE(built.package);
+    return std::make_shared<const world_scene::WorldSceneRenderPackage>(std::move(*built.package));
+}
+
+struct SkyOrderPixels {
+    std::vector<std::uint8_t> color;
+    std::vector<std::uint32_t> depth;
+    [[nodiscard]] std::array<std::uint8_t,4> pixel(const std::size_t x=48U,
+        const std::size_t y=48U) const {
+        const auto n = (y*96U+x)*4U;
+        return {color[n],color[n+1U],color[n+2U],color[n+3U]};
+    }
+};
+
+[[nodiscard]] SkyOrderPixels capture_sky_order_pixels(opengl::OpenGlRenderer& gpu)
+{
+    SkyOrderPixels result;
+    result.color.resize(96U*96U*4U);
+    std::vector<float> depth(96U*96U);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0,0,96,96,GL_RGBA,GL_UNSIGNED_BYTE,result.color.data());
+    glReadPixels(0,0,96,96,GL_DEPTH_COMPONENT,GL_FLOAT,depth.data());
+    for (const auto value : depth) result.depth.push_back(std::bit_cast<std::uint32_t>(value));
+    // Offline correctness readback only. No timings from this test qualify performance.
+    while (gpu.poll_gpu_timing()) {}
+    return result;
+}
+
+TEST_CASE("Sky ordering moves safe batches but preserves equal depth and material barriers exactly",
+    "[renderer][opengl][integration][sky-order]")
+{
+    auto context = try_create_context();
+    if (!context) SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer(); auto& gpu = context->renderer();
+    using Selection = opengl::OpenGlStaticWorldSelectionPolicy;
+    using Order = opengl::OpenGlStaticWorldOrderPolicy;
+    struct Case {
+        const char* name;
+        std::vector<SkyOrderQuad> quads;
+        bool moved;
+        bool blocked;
+        float far_plane{10};
+    };
+    const std::array cases{
+        Case{"sky behind opaque",{{'s',.5F},{'o',0}},true,false},
+        Case{"sky in front of opaque",{{'s',0},{'o',.5F}},true,false},
+        Case{"coplanar LEQUAL",{{'s',0},{'o',0}},false,true},
+        Case{"near quantized depth",{{'s',0},{'o',-.000001F}},false,true},
+        Case{"far quantized depth",{{'s',3000,1500},{'o',2999,1500}},false,true,5000},
+        Case{"intersecting planes",{{'s',0},{'o',0,1,0,.4F}},false,true},
+        Case{"near clipping uncertainty",{{'s',-1.9F,.1F,0,.5F},{'o',-1.7F,.1F}},false,true},
+        Case{"masked barrier",{{'s',0},{'m',0},{'o',.5F}},false,false},
+        Case{"non-sky special water barrier",{{'s',0},{'w',0},{'o',.5F}},false,false},
+    };
+    std::uint64_t frame = 20000U;
+    for (const auto selection : {Selection::legacy_prepared_frustum,Selection::prepared_bsp}) {
+        gpu.set_static_world_selection_policy(selection);
+        for (const auto& item : cases) {
+            CAPTURE(item.name,static_cast<int>(selection));
+            const auto world = make_sky_order_package(item.quads);
+            REQUIRE(world->draw_batches().size() == item.quads.size());
+            auto scene = make_scene(world);
+            scene.static_world->scene_package = make_sky_order_scene_package(world);
+            scene.camera.far_plane = item.far_plane;
+            gpu.set_static_world_order_policy(Order::original);
+            gpu.render_with_gpu_timing(scene,{96,96},frame++,true);
+            const auto original_receipt = gpu.statistics().last_static_world_frame;
+            REQUIRE(original_receipt);
+            const auto original = capture_sky_order_pixels(gpu);
+            gpu.set_static_world_order_policy(Order::defer_safe_sky);
+            gpu.render_with_gpu_timing(scene,{96,96},frame++,true);
+            const auto receipt = gpu.statistics().last_static_world_frame;
+            REQUIRE(receipt);
+            const auto deferred = capture_sky_order_pixels(gpu);
+            CHECK(deferred.color == original.color);
+            CHECK(deferred.depth == original.depth);
+            CHECK(receipt->submitted_triangles == original_receipt->submitted_triangles);
+            CHECK(receipt->api_draws == original_receipt->api_draws);
+            if (item.moved) CHECK(receipt->sky_order_moved_batches.value_or(0U) > 0U);
+            else CHECK(receipt->sky_order_moved_batches.value_or(0U) == 0U);
+            if (item.blocked) CHECK(receipt->sky_order_blocked_batches.value_or(0U) > 0U);
+            if (std::string_view{item.name} == "coplanar LEQUAL") {
+                const std::array<std::uint8_t,4> opaque{48,96,40,255},sky{224,96,40,255};
+                REQUIRE(original.pixel() == opaque);
+                // Independent negative control: actually reverse the same coplanar
+                // polygons with the unmodified renderer. LEQUAL must expose the error.
+                constexpr std::array reversed{SkyOrderQuad{'o',0},SkyOrderQuad{'s',0}};
+                auto unsafe = make_scene(make_sky_order_package(reversed));
+                gpu.set_static_world_order_policy(Order::original);
+                gpu.render(unsafe,{96,96});
+                const auto swapped = capture_sky_order_pixels(gpu);
+                CHECK(swapped.pixel() == sky);
+                CHECK(swapped.color != original.color);
+                CHECK(swapped.depth == original.depth);
+            }
+            if (std::string_view{item.name} == "non-sky special water barrier")
+                CHECK(original.pixel() == std::array<std::uint8_t,4>{128,96,40,255});
+            if (std::string_view{item.name} == "masked barrier") {
+                CHECK(original.pixel(24,48) == std::array<std::uint8_t,4>{96,96,40,255});
+                CHECK(original.pixel(72,48) == std::array<std::uint8_t,4>{224,96,40,255});
+            }
+            CHECK(glGetError() == GL_NO_ERROR);
+        }
+    }
+    context->release_renderer();
+}
+
+TEST_CASE("Sky ordering preserves finite depth for later entities decals and runtime brushes",
+    "[renderer][opengl][integration][sky-order]")
+{
+    auto context = try_create_context();
+    if (!context) SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer(); auto& gpu = context->renderer();
+    using Selection = opengl::OpenGlStaticWorldSelectionPolicy;
+    using Order = opengl::OpenGlStaticWorldOrderPolicy;
+    namespace entity = hlclient::entity_render;
+    namespace entity_fixture = hlclient::tests::entity_opengl_fixture;
+    // The off-centre opaque patch forces a real reorder without covering the
+    // centre probe where finite sky must occlude later passes.
+    constexpr std::array quads{SkyOrderQuad{'s',0},SkyOrderQuad{'o',-.4F,.15F,.6F}};
+    const auto world = make_sky_order_package(quads);
+    const auto brush = make_frame_package(false,true,0U,0U,0x30U);
+    auto base = make_scene(world);
+    base.static_world->scene_package = make_sky_order_scene_package(world,brush);
+    std::uint64_t frame_number = 21000U;
+    const auto compare = [&](const renderer::RenderScene& scene) {
+        gpu.set_static_world_order_policy(Order::original);
+        gpu.render(scene,{96,96});
+        const auto original = capture_sky_order_pixels(gpu);
+        gpu.set_static_world_order_policy(Order::defer_safe_sky);
+        gpu.render_with_gpu_timing(scene,{96,96},frame_number++,true);
+        const auto receipt = gpu.statistics().last_static_world_frame;
+        REQUIRE(receipt);
+        CHECK(receipt->sky_order_moved_batches.value_or(0U) > 0U);
+        const auto candidate = capture_sky_order_pixels(gpu);
+        CHECK(candidate.color == original.color);
+        CHECK(candidate.depth == original.depth);
+        CHECK(glGetError() == GL_NO_ERROR);
+        return original;
+    };
+    for (const auto selection : {Selection::legacy_prepared_frustum,Selection::prepared_bsp}) {
+        CAPTURE(static_cast<int>(selection));
+        gpu.set_static_world_selection_policy(selection);
+        const auto world_only = compare(base);
+        REQUIRE(world_only.pixel() == std::array<std::uint8_t,4>{224,96,40,255});
+        CHECK(std::bit_cast<float>(world_only.depth[48U*96U+48U]) < 1.0F);
+        CHECK(std::bit_cast<float>(world_only.depth[0U]) == 1.0F);
+        for (const float y : {-.25F,.25F}) {
+            CAPTURE(y);
+            auto runtime_scene = base;
+            auto runtime = std::make_shared<world_scene::RuntimeBrushRenderFrame>();
+            runtime->scene_identity = base.static_world->scene_package->resource_identity();
+            runtime->generation = runtime->revision = 1U;
+            world_scene::RuntimeBrushRenderInstance instance;
+            instance.entity_number = 100U; instance.model_slot = 10U; instance.source_model_index = 1U;
+            instance.model_transform = make_brush_fixture_transform(0,y,0);
+            instance.transformed_bounds = transform_brush_fixture_bounds(brush->bounds(),instance.model_transform);
+            runtime->instances.push_back(instance);
+            REQUIRE(world_scene::valid_runtime_brush_frame(*runtime,*base.static_world->scene_package));
+            runtime_scene.static_world->runtime_brushes = runtime;
+            const auto submitted = gpu.statistics().runtime_brush_submitted_count;
+            const auto brush_pixels = compare(runtime_scene);
+            CHECK(gpu.statistics().runtime_brush_submitted_count == submitted + 2U);
+            CHECK((brush_pixels.pixel() != world_only.pixel()) == (y < 0));
+
+            for (const auto format : {assets::SpriteTextureFormat::normal,assets::SpriteTextureFormat::additive}) {
+                CAPTURE(static_cast<int>(format));
+                auto sprites = entity_fixture::sprite_scene(1U,0U,format);
+                entity::EntityRenderFrameBuildInput input;
+                input.resource_id = 0xE520U; input.resource_revision = 1U;
+                input.interpolation = {.5,0,1,.5F,1U,2U,
+                    entity::EntityRenderInterpolationProfile::synthetic_seconds_v1};
+                entity::SpriteEntityRenderInstance sprite;
+                sprite.entity_number = 1U; sprite.sprite_asset_index = 0U;
+                sprite.orientation = sprites.package->sprite_assets()[0U]->orientation();
+                sprite.texture_format_support = sprites.package->sprite_assets()[0U]->texture_support_status();
+                sprite.transform.origin = {0,y,0}; sprite.transform.uniform_scale = .1F;
+                sprite.bounds = {{-.5F,y-.5F,-.5F},{.5F,y+.5F,.5F}};
+                input.sprite_instances.push_back(sprite);
+                auto built = entity::EntityRenderFrameBuilder{}.build(*sprites.package,std::move(input));
+                REQUIRE(built); REQUIRE(built.frame);
+                sprites.frame = std::make_shared<const entity::EntityRenderFrame>(std::move(*built.frame));
+                auto sprite_scene = base;
+                sprite_scene.dynamic_entities = entity_fixture::render_scene(sprites).dynamic_entities;
+                const auto draws = gpu.entity_statistics().sprite_draw_count;
+                const auto sprite_pixels = compare(sprite_scene);
+                CHECK(gpu.entity_statistics().sprite_draw_count == draws + 2U);
+                CHECK((sprite_pixels.pixel() != world_only.pixel()) == (y < 0));
+            }
+
+            auto decal_scene = base;
+            auto texture = fixture::make_texture(false);
+            // Decals accept explicit straight-alpha/masked assets, not an
+            // opaque world-material classification, even when alpha is 255.
+            texture.alpha_mode = assets::WorldTextureAlphaMode::straight_alpha;
+            for (auto& mip : texture.mip_levels)
+                for (std::size_t i = 0U; i < mip.rgba_pixels.size(); i += 4U) {
+                    mip.rgba_pixels[i] = std::byte{20};
+                    mip.rgba_pixels[i+1U] = std::byte{230};
+                    mip.rgba_pixels[i+2U] = std::byte{40};
+                }
+            using Vertex = renderer::RenderDecalVertex;
+            auto vertices = std::make_shared<const std::vector<Vertex>>(std::vector<Vertex>{
+                {{-.3F,y,-.3F},{0,0}},{{.3F,y,-.3F},{1,0}},{{.3F,y,.3F},{1,1}},
+                {{-.3F,y,-.3F},{0,0}},{{.3F,y,.3F},{1,1}},{{-.3F,y,.3F},{0,1}}});
+            decal_scene.world_decals = renderer::RenderWorldDecals{
+                std::make_shared<const assets::WorldTextureAsset>(std::move(texture)),vertices,1U};
+            const auto decal_draws = gpu.decal_statistics().rendered_batch_count;
+            const auto decal_pixels = compare(decal_scene);
+            CHECK(gpu.decal_statistics().rendered_batch_count == decal_draws + 2U);
+            CHECK((decal_pixels.pixel() != world_only.pixel()) == (y < 0));
+        }
+        // Reuse across leaf changes/yaw and then replace/reset resource owners;
+        // no cached ordering from a previous camera or package may escape.
+        for (const float x : {0.0F,.5F,-.5F,0.0F}) {
+            auto moved = base; moved.camera.position.x = x; moved.camera.target.x = x*.5F;
+            compare(moved);
+        }
+        auto replaced = base;
+        replaced.static_world->scene_package = make_sky_order_scene_package(world,brush);
+        compare(replaced);
+        gpu.reset_session_resources();
+        compare(base);
+        renderer::RenderScene empty; gpu.render(empty,{96,96});
+        CHECK(approximately_clear(read_pixel(48,48),empty.clear_color));
+        compare(base);
+        // The explicit-visible-command/preview branch is a distinct ordering
+        // contract and must not accidentally inherit the static batch reorder.
+        world_preview::WorldPreviewSceneSource source{
+            base.static_world->scene_package,
+            visibility_options(hlclient::world_visibility::WorldVisibilityMode::all,true)};
+        auto explicit_scene = hlclient::client::build_render_scene(source.world_state());
+        REQUIRE(explicit_scene.static_world->visible_draw_list);
+        gpu.set_static_world_order_policy(Order::original);
+        gpu.render(explicit_scene,{96,96});
+        const auto explicit_original = capture_sky_order_pixels(gpu);
+        gpu.set_static_world_order_policy(Order::defer_safe_sky);
+        gpu.render_with_gpu_timing(explicit_scene,{96,96},frame_number++,true);
+        const auto receipt = gpu.statistics().last_static_world_frame;
+        REQUIRE(receipt);
+        CHECK(receipt->path == opengl::OpenGlStaticWorldPath::visible_commands);
+        CHECK(receipt->sky_order_moved_batches.value_or(0U) == 0U);
+        const auto explicit_deferred = capture_sky_order_pixels(gpu);
+        CHECK(explicit_deferred.color == explicit_original.color);
+        CHECK(explicit_deferred.depth == explicit_original.depth);
+        CHECK(glGetError() == GL_NO_ERROR);
+    }
+    context->release_renderer();
+}
+
+TEST_CASE("Retained sky frustum selection preserves finite depth for later passes",
+    "[renderer][opengl][integration][sky-frustum-selection]")
+{
+    auto context = try_create_context();
+    if (!context) SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer(); auto& gpu = context->renderer();
+    using Selection = opengl::OpenGlStaticWorldSelectionPolicy;
+    using Order = opengl::OpenGlStaticWorldOrderPolicy;
+    namespace entity = hlclient::entity_render;
+    namespace entity_fixture = hlclient::tests::entity_opengl_fixture;
+    // Keep finite sky in front of later entities; the distant second sky quad
+    // proves actual conservative rejection, not merely equal selector output.
+    constexpr std::array quads{SkyOrderQuad{'s',0},SkyOrderQuad{'o',-.4F,.15F,.6F},SkyOrderQuad{'s',0,1,1000}};
+    const auto world = make_sky_order_package(quads);
+    const auto brush = make_frame_package(false,true,0U,0U,0x30U);
+    auto base = make_scene(world);
+    base.static_world->scene_package = make_sky_order_scene_package(world,brush);
+    std::uint64_t frame_number = 21000U;
+    const auto compare = [&](const renderer::RenderScene& scene) {
+        gpu.set_static_world_order_policy(Order::original);
+        gpu.set_static_world_selection_policy(Selection::prepared_bsp);
+        gpu.render(scene,{96,96});
+        const auto original = capture_sky_order_pixels(gpu);
+        gpu.set_static_world_selection_policy(Selection::prepared_bsp_sky_frustum);
+        gpu.render_with_gpu_timing(scene,{96,96},frame_number++,true);
+        const auto receipt = gpu.statistics().last_static_world_frame;
+        REQUIRE(receipt);
+        CHECK(receipt->sky_submitted_triangles.value_or(0U) == 2U);
+        CHECK(receipt->sky_order_moved_batches.value_or(0U) == 0U);
+        const auto candidate = capture_sky_order_pixels(gpu);
+        CHECK(candidate.color == original.color);
+        CHECK(candidate.depth == original.depth);
+        CHECK(glGetError() == GL_NO_ERROR);
+        return original;
+    };
+    for (const auto selection : {Selection::prepared_bsp_sky_frustum}) {
+        CAPTURE(static_cast<int>(selection));
+        gpu.set_static_world_selection_policy(selection);
+        const auto world_only = compare(base);
+        REQUIRE(world_only.pixel() == std::array<std::uint8_t,4>{224,96,40,255});
+        CHECK(std::bit_cast<float>(world_only.depth[48U*96U+48U]) < 1.0F);
+        CHECK(std::bit_cast<float>(world_only.depth[0U]) == 1.0F);
+        for (const float y : {-.25F,.25F}) {
+            CAPTURE(y);
+            auto runtime_scene = base;
+            auto runtime = std::make_shared<world_scene::RuntimeBrushRenderFrame>();
+            runtime->scene_identity = base.static_world->scene_package->resource_identity();
+            runtime->generation = runtime->revision = 1U;
+            world_scene::RuntimeBrushRenderInstance instance;
+            instance.entity_number = 100U; instance.model_slot = 10U; instance.source_model_index = 1U;
+            instance.model_transform = make_brush_fixture_transform(0,y,0);
+            instance.transformed_bounds = transform_brush_fixture_bounds(brush->bounds(),instance.model_transform);
+            runtime->instances.push_back(instance);
+            REQUIRE(world_scene::valid_runtime_brush_frame(*runtime,*base.static_world->scene_package));
+            runtime_scene.static_world->runtime_brushes = runtime;
+            const auto submitted = gpu.statistics().runtime_brush_submitted_count;
+            const auto brush_pixels = compare(runtime_scene);
+            CHECK(gpu.statistics().runtime_brush_submitted_count == submitted + 2U);
+            CHECK((brush_pixels.pixel() != world_only.pixel()) == (y < 0));
+
+            for (const auto format : {assets::SpriteTextureFormat::normal,assets::SpriteTextureFormat::additive}) {
+                CAPTURE(static_cast<int>(format));
+                auto sprites = entity_fixture::sprite_scene(1U,0U,format);
+                entity::EntityRenderFrameBuildInput input;
+                input.resource_id = 0xE520U; input.resource_revision = 1U;
+                input.interpolation = {.5,0,1,.5F,1U,2U,
+                    entity::EntityRenderInterpolationProfile::synthetic_seconds_v1};
+                entity::SpriteEntityRenderInstance sprite;
+                sprite.entity_number = 1U; sprite.sprite_asset_index = 0U;
+                sprite.orientation = sprites.package->sprite_assets()[0U]->orientation();
+                sprite.texture_format_support = sprites.package->sprite_assets()[0U]->texture_support_status();
+                sprite.transform.origin = {0,y,0}; sprite.transform.uniform_scale = .1F;
+                sprite.bounds = {{-.5F,y-.5F,-.5F},{.5F,y+.5F,.5F}};
+                input.sprite_instances.push_back(sprite);
+                auto built = entity::EntityRenderFrameBuilder{}.build(*sprites.package,std::move(input));
+                REQUIRE(built); REQUIRE(built.frame);
+                sprites.frame = std::make_shared<const entity::EntityRenderFrame>(std::move(*built.frame));
+                auto sprite_scene = base;
+                sprite_scene.dynamic_entities = entity_fixture::render_scene(sprites).dynamic_entities;
+                const auto draws = gpu.entity_statistics().sprite_draw_count;
+                const auto sprite_pixels = compare(sprite_scene);
+                CHECK(gpu.entity_statistics().sprite_draw_count == draws + 2U);
+                CHECK((sprite_pixels.pixel() != world_only.pixel()) == (y < 0));
+            }
+
+            auto decal_scene = base;
+            auto texture = fixture::make_texture(false);
+            // Decals accept explicit straight-alpha/masked assets, not an
+            // opaque world-material classification, even when alpha is 255.
+            texture.alpha_mode = assets::WorldTextureAlphaMode::straight_alpha;
+            for (auto& mip : texture.mip_levels)
+                for (std::size_t i = 0U; i < mip.rgba_pixels.size(); i += 4U) {
+                    mip.rgba_pixels[i] = std::byte{20};
+                    mip.rgba_pixels[i+1U] = std::byte{230};
+                    mip.rgba_pixels[i+2U] = std::byte{40};
+                }
+            using Vertex = renderer::RenderDecalVertex;
+            auto vertices = std::make_shared<const std::vector<Vertex>>(std::vector<Vertex>{
+                {{-.3F,y,-.3F},{0,0}},{{.3F,y,-.3F},{1,0}},{{.3F,y,.3F},{1,1}},
+                {{-.3F,y,-.3F},{0,0}},{{.3F,y,.3F},{1,1}},{{-.3F,y,.3F},{0,1}}});
+            decal_scene.world_decals = renderer::RenderWorldDecals{
+                std::make_shared<const assets::WorldTextureAsset>(std::move(texture)),vertices,1U};
+            const auto decal_draws = gpu.decal_statistics().rendered_batch_count;
+            const auto decal_pixels = compare(decal_scene);
+            CHECK(gpu.decal_statistics().rendered_batch_count == decal_draws + 2U);
+            CHECK((decal_pixels.pixel() != world_only.pixel()) == (y < 0));
+        }
+        // Reuse across leaf changes/yaw and then replace/reset resource owners;
+        // no cached selection from a previous camera or package may escape.
+        for (const float x : {0.0F,.5F,-.5F,0.0F}) {
+            auto moved = base; moved.camera.position.x = x; moved.camera.target.x = x*.5F;
+            compare(moved);
+        }
+        auto replaced = base;
+        replaced.static_world->scene_package = make_sky_order_scene_package(world,brush);
+        compare(replaced);
+        gpu.reset_session_resources();
+        compare(base);
+        renderer::RenderScene empty; gpu.render(empty,{96,96});
+        CHECK(approximately_clear(read_pixel(48,48),empty.clear_color));
+        compare(base);
+        // The explicit-visible-command/preview branch is a distinct ordering
+        // contract and must not accidentally inherit the sky selection rule.
+        world_preview::WorldPreviewSceneSource source{
+            base.static_world->scene_package,
+            visibility_options(hlclient::world_visibility::WorldVisibilityMode::all,true)};
+        auto explicit_scene = hlclient::client::build_render_scene(source.world_state());
+        REQUIRE(explicit_scene.static_world->visible_draw_list);
+        gpu.set_static_world_order_policy(Order::original);
+        gpu.render(explicit_scene,{96,96});
+        const auto explicit_original = capture_sky_order_pixels(gpu);
+        gpu.set_static_world_order_policy(Order::original);
+        gpu.render_with_gpu_timing(explicit_scene,{96,96},frame_number++,true);
+        const auto receipt = gpu.statistics().last_static_world_frame;
+        REQUIRE(receipt);
+        CHECK(receipt->path == opengl::OpenGlStaticWorldPath::visible_commands);
+        CHECK(receipt->sky_order_moved_batches.value_or(0U) == 0U);
+        const auto explicit_deferred = capture_sky_order_pixels(gpu);
+        CHECK(explicit_deferred.color == explicit_original.color);
+        CHECK(explicit_deferred.depth == explicit_original.depth);
+        CHECK(glGetError() == GL_NO_ERROR);
+    }
+    context->release_renderer();
+}
+
+TEST_CASE("Sky ordering retains overlapping submission for missing or collapsed framebuffer depth",
+    "[renderer][opengl][integration][sky-order]")
+{
+    auto context = try_create_context();
+    if (!context) SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    auto& gpu = context->renderer();
+    struct ColorOnlyTarget {
+        GLuint framebuffer{},color{},depth{};
+        ColorOnlyTarget() {
+            glGenFramebuffers(1,&framebuffer);
+            glGenRenderbuffers(1,&color);
+            glBindRenderbuffer(GL_RENDERBUFFER,color);
+            glRenderbufferStorage(GL_RENDERBUFFER,GL_RGBA8,96,96);
+            glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,
+                GL_RENDERBUFFER,color);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0); glReadBuffer(GL_COLOR_ATTACHMENT0);
+        }
+        ~ColorOnlyTarget() {
+            glDepthRange(0.0,1.0);
+            glBindFramebuffer(GL_FRAMEBUFFER,0U);
+            glBindRenderbuffer(GL_RENDERBUFFER,0U);
+            if (depth) glDeleteRenderbuffers(1,&depth);
+            glDeleteRenderbuffers(1,&color);
+            glDeleteFramebuffers(1,&framebuffer);
+        }
+    } target;
+    REQUIRE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    GLint attachment{};
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,
+        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,&attachment);
+    REQUIRE(attachment == GL_NONE);
+    REQUIRE(glGetError() == GL_NO_ERROR);
+    // In a color-only target depth testing cannot hide the farther opaque
+    // polygon. It must retain its original last-writer result, not sky color.
+    constexpr std::array quads{SkyOrderQuad{'s',0},SkyOrderQuad{'o',.5F}};
+    const auto world = make_sky_order_package(quads);
+    auto scene = make_scene(world);
+    scene.static_world->scene_package = make_sky_order_scene_package(world);
+    using Selection = opengl::OpenGlStaticWorldSelectionPolicy;
+    using Order = opengl::OpenGlStaticWorldOrderPolicy;
+    const auto read_color = [&] {
+        std::vector<std::uint8_t> color(96U*96U*4U);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(0,0,96,96,GL_RGBA,GL_UNSIGNED_BYTE,color.data());
+        while (gpu.poll_gpu_timing()) {}
+        return color;
+    };
+    std::uint64_t frame = 22000U;
+    for (const auto selection : {Selection::legacy_prepared_frustum,Selection::prepared_bsp}) {
+        CAPTURE(static_cast<int>(selection));
+        gpu.set_static_world_selection_policy(selection);
+        gpu.set_static_world_order_policy(Order::original);
+        gpu.render(scene,{96,96});
+        const auto original = read_color();
+        REQUIRE(original[(48U*96U+48U)*4U] == 48U);
+        gpu.set_static_world_order_policy(Order::defer_safe_sky);
+        gpu.render_with_gpu_timing(scene,{96,96},frame++,true);
+        const auto receipt = gpu.statistics().last_static_world_frame;
+        REQUIRE(receipt);
+        CHECK(receipt->sky_order_moved_batches.value_or(0U) == 0U);
+        CHECK(receipt->sky_order_blocked_batches.value_or(0U) > 0U);
+        CHECK(read_color() == original);
+        CHECK(glGetError() == GL_NO_ERROR);
+    }
+    // Attach depth to the same caller-owned FBO, then collapse its viewport
+    // mapping. Separated world coordinates now tie under LEQUAL. The guard
+    // must observe this state rather than reuse the former FBO assumptions.
+    glGenRenderbuffers(1,&target.depth);
+    glBindRenderbuffer(GL_RENDERBUFFER,target.depth);
+    glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,96,96);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,
+        GL_RENDERBUFFER,target.depth);
+    REQUIRE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    glDepthRange(0.0,0.0);
+    for (const auto selection : {Selection::legacy_prepared_frustum,Selection::prepared_bsp}) {
+        CAPTURE(static_cast<int>(selection));
+        gpu.set_static_world_selection_policy(selection);
+        gpu.set_static_world_order_policy(Order::original);
+        gpu.render(scene,{96,96});
+        const auto original = read_color();
+        REQUIRE(original[(48U*96U+48U)*4U] == 48U);
+        float depth = 1.0F;
+        glReadPixels(48,48,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&depth);
+        REQUIRE(depth == 0.0F);
+        gpu.set_static_world_order_policy(Order::defer_safe_sky);
+        gpu.render_with_gpu_timing(scene,{96,96},frame++,true);
+        const auto receipt = gpu.statistics().last_static_world_frame;
+        REQUIRE(receipt);
+        CHECK(receipt->sky_order_moved_batches.value_or(0U) == 0U);
+        CHECK(receipt->sky_order_blocked_batches.value_or(0U) > 0U);
+        CHECK(read_color() == original);
+        CHECK(glGetError() == GL_NO_ERROR);
+    }
+    glDepthRange(0.0,1.0);
+    context->release_renderer();
 }
 
 } // namespace

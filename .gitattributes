@@ -5,6 +5,9 @@
 *.ps1 text eol=crlf
 scripts/verify_stock_resource_transition.ps1 text eol=lf
 
+# A unified patch uses one literal space for unchanged empty context lines.
+experiments/background-sky-20261028/candidate.patch whitespace=-blank-at-eol
+
 *.png binary
 *.jpg binary
 *.jpeg binary

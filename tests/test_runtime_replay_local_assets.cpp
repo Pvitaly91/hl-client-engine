@@ -7303,3 +7303,368 @@ TEST_CASE("E16 opt-in approved installed projectile explosion smoke and launch P
 }
 #endif
 } // namespace
+
+namespace {
+namespace early_studio = hlclient::entity_render;
+
+// Read-only actual-resource control. The histories/actors below are authored
+// test inputs, not a replay or a practical-performance claim.
+std::filesystem::path early_studio_actual_root() {
+  std::filesystem::path root;
+#ifdef _WIN32
+  wchar_t* value=nullptr;std::size_t count=0;
+  if(_wdupenv_s(&value,&count,L"HLCLIENT_LOCAL_GAME_ROOT")==0 && value)root=value;
+  std::free(value);
+#else
+  if(const char* value=std::getenv("HLCLIENT_LOCAL_GAME_ROOT"))root=value;
+#endif
+  if(root.lexically_normal()!=std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life"}.lexically_normal())
+    SKIP("No exact opt-in read-only root for early Studio actual-resource controls");
+  return root;
+}
+
+struct EarlyStudioActualPair {
+  using Palette=std::vector<std::array<float,16U>>;
+  std::array<std::unique_ptr<app::RuntimeReplayLocalAssets>,2> assets;
+  std::array<std::unique_ptr<hlclient::game_api::GameClientHost>,2> hosts;
+  std::array<client::ClientWorldState,2> worlds;
+  client::RuntimeClientObservationState state;
+  double now{100.0};
+
+  explicit EarlyStudioActualPair(std::string_view primary="models/w_battery.mdl") {
+    const auto root=early_studio_actual_root();
+    for(const auto token:{"maps/crossfire.bsp","models/player.mdl","models/p_shotgun.mdl",
+        "models/w_gauss.mdl","models/v_9mmhandgun.mdl","sprites/smoke.spr"})
+      REQUIRE(std::filesystem::is_regular_file(root/"valve"/token));
+    REQUIRE(std::filesystem::is_regular_file(root/"valve"/primary));
+    const auto resources=readiness::parse_resource_list({
+        {2U,"maps/crossfire.bsp",9U,0U,0U},{2U,"models/player.mdl",7U,0U,0U},
+        {2U,"models/p_shotgun.mdl",22U,0U,0U},{2U,std::string{primary},200U,0U,0U},
+        {2U,"models/w_gauss.mdl",201U,0U,0U},{2U,"models/v_9mmhandgun.mdl",202U,0U,0U},
+        {2U,"sprites/smoke.spr",19U,0U,0U}});
+    state=e10_observation(1U,1.0,0,0,0,false);state.packet_entities.clear();
+    for(std::uint32_t i=0;i<6U;++i) {
+      client::RuntimePacketEntityObservation entity;
+      entity.entity_number=40U+i;entity.ordinary_visual_schema=true;
+      entity.model_index=200U;entity.origin={-512.0+10.0*i,0.0,64.0};
+      entity.angles={0.0,0.0,0.0};entity.sequence=0U;entity.frame=0.0;
+      entity.animation_time_seconds=1.0;entity.frame_rate=1.0;
+      entity.body=0U;entity.skin=0;entity.effects=0U;entity.brush_move_type=0U;
+      entity.controllers.fill(0U);entity.blending.fill(0U);
+      state.packet_entities.push_back(entity);
+    }
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    for(std::size_t side=0;side<2U;++side) {
+      auto created=app::RuntimeReplayLocalAssets::create(resources,
+          readiness::parse_server_info("maps/crossfire.bsp"),root,"valve",
+          app::ReplayLocalCameraPolicy::external_live_receiving_client);
+      INFO((created.error ? created.error->context : std::string{}));REQUIRE(created.projection);
+      assets[side]=std::move(created.projection);
+      auto module=std::make_unique<E10TestGameClientModule>();
+      module->selected_body=0;module->attachments=true;module->sockets_enabled=true;
+      hosts[side]=std::make_unique<hlclient::game_api::GameClientHost>(std::move(module));
+      hosts[side]->reset({1U,1U,1U});
+      worlds[side].set_camera({{0,0,64},{100,0,64},{0,0,1}});
+      REQUIRE(assets[side]->reset_generation(state,worlds[side]));
+    }
+    assets[1]->set_early_studio_frustum_selection(true);
+    present();
+  }
+  ~EarlyStudioActualPair() {for(auto& host:hosts)if(host)host->teardown();}
+
+  void camera(const client::RenderCameraState& value) {
+    for(auto& world:worlds)world.set_camera(value);
+  }
+  void present() {
+    const auto hash=state.canonical_state_hash;
+    for(std::size_t side=0;side<2U;++side)
+      REQUIRE(e10_present(*assets[side],*hosts[side],now,1U,worlds[side],{320,240}));
+    CHECK(state.canonical_state_hash==hash);
+    CHECK(client::runtime_observation_canonical_hash(state)==hash);
+    const auto first=assets[0]->server_decal_lifetimes(),second=assets[1]->server_decal_lifetimes();
+    REQUIRE(first.size()==second.size());
+    for(std::size_t i=0;i<first.size();++i) {
+      CHECK(first[i].entity_number==second[i].entity_number);
+      CHECK(first[i].lifetime==second[i].lifetime);
+      CHECK(first[i].model_slot==second[i].model_slot);
+      CHECK(first[i].source_model_index==second[i].source_model_index);
+    }
+  }
+  template<class Change>void publish(Change&& change) {
+    change(state);
+    std::ranges::sort(state.packet_entities,{},&client::RuntimePacketEntityObservation::entity_number);
+    ++state.publication_revision;
+    const auto ordinal=state.publication_revision;
+    state.entity_metadata.source=client::RuntimeObservationSource{
+        ordinal,static_cast<std::size_t>(ordinal),static_cast<std::uint32_t>(42U+ordinal),0U,8U};
+    state.server_time_seconds=1.0+double(ordinal-1U)*.1;
+    state.server_time_metadata=state.entity_metadata;
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    for(std::size_t side=0;side<2U;++side)REQUIRE(assets[side]->project_entities(state,worlds[side]));
+    now+=.4;present();now+=.11;present(); // advance the real presentation clock to the new anchor
+  }
+  const early_studio::StudioEntityRenderInstance& instance(std::size_t side,
+      std::uint32_t entity,std::uint32_t subinstance=0U) const {
+    REQUIRE(worlds[side].entity_frame());
+    const auto instances=worlds[side].entity_frame()->studio_instances();
+    const auto found=std::ranges::find_if(instances,[&](const auto& value) {
+      return value.entity_number==entity && value.subinstance_ordinal==subinstance;
+    });
+    REQUIRE(found!=instances.end());return *found;
+  }
+  Palette palette(std::size_t side,std::uint32_t entity,std::uint32_t subinstance=0U) const {
+    const auto& value=instance(side,entity,subinstance);
+    REQUIRE(value.preparation_status==early_studio::StudioRenderPreparationStatus::complete);
+    const auto poses=worlds[side].entity_frame()->studio_poses();
+    REQUIRE(value.pose_index<poses.size());return poses[value.pose_index].bone_matrices;
+  }
+  void compare_complete(std::uint32_t entity,std::uint32_t subinstance=0U) const {
+    const auto& a=instance(0,entity,subinstance);const auto& b=instance(1,entity,subinstance);
+    CHECK(a.studio_asset_index==b.studio_asset_index);CHECK(a.body_value==b.body_value);
+    CHECK(a.skin_family_index==b.skin_family_index);CHECK(a.material_support_status==b.material_support_status);
+    CHECK(a.visibility_status==b.visibility_status);CHECK(a.static_light_rgb==b.static_light_rgb);
+    CHECK(a.blend_mode==b.blend_mode);CHECK(a.opacity==b.opacity);CHECK(a.tint==b.tint);
+    CHECK(early_studio::entity_render_model_matrix(a.transform)==early_studio::entity_render_model_matrix(b.transform));
+    CHECK(palette(0,entity,subinstance)==palette(1,entity,subinstance));
+  }
+  std::uint64_t lifetime(std::uint32_t number) const {
+    const auto values=assets[0]->server_decal_lifetimes();
+    const auto found=std::ranges::find(values,number,&app::WorldImpactPresentation::ServerDecalTargetLifetime::entity_number);
+    return found==values.end() ? 0U : found->lifetime;
+  }
+  std::array<hlclient::renderer::RenderScene,2> effect_scenes() {
+    std::array<hlclient::renderer::RenderScene,2> scenes;
+    for(std::size_t side=0;side<2U;++side) {
+      scenes[side]=client::build_render_scene(worlds[side]);
+      assets[side]->present_entity_effects(scenes[side],now,{});
+    }
+    return scenes;
+  }
+};
+
+void early_studio_compare_effect_geometry(const std::array<hlclient::renderer::RenderScene,2>& scenes) {
+  REQUIRE(scenes[0].follow_trail_entities);REQUIRE(scenes[1].follow_trail_entities);
+  const auto a=scenes[0].follow_trail_entities->frame->sprite_instances();
+  const auto b=scenes[1].follow_trail_entities->frame->sprite_instances();
+  REQUIRE_FALSE(a.empty());REQUIRE(a.size()==b.size());
+  for(std::size_t i=0;i<a.size();++i) {
+    CHECK(early_studio::entity_render_model_matrix(a[i].transform)==early_studio::entity_render_model_matrix(b[i].transform));
+    REQUIRE(a[i].ribbon_end.has_value()==b[i].ribbon_end.has_value());
+    if(a[i].ribbon_end) {
+      CHECK(a[i].ribbon_end->x==b[i].ribbon_end->x);
+      CHECK(a[i].ribbon_end->y==b[i].ribbon_end->y);CHECK(a[i].ribbon_end->z==b[i].ribbon_end->z);
+    }
+    CHECK(a[i].ribbon_width==b[i].ribbon_width);CHECK(a[i].opacity==b[i].opacity);CHECK(a[i].tint==b[i].tint);
+  }
+}
+
+TEST_CASE("Early Studio actual static pickups omit render-only requests and restore exact palettes on reveal",
+    "[studio-early-selection][local-capture-assets]") {
+  auto pair=std::make_unique<EarlyStudioActualPair>();
+  REQUIRE(pair->assets[1]->summary().early_studio_culled==6U);
+  CHECK(pair->assets[0]->summary().ordinary_pose_evaluations==1U);
+  CHECK(pair->assets[0]->summary().ordinary_pose_reuses==5U);
+  CHECK(pair->assets[1]->summary().ordinary_pose_evaluations==0U);
+  CHECK(pair->assets[1]->summary().early_studio_pose_requests_skipped==6U);
+  REQUIRE(pair->worlds[1].entity_frame()->studio_poses().empty());
+  REQUIRE(pair->worlds[1].entity_frame()->studio_instances().size()==6U);
+  for(std::uint32_t number=40;number<46;++number) {
+    const auto& value=pair->instance(1,number);
+    CHECK(value.pose_index==std::numeric_limits<std::uint32_t>::max());
+    CHECK(value.preparation_status==early_studio::StudioRenderPreparationStatus::frustum_rejected_before_pose);
+    CHECK(value.early_frustum_bounds.has_value());CHECK_FALSE(value.static_light_rgb);
+    CHECK(value.entity_number==pair->instance(0,number).entity_number);
+    CHECK(value.studio_asset_index==pair->instance(0,number).studio_asset_index);
+  }
+  pair->assets[1]->set_early_studio_frustum_selection(false);pair->present();
+  CHECK(pair->assets[1]->summary().early_studio_tested==0U);
+  for(std::uint32_t number=40;number<46;++number)pair->compare_complete(number);
+  pair->assets[1]->set_early_studio_frustum_selection(true);
+  const auto life=pair->lifetime(40U);REQUIRE(life!=0U);
+  pair->camera({{0,0,64},{-100,0,64},{0,.6F,.8F},1.4F,.1F,4096});pair->present();
+  CHECK(pair->assets[1]->summary().early_studio_culled==0U);
+  for(std::uint32_t number=40;number<46;++number)pair->compare_complete(number);
+  CHECK(pair->lifetime(40U)==life);
+  pair->camera({{0,0,64},{100,0,64},{0,0,1}});pair->present();
+  CHECK(pair->assets[1]->summary().early_studio_culled==6U);
+}
+
+TEST_CASE("Early Studio actual edge near scale sequence lifetime and resource transitions preserve semantic state",
+    "[studio-early-selection][local-capture-assets]") {
+  auto pair=std::make_unique<EarlyStudioActualPair>();
+  const auto battery_palette=pair->palette(0,40U);const auto initial_life=pair->lifetime(40U);
+  pair->publish([](auto& state) {
+    auto& e=state.packet_entities[0];e.origin={20.0,17.0,64.0};e.visual_scale=2.0;
+    e.angles={10.0,45.0,0.0};e.render_mode=1U;e.render_amount=127U;e.render_color={100U,150U,200U};
+  });
+  // The authored box intersects the side plane even if the legacy point box
+  // rejects. A conservative early decision must keep a complete real pose.
+  pair->compare_complete(40U);
+  pair->publish([](auto& state){state.packet_entities[0].origin={.05,0.0,64.0};});
+  for(const auto fov:{.6F,1.3F}) {
+    pair->camera({{0,0,64},{100,0,64},{0,.70710677F,.70710677F},fov,.1F,4096});
+    pair->present();pair->compare_complete(40U);
+  }
+  pair->publish([](auto& state) {
+    auto& e=state.packet_entities[0];e.origin={512.0,0.0,64.0};e.effects=32U;
+    e.visual_scale=1.0;e.render_mode=0U;
+  });
+  pair->compare_complete(40U);CHECK(pair->lifetime(40U)==initial_life);
+  pair->publish([](auto& state) {
+    auto& e=state.packet_entities[0];e.model_index=201U;e.sequence=0U;e.effects=0U;
+    e.origin={-512.0,0.0,64.0};e.animation_time_seconds=state.server_time_seconds;
+  });
+  pair->compare_complete(40U);CHECK(pair->palette(0,40U)!=battery_palette);
+  pair->publish([](auto& state) {
+    auto& e=state.packet_entities[0];e.sequence=1U;e.frame=128.0;e.frame_rate=-1.0;
+    e.animation_time_seconds=state.server_time_seconds;
+  });
+  pair->compare_complete(40U);pair->now+=.03;pair->present();pair->compare_complete(40U);
+  auto occupant=pair->state.packet_entities[0];occupant.model_index=200U;occupant.sequence=0U;occupant.frame=0;
+  pair->publish([](auto& state){std::erase_if(state.packet_entities,[](const auto& e){return e.entity_number==40U;});});
+  CHECK(pair->lifetime(40U)==0U);
+  pair->publish([&](auto& state){state.packet_entities.push_back(occupant);});
+  CHECK(pair->lifetime(40U)>initial_life);
+  pair->camera({{0,0,64},{-100,0,64},{0,0,1}});pair->present();pair->compare_complete(40U);
+  CHECK(pair->palette(1,40U)==battery_palette);
+  const auto old_identity=pair->worlds[0].entity_scene()->studio_assets()[pair->instance(0,40U).studio_asset_index]->source_identity();
+  // A fresh immutable resource owner replaces the slot with a different real
+  // static model; no disk writes or old pose/cache identities may leak across.
+  auto replacement=std::make_unique<EarlyStudioActualPair>("models/w_medkit.mdl");
+  replacement->camera({{0,0,64},{-100,0,64},{0,0,1}});replacement->present();replacement->compare_complete(40U);
+  const auto new_identity=replacement->worlds[0].entity_scene()->studio_assets()[replacement->instance(0,40U).studio_asset_index]->source_identity();
+  CHECK(new_identity!=old_identity);CHECK(replacement->palette(0,40U)!=battery_palette);
+}
+
+TEST_CASE("Early Studio actual pose diagnostics and owner beam follow consumers keep real evaluated output",
+    "[studio-early-selection][local-capture-assets]") {
+  for(const unsigned kind:{0U,1U,2U,3U,4U}) {
+    CAPTURE(kind);auto pair=std::make_unique<EarlyStudioActualPair>();
+    struct Sink final:hlclient::core::MultiplayerDiagnosticSink {
+      std::vector<hlclient::core::MultiplayerDiagnosticEvent> events;
+      bool enabled() const noexcept override{return true;}
+      bool observe(const hlclient::core::MultiplayerDiagnosticEvent& value) noexcept override {
+        if(events.size()<32U)events.push_back(value);return true;
+      }
+    };
+    std::array<Sink,2> sinks;for(auto& sink:sinks)sink.events.reserve(32U);
+    if(kind==0U)pair->publish([](auto& state){state.packet_entities[0].owner_entity_reference=41U;});
+    if(kind==1U)pair->publish([](auto& state) {
+      client::RuntimePacketEntityObservation beam;beam.entity_number=90U;beam.model_index=19U;
+      beam.origin={100.0,0.0,64.0};beam.angles={0.0,0.0,64.0};beam.custom_beam.emplace();
+      auto& b=*beam.custom_beam;b.type=client::RuntimeCustomBeamObservation::Type::entities;
+      b.start_reference={40U,0U};b.end_reference={41U,0U};b.sprite_model_index=19U;
+      b.width_units=2;b.opacity=255U;b.color={255U,255U,255U};b.complete=b.supported=true;
+      state.packet_entities.push_back(beam);
+    });
+    if(kind==2U)pair->publish([](auto& state){state.packet_entities[0].brush_move_type=12U;});
+    if(kind==3U) {
+      for(std::size_t side=0;side<2U;++side)pair->assets[side]->set_diagnostic_sink(&sinks[side],1U);
+      pair->now+=.001;pair->present();
+    }
+    if(kind==4U) {
+      client::CommittedTemporaryEffect follow;
+      follow.generation=1U;follow.record=follow.record_ordinal=2U;follow.message_bit_offset=24U;
+      follow.received_at_seconds=pair->now;follow.kind=client::TemporaryEffectKind::beam_follow;
+      follow.entity_attachment=40U;follow.sprite_index=19U;follow.life_tenths=50U;
+      follow.width_tenths=10U;follow.brightness=255U;follow.color={255U,255U,255U};
+      for(auto& asset:pair->assets)asset->consume_follow(follow,pair->now);
+      for(const auto& asset:pair->assets)REQUIRE(asset->entity_effect_statistics().accepted==1U);
+      (void)pair->effect_scenes();
+      pair->publish([](auto& state){state.packet_entities[0].origin.x=-480.0;});
+    }
+    pair->compare_complete(40U);
+    CHECK(pair->assets[1]->summary().early_studio_consumer_retained>0U);
+    if(kind==1U || kind==4U)early_studio_compare_effect_geometry(pair->effect_scenes());
+    if(kind==3U) {
+      REQUIRE(sinks[0].events.size()==6U);REQUIRE(sinks[1].events.size()==6U);
+      for(std::size_t i=0;i<sinks[0].events.size();++i) {
+        const auto& a=sinks[0].events[i];const auto& b=sinks[1].events[i];
+        CHECK(a.identity.actor_entity==b.identity.actor_entity);
+        CHECK(a.identity.actor_visual_lifetime==b.identity.actor_visual_lifetime);
+        const auto& x=std::get<hlclient::core::MultiplayerPresentationPayload>(a.payload);
+        const auto& y=std::get<hlclient::core::MultiplayerPresentationPayload>(b.payload);
+        CHECK(x.raw_animation_sequence==y.raw_animation_sequence);CHECK(x.raw_animation_frame==y.raw_animation_frame);
+        CHECK(x.pose_seconds==y.pose_seconds);CHECK(x.cache_hit==y.cache_hit);CHECK(x.origin==y.origin);
+      }
+    }
+    for(auto& asset:pair->assets)asset->set_diagnostic_sink(nullptr);
+  }
+}
+
+TEST_CASE("Early Studio actual offscreen player child and ordinary attachment preserve sockets and respawn identity",
+    "[studio-early-selection][local-capture-assets]") {
+  auto pair=std::make_unique<EarlyStudioActualPair>();
+  pair->publish([](auto& state) {
+    auto player=state.packet_entities[0];player.entity_number=2U;player.player_movement_schema=true;
+    player.model_index=7U;player.weapon_model_index=22U;player.gait_sequence=0U;
+    player.controllers.fill(127U);player.blending.fill(127U);state.packet_entities.push_back(player);
+    auto attachment_owner=state.packet_entities[0];attachment_owner.entity_number=50U;
+    attachment_owner.model_index=202U;state.packet_entities.push_back(attachment_owner);
+    client::RuntimePacketEntityObservation beam;beam.entity_number=90U;beam.model_index=19U;
+    beam.origin={100.0,0.0,64.0};beam.angles={0.0,0.0,64.0};beam.custom_beam.emplace();
+    auto& b=*beam.custom_beam;b.type=client::RuntimeCustomBeamObservation::Type::entity_point;
+    b.end_reference={50U,1U};b.sprite_model_index=19U;b.width_units=2;
+    b.opacity=255U;b.color={255U,255U,255U};b.complete=b.supported=true;state.packet_entities.push_back(beam);
+  });
+  pair->compare_complete(2U);pair->compare_complete(2U,1U);pair->compare_complete(50U);
+  const auto player_life=pair->lifetime(2U);REQUIRE(player_life!=0U);
+  const auto compare_sockets=[&] {
+    const auto a=pair->assets[0]->remote_weapon_poses(),b=pair->assets[1]->remote_weapon_poses();
+    REQUIRE(a.size()==1U);REQUIRE(b.size()==1U);
+    CHECK(a[0].entity_lifetime==b[0].entity_lifetime);CHECK(a[0].source==b[0].source);
+    REQUIRE(a[0].source==hlclient::game_api::RemoteSocketSource::validated_pmodel_socket);
+    for(const auto points:{std::array{a[0].muzzle.origin,b[0].muzzle.origin},std::array{a[0].shell.origin,b[0].shell.origin}}) {
+      CHECK(points[0].x==points[1].x);CHECK(points[0].y==points[1].y);CHECK(points[0].z==points[1].z);
+    }
+  };
+  compare_sockets();auto scenes=pair->effect_scenes();early_studio_compare_effect_geometry(scenes);
+  const auto model=pair->assets[0]->studio_model_data(202U);REQUIRE(model);REQUIRE_FALSE(model->attachments.empty());
+  const auto& owner=pair->instance(0,50U);const auto& attachment=model->attachments[0];
+  const auto palette=pair->palette(0,50U);REQUIRE(attachment.bone_index<palette.size());
+  const auto& bone=palette[attachment.bone_index];const auto local=attachment.local_origin;
+  const hlclient::assets::AssetVector3 p{bone[0]*local.x+bone[4]*local.y+bone[8]*local.z+bone[12],
+      bone[1]*local.x+bone[5]*local.y+bone[9]*local.z+bone[13],
+      bone[2]*local.x+bone[6]*local.y+bone[10]*local.z+bone[14]};
+  const auto matrix=early_studio::entity_render_model_matrix(owner.transform);
+  const hlclient::assets::AssetVector3 expected{matrix[0]*p.x+matrix[4]*p.y+matrix[8]*p.z+matrix[12],
+      matrix[1]*p.x+matrix[5]*p.y+matrix[9]*p.z+matrix[13],
+      matrix[2]*p.x+matrix[6]*p.y+matrix[10]*p.z+matrix[14]};
+  const auto sprites=scenes[0].follow_trail_entities->frame->sprite_instances();REQUIRE(sprites[0].ribbon_end);
+  CHECK(sprites[0].ribbon_end->x==Catch::Approx(expected.x).margin(.0001F));
+  CHECK(sprites[0].ribbon_end->y==Catch::Approx(expected.y).margin(.0001F));
+  CHECK(sprites[0].ribbon_end->z==Catch::Approx(expected.z).margin(.0001F));
+  const auto player=*std::ranges::find(pair->state.packet_entities,2U,&client::RuntimePacketEntityObservation::entity_number);
+  pair->publish([](auto& state){std::erase_if(state.packet_entities,[](const auto& e){return e.entity_number==2U;});});
+  CHECK(pair->lifetime(2U)==0U);
+  pair->publish([&](auto& state){state.packet_entities.push_back(player);});
+  CHECK(pair->lifetime(2U)>player_life);
+  pair->compare_complete(2U);pair->compare_complete(2U,1U);compare_sockets();
+}
+
+TEST_CASE("Early Studio actual unsupported sequence body and skin never become valid omitted poses",
+    "[studio-early-selection][local-capture-assets]") {
+  auto pair=std::make_unique<EarlyStudioActualPair>();
+  for(unsigned invalid=0;invalid<3U;++invalid) {
+    CAPTURE(invalid);
+    pair->publish([&](auto& state) {
+      auto& e=state.packet_entities[0];e.sequence=0U;e.body=0U;e.skin=0;
+      if(invalid==0U)e.sequence=999U;
+      if(invalid==1U)e.body=std::numeric_limits<std::uint32_t>::max();
+      if(invalid==2U)e.skin=999;
+    });
+    for(std::size_t side=0;side<2U;++side) {
+      const auto instances=pair->worlds[side].entity_frame()->studio_instances();
+      CHECK(std::ranges::none_of(instances,[](const auto& value){return value.entity_number==40U;}));
+      const auto unsupported=pair->worlds[side].entity_frame()->unsupported_instances();
+      REQUIRE(std::ranges::any_of(unsupported,[](const auto& value){return value.entity_number==40U;}));
+    }
+    CHECK(pair->assets[0]->summary().coverage==pair->assets[1]->summary().coverage);
+    CHECK(pair->assets[0]->summary().unsupported_instances==pair->assets[1]->summary().unsupported_instances);
+  }
+  pair->publish([](auto& state){auto& e=state.packet_entities[0];e.sequence=0U;e.body=0U;e.skin=0;});
+  REQUIRE(pair->instance(1,40U).preparation_status==
+      early_studio::StudioRenderPreparationStatus::frustum_rejected_before_pose);
+  pair->camera({{0,0,64},{-100,0,64},{0,0,1}});pair->present();pair->compare_complete(40U);
+}
+} // namespace

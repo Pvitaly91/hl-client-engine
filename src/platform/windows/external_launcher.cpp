@@ -1,4 +1,5 @@
 #include <hlclient/platform/windows/external_launcher.hpp>
+#include <hlclient/platform/windows/executable_launch_path.hpp>
 #include <hlclient/platform/windows/secure_output.hpp>
 #include <hlclient/platform/windows/shared_test_storage.hpp>
 #include <algorithm>
@@ -22,12 +23,18 @@ public:
     [[nodiscard]] explicit operator bool()const{return h_ && h_!=INVALID_HANDLE_VALUE;}
 private:HANDLE h_{};
 };
-std::vector<wchar_t> child_environment()
+std::vector<wchar_t> child_environment(const std::optional<BackgroundSkyPolicy> sky_policy)
 {
     auto* raw=::GetEnvironmentStringsW();if(!raw)return {};
     std::vector<std::wstring> entries;
-    for(const wchar_t* p=raw;*p;p+=std::wcslen(p)+1){std::wstring e{p};const auto n=e.find(L'=');const auto key=e.substr(0,n);if(::_wcsicmp(key.c_str(),L"SteamAppId")!=0 && ::_wcsicmp(key.c_str(),L"SteamGameId")!=0)entries.push_back(std::move(e));}
+    for(const wchar_t* p=raw;*p;p+=std::wcslen(p)+1){
+        std::wstring e{p};const auto n=e.find(L'=');const auto key=e.substr(0,n);
+        const bool replaced_sky=sky_policy && ::_wcsicmp(key.c_str(),L"HLC_BACKGROUND_SKY_POLICY")==0;
+        if(!replaced_sky && ::_wcsicmp(key.c_str(),L"SteamAppId")!=0 && ::_wcsicmp(key.c_str(),L"SteamGameId")!=0)entries.push_back(std::move(e));
+    }
     ::FreeEnvironmentStringsW(raw);entries.emplace_back(L"SteamAppId=70");entries.emplace_back(L"SteamGameId=70");
+    if(sky_policy)entries.emplace_back(*sky_policy==BackgroundSkyPolicy::depth?
+        L"HLC_BACKGROUND_SKY_POLICY=depth":L"HLC_BACKGROUND_SKY_POLICY=original");
     std::sort(entries.begin(),entries.end(),[](const auto&a,const auto&b){return ::_wcsicmp(a.c_str(),b.c_str())<0;});
     std::vector<wchar_t> out;for(const auto&e:entries){out.insert(out.end(),e.begin(),e.end());out.push_back(0);}out.push_back(0);return out;
 }
@@ -170,15 +177,23 @@ ExternalClientProcess::ExternalClientProcess():impl_{std::make_unique<Impl>()}{}
 ExternalClientProcess::~ExternalClientProcess()=default;
 bool ExternalClientProcess::launch(const WindowsBinaryIdentity&binary,const std::vector<std::wstring>&arguments,const bool add_cancel)
 {
+    return launch(binary,arguments,add_cancel,std::nullopt);
+}
+bool ExternalClientProcess::launch(const WindowsBinaryIdentity&binary,const std::vector<std::wstring>&arguments,
+    const bool add_cancel,const std::optional<BackgroundSkyPolicy> sky_policy)
+{
     if(impl_->process){impl_->error=ERROR_ALREADY_EXISTS;return false;}
+    if(sky_policy && *sky_policy!=BackgroundSkyPolicy::original && *sky_policy!=BackgroundSkyPolicy::depth){impl_->error=ERROR_INVALID_PARAMETER;return false;}
     if(!binary.canonical_path.is_absolute() || binary.snapshot.size==0 || arguments.size()>32){impl_->error=ERROR_INVALID_PARAMETER;return false;}
+    const auto launch_path=ordinary_executable_launch_path(binary.canonical_path);
+    if(!launch_path){impl_->error=ERROR_INVALID_NAME;return false;}
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES),nullptr,TRUE};
     impl_->cancel.reset(::CreateEventW(&security,TRUE,FALSE,nullptr));if(!impl_->cancel){impl_->error=::GetLastError();return false;}
     impl_->log=BoundedProcessLogCapture::create({64U*1024U,4096U,4096U,16U*1024U});if(!impl_->log){impl_->error=ERROR_NOT_ENOUGH_MEMORY;return false;}
     Handle null{::CreateFileW(L"NUL",GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,&security,OPEN_EXISTING,0,nullptr)};
     if(!null){impl_->error=::GetLastError();return false;}
     auto args=arguments;if(add_cancel){args.emplace_back(L"--external-cancel-event");args.push_back(std::to_wstring(reinterpret_cast<std::uintptr_t>(impl_->cancel.get())));}
-    auto command=build_windows_command_line(binary.canonical_path,args);if(command.size()>32766){impl_->error=ERROR_INVALID_PARAMETER;return false;}
+    auto command=build_windows_command_line(*launch_path,args);if(command.size()>32766){impl_->error=ERROR_INVALID_PARAMETER;return false;}
     std::vector<wchar_t> mutable_command(command.begin(),command.end());mutable_command.push_back(0);
     SIZE_T bytes{};static_cast<void>(::InitializeProcThreadAttributeList(nullptr,1,0,&bytes));if(!bytes || bytes>1024U*1024U){impl_->error=ERROR_INVALID_PARAMETER;return false;}
     std::vector<std::byte> storage(bytes);auto* attributes=reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
@@ -187,9 +202,9 @@ bool ExternalClientProcess::launch(const WindowsBinaryIdentity&binary,const std:
     const std::array handles{null.get(),static_cast<HANDLE>(impl_->log->inherited_write_handle()),impl_->cancel.get()};
     if(!::UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,const_cast<HANDLE*>(handles.data()),sizeof(handles),nullptr,nullptr)){impl_->error=::GetLastError();return false;}
     STARTUPINFOEXW startup{};startup.StartupInfo.cb=sizeof(startup);startup.lpAttributeList=attributes;startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES;startup.StartupInfo.hStdInput=null.get();startup.StartupInfo.hStdOutput=handles[1];startup.StartupInfo.hStdError=handles[1];
-    auto environment=child_environment();if(environment.empty()){impl_->error=ERROR_NOT_ENOUGH_MEMORY;return false;}
-    PROCESS_INFORMATION child{};const auto directory=binary.canonical_path.parent_path();
-    if(!::CreateProcessW(binary.canonical_path.c_str(),mutable_command.data(),nullptr,nullptr,TRUE,CREATE_SUSPENDED|CREATE_NO_WINDOW|EXTENDED_STARTUPINFO_PRESENT|CREATE_UNICODE_ENVIRONMENT,environment.data(),directory.c_str(),&startup.StartupInfo,&child)){impl_->error=::GetLastError();return false;}
+    auto environment=child_environment(sky_policy);if(environment.empty()){impl_->error=ERROR_NOT_ENOUGH_MEMORY;return false;}
+    PROCESS_INFORMATION child{};const auto directory=launch_path->parent_path();
+    if(!::CreateProcessW(launch_path->c_str(),mutable_command.data(),nullptr,nullptr,TRUE,CREATE_SUSPENDED|CREATE_NO_WINDOW|EXTENDED_STARTUPINFO_PRESENT|CREATE_UNICODE_ENVIRONMENT,environment.data(),directory.c_str(),&startup.StartupInfo,&child)){impl_->error=::GetLastError();return false;}
     impl_->process.reset(child.hProcess);Handle thread{child.hThread};impl_->pid=child.dwProcessId;impl_->log->close_parent_write_handle();
     const auto checked=verify_windows_process_image_identity(child.hProcess,binary,kMaximumObservedExecutableBytes,{AuthenticodePolicy::not_required_for_downloaded_project_owned_binary,false});
     FILETIME created{},exited{},kernel{},user{};

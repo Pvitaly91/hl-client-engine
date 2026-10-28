@@ -1,0 +1,606 @@
+diff --git a/apps/hlclient/main.cpp b/apps/hlclient/main.cpp
+index c79f642..ccb796a 100644
+--- a/apps/hlclient/main.cpp
++++ b/apps/hlclient/main.cpp
+@@ -80,6 +80,8 @@
+ #include <hlclient/platform/sdl_window.hpp>
+ #include <hlclient/renderer/null/null_renderer.hpp>
+ #include <hlclient/renderer/opengl/opengl_renderer.hpp>
++#include "sky_candidate_api.hpp"
++#include "sky_gameplay_capture.hpp"
+ #include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
+ #include <hlclient/world_preview/world_preview_scene_source.hpp>
+ 
+@@ -128,6 +130,19 @@ using hlclient::core::LogLevel;
+ // receipt or render policy is changed by this switch. Keep legacy until the
+ // isolated A/B candidate has been qualified.
+ bool detailed_runtime_text_enabled{false};
++bool background_sky_startup_logged{};
++void log_background_sky_startup(const hlclient::renderer::opengl::OpenGlRenderer& renderer) {
++  if(background_sky_startup_logged)return;
++  background_sky_startup_logged=true;
++  const auto& info=renderer.information();
++  const auto& target=renderer.scene_target_statistics();
++  hlclient::core::log(LogLevel::info,
++      std::string{"[background-sky-policy] requested="}+
++      std::string{background_sky_policy_name(hlc_background_sky_policy())}+
++      " GL_VENDOR="+info.vendor+" GL_RENDERER="+info.device+
++      " GL_VERSION="+info.version+
++      " actual_samples="+std::to_string(target.actual_samples));
++}
+ [[nodiscard]] std::optional<bool> runtime_text_enabled_for_startup(
+     const std::string_view mode, const bool explicit_trace) noexcept {
+   if (mode == "legacy" || mode == "verbose") return true;
+@@ -684,6 +699,25 @@ public:
+       <<",\"hud_user_scale\":"<<hud_metrics_.user<<",\"hud_effective_scale\":"<<hud_metrics_.effective
+       <<",\"killfeed_font_pixel_size\":"<<hud_metrics_.font<<",\"killfeed_icon_scale\":"<<hud_metrics_.icon
+       <<",\"killfeed_maximum_row_width\":"<<hud_metrics_.row_width;
++    if(final) {
++      // Count-only renderer evidence, emitted once in the existing final sink.
++      // This process-wide scope includes console/loading draws and all maps;
++      // it is not presented as a measured gameplay-window frame count.
++      const auto sky=hlc_background_sky_stats();
++      report<<",\"background_sky\":{\"requested_policy\":"
++        <<hlclient::core::external_json_string(background_sky_policy_name(hlc_background_sky_policy()))
++        <<",\"counter_scope\":\"process_render_attempts_since_startup_including_console_and_loading\""
++        <<",\"frames\":"<<sky.frames<<",\"original_frames\":"<<sky.original_frames
++        <<",\"late_frames\":"<<sky.late_frames<<",\"early_frames\":"<<sky.early_frames
++        <<",\"fallback_frames\":"<<(sky.early_frames-sky.original_frames)
++        <<",\"fallback_bits\":"<<sky.fallback_bits
++        <<",\"bounds_tested\":"<<sky.bounds_tested<<",\"gl_state_queries\":"<<sky.gl_state_queries
++        <<",\"fallback_reasons\":{\"sky_resource\":"<<sky.fallback_counts[0]
++        <<",\"world_resource_identity\":"<<sky.fallback_counts[1]
++        <<",\"depth_attachment\":"<<sky.fallback_counts[2]
++        <<",\"gl_state\":"<<sky.fallback_counts[3]
++        <<",\"far_depth_bounds\":"<<sky.fallback_counts[4]<<"}}";
++    }
+     report<<"}\n";
+     const auto bytes=report.str();
+     // Startup/final immutable receipts remain synchronous; these cost records
+@@ -5371,6 +5405,7 @@ int run_opengl_renderer(
+     const auto render_scene =
+         hlclient::client::build_render_scene(scene_source.world_state());
+     renderer.render(render_scene, extent);
++    log_background_sky_startup(renderer);
+     if (runtime_replay_source != nullptr &&
+         runtime_replay_source->visuals_enabled() &&
+         scene_source.world_state().entity_frame_revision() !=
+@@ -5980,6 +6015,7 @@ int run_live_visual_control(
+   auto previous_time = session_started;
+   auto previous_session_update = session_started;
+   const bool movement_diagnostics_enabled=receipts.movement().enabled();
++  sky_gameplay_capture::Capture sky_capture;
+   window.set_input_diagnostic_clocks(movement_diagnostics_enabled);
+   receipts.multiplayer().invalidate();receipts.multiplayer().set_world_query(nullptr);
+   std::optional<Clock::time_point> movement_previous_frame,movement_fallback_started;
+@@ -8091,6 +8127,7 @@ int run_live_visual_control(
+     const bool scene_ready_for_presentation=assets_installed && session.live_visual_input_ready() &&
+         last_view_status==hlclient::app::LiveVisualViewStatus::ready;
+     if(console)console->compose(render_scene,scene_ready_for_presentation);
++    const auto sky_render_begin=sky_capture.enabled()?sky_gameplay_capture::qpc():0U;
+     const auto movement_render_started=movement_diagnostics_enabled ? Clock::now() : Clock::time_point{};
+     if(movement_diagnostics_enabled)movement_frame.render_submit_us=receipts.movement_stamp(movement_render_started);
+     if(movement_diagnostics_enabled) {
+@@ -8124,6 +8161,8 @@ int run_live_visual_control(
+           renderer.gpu_timing_statistics().last_submission_status);
+       movement_frame.render_ms=movement_elapsed_ms(movement_render_started,Clock::now());
+     } else renderer.render(render_scene, extent);
++    const auto sky_render_end=sky_capture.enabled()?sky_gameplay_capture::qpc():0U;
++    log_background_sky_startup(renderer);
+     const auto movement_render_report_started=movement_diagnostics_enabled ? Clock::now() : Clock::time_point{};
+     if(options.external_server_client)receipts.external_render(options,window,renderer,successful_presentations+1U);
+     if(movement_diagnostics_enabled) {
+@@ -8269,9 +8308,27 @@ int run_live_visual_control(
+       hlclient::core::MultiplayerPresentationPayload p;p.phase=hlclient::core::MultiplayerPresentationPhase::swap_begin;
+       receipts.diagnostic(p,hlclient::core::MultiplayerDiagnosticProducer::renderer,movement_frame.frame_number);
+     }
++    const auto sky_swap_begin=sky_capture.enabled()?sky_gameplay_capture::qpc():0U;
+     window.swap_buffers();
+     const auto swap_completed_at = Clock::now();
++    const auto sky_swap_end=sky_capture.enabled()?sky_gameplay_capture::qpc():0U;
+     ++successful_presentations;
++    if(sky_capture.enabled()) {
++      sky_gameplay_capture::Row row;
++      row.frame=successful_presentations;row.after_swap_qpc=sky_swap_end;
++      row.render_begin_qpc=sky_render_begin;row.render_end_qpc=sky_render_end;row.swap_begin_qpc=sky_swap_begin;
++      row.eye={render_scene.camera.position.x,render_scene.camera.position.y,render_scene.camera.position.z};
++      row.target={render_scene.camera.target.x,render_scene.camera.target.y,render_scene.camera.target.z};
++      row.fov=render_scene.camera.vertical_field_of_view_radians;row.width=extent.width;row.height=extent.height;
++      row.focused=snapshot.focused();row.captured=window.capture_state()==hlclient::input::InputCaptureState::captured;
++      row.active=control_activated;
++      if(const auto& sky_observation=scene_source.world_state().runtime_observation();sky_observation)
++        row.alive=sky_observation->lifecycle.state==hlclient::client::LocalPlayerLifeState::alive;
++      if(const auto identity=receipts.snapshot();identity){row.network_generation=identity->generation.network_generation;row.map_generation=identity->generation.map_generation;}
++      row.draw_calls=renderer.statistics().draw_call_count;row.triangles=renderer.statistics().triangle_count;
++      row.sky=hlc_background_sky_stats();
++      if(sky_capture.observe(std::move(row))){timed_session_complete=true;running=false;if(console)console->request_quit();}
++    }
+     if(movement_diagnostics_enabled) {
+       if(movement_previous_frame)movement_frame.frame_interval_ms=movement_elapsed_ms(*movement_previous_frame,swap_completed_at);
+       movement_previous_frame=swap_completed_at;
+@@ -8321,6 +8378,8 @@ int run_live_visual_control(
+       // Poll a bounded eight-query pool. Pending results stay absent, not zero.
+       for(std::size_t movement_query=0;movement_query<8U;++movement_query) {
+         const auto timing=renderer.poll_gpu_timing();if(!timing)break;
++        if(timing->status==hlclient::renderer::opengl::OpenGlGpuTimingStatus::ready)
++          sky_capture.gpu(timing->frame_number,timing->elapsed_ms);
+         if(const auto owner=std::ranges::find(diagnostic_gpu_owners,timing->frame_number,&DiagnosticGpuOwner::frame);
+             owner!=diagnostic_gpu_owners.end()) {
+           hlclient::core::MultiplayerPresentationPayload gpu_event;
+@@ -11087,6 +11146,15 @@ int application_main(const int argument_count,
+     return 0;
+   }
+ 
++  // Strict one-time process policy. No renderer frame reads environment/config.
++  try {
++    if(!hlc_background_sky_set_policy(read_background_sky_policy()))
++      throw std::runtime_error{"Background sky startup policy was already configured"};
++  } catch(const std::exception& error) {
++    hlclient::core::log(LogLevel::error,error.what());
++    return 2;
++  }
++
+ #ifdef _WIN32
+   char *runtime_text_setting = nullptr;
+   std::size_t runtime_text_setting_size{};
+diff --git a/src/renderer/opengl/opengl_renderer.cpp b/src/renderer/opengl/opengl_renderer.cpp
+index adca3a0..5d187e7 100644
+--- a/src/renderer/opengl/opengl_renderer.cpp
++++ b/src/renderer/opengl/opengl_renderer.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include "opengl_entity_renderer.hpp"
+ #include "opengl_scene_target.hpp"
++#include "sky_candidate_api.hpp"
++#include "sky_depth_guard.hpp"
+ 
+ #include <hlclient/assets/world_lightmap_types.hpp>
+ #include "opengl_effect_lights.hpp"
+@@ -39,6 +41,22 @@
+ #include <utility>
+ #include <vector>
+ 
++namespace {
++thread_local SkyCandidateStats background_sky_stats;
++// Written only on the application startup thread before any render work.
++BackgroundSkyPolicy background_sky_policy{BackgroundSkyPolicy::original};
++bool background_sky_policy_configured{};
++bool background_sky_render_started{};
++}
++extern "C" bool hlc_background_sky_set_policy(BackgroundSkyPolicy policy) {
++    if(background_sky_policy_configured || background_sky_render_started ||
++       (policy!=BackgroundSkyPolicy::original && policy!=BackgroundSkyPolicy::depth))return false;
++    background_sky_policy=policy;background_sky_policy_configured=true;return true;
++}
++extern "C" BackgroundSkyPolicy hlc_background_sky_policy() { return background_sky_policy; }
++extern "C" SkyCandidateStats hlc_background_sky_stats() { return background_sky_stats; }
++extern "C" void hlc_background_sky_reset_stats() { background_sky_stats={}; }
++
+ namespace hlclient::renderer::opengl {
+ namespace {
+ 
+@@ -1350,6 +1368,9 @@ struct GpuWorldResources {
+     std::vector<GlObject> base_textures;
+     std::vector<GlObject> lightmap_pages;
+     GlObject white_lightmap;
++    // Prepared from exactly the uploaded indexed vertices, not source metadata.
++    // Owned by this resource generation; never shared with another GL context.
++    std::optional<assets::WorldBounds> backdrop_depth_bounds;
+ };
+ 
+ struct GpuSceneResources {
+@@ -1378,6 +1399,15 @@ struct GpuSceneResources {
+             create_opaque_lit_world_program(true));
+     }
+     result.geometry = upload_geometry(package);
++    if(background_sky_policy==BackgroundSkyPolicy::depth)for(const auto index:package.indices()) {
++        const auto& p=package.vertices()[index].position;
++        if(!result.backdrop_depth_bounds)result.backdrop_depth_bounds=assets::WorldBounds{p,p};
++        else {
++            auto& b=*result.backdrop_depth_bounds;
++            b.minimum={std::min(b.minimum.x,p.x),std::min(b.minimum.y,p.y),std::min(b.minimum.z,p.z)};
++            b.maximum={std::max(b.maximum.x,p.x),std::max(b.maximum.y,p.y),std::max(b.maximum.z,p.z)};
++        }
++    }
+ 
+     const auto textures = package.textured_world().textures.textures();
+     result.base_textures.reserve(textures.size());
+@@ -1796,7 +1826,7 @@ public:
+         require_no_gl_error(OpenGlRendererErrorCode::texture_upload_failed,"Environment cube upload");
+         sky_texture_=std::move(texture);sky_asset_=sky;return sky_texture_.name();
+     }
+-    void render_sky(GLuint texture,const RenderCamera& camera,RenderExtent extent) {
++    void render_sky(GLuint texture,const RenderCamera& camera,RenderExtent extent,bool behind_opaque=false) {
+         if(!texture)return;
+         if(!is_valid(camera))fail(OpenGlRendererErrorCode::camera_invalid,"Environment camera invalid");
+         const auto forward=normalize(assets::AssetVector3{camera.target.x-camera.position.x,
+@@ -1850,7 +1880,8 @@ void main() {
+         const auto scale=std::tan(camera.vertical_field_of_view_radians*.5F);
+         glUniform2f(sky_scale_,scale*static_cast<float>(extent.width)/static_cast<float>(extent.height),scale);
+         glBindSampler(0,0);glBindTexture(GL_TEXTURE_CUBE_MAP,texture);glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+-        glDisable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);glDisable(GL_SCISSOR_TEST);
++        if(behind_opaque){glEnable(GL_DEPTH_TEST);glDepthFunc(GL_LEQUAL);}else glDisable(GL_DEPTH_TEST);
++        glDepthMask(GL_FALSE);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);glDisable(GL_SCISSOR_TEST);
+         glDrawArrays(GL_TRIANGLES,0,3);
+         require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Environment backdrop draw");
+     }
+@@ -3463,6 +3494,77 @@ public:
+         clear_visibility_tracking();
+     }
+ 
++    // Return zero only when all pre-backdrop draws are independent color
++    // replacements with no sample allowed to round to the depth clear value.
++    // The original early path is retained for unknown resources/state. This
++    // guard does not mutate GL state or rely on runtime transformed metadata.
++    [[nodiscard]] std::uint64_t backdrop_fallback(
++        const RenderScene& scene,const RenderCamera& camera,RenderExtent extent) const {
++        if(!scene.skybox || sky_asset_!=scene.skybox || !sky_texture_.name() ||
++           !scene.static_world || !scene.static_world->package)return 1;
++        const auto& world=*scene.static_world;
++        const GpuWorldResources* world_gpu{};
++        const GpuWorldResources* brush_gpu{};
++        if(world.scene_package) {
++            if(!scene_resources_ || scene_resources_->scene_instance!=world.scene_package ||
++               scene_resources_->world.package_instance!=world.package)return 2;
++            world_gpu=&scene_resources_->world;
++            if(scene_resources_->brushes)brush_gpu=&*scene_resources_->brushes;
++        }else {
++            if(!resources_ || resources_->package_instance!=world.package)return 2;
++            world_gpu=&*resources_;
++        }
++        GLint bits{},function{},polygon[2]{};GLboolean mask{},color[4]{};GLdouble range[2]{};
++        glGetIntegerv(GL_DEPTH_FUNC,&function);
++        glGetIntegerv(GL_POLYGON_MODE,polygon);glGetBooleanv(GL_DEPTH_WRITEMASK,&mask);
++        glGetBooleanv(GL_COLOR_WRITEMASK,color);glGetDoublev(GL_DEPTH_RANGE,range);
++        background_sky_stats.gl_state_queries+=5;
++        GLint framebuffer{},component{},object{};
++        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&framebuffer);
++        const auto depth_attachment=framebuffer?GL_DEPTH_ATTACHMENT:GL_DEPTH;
++        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
++            depth_attachment,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,&object);
++        background_sky_stats.gl_state_queries+=2;
++        if(object==GL_NONE)return 4;
++        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
++            depth_attachment,GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE,&bits);
++        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,depth_attachment,
++            GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE,&component);
++        background_sky_stats.gl_state_queries+=2;
++        if(bits<16)return 4;
++        if(!((component==GL_UNSIGNED_NORMALIZED && (bits==16 || bits==24 || bits==32)) ||
++             (component==GL_FLOAT && bits==32)))return 4;
++        if(mask!=GL_TRUE || range[0]!=0.0 || range[1]!=1.0 ||
++           (function!=GL_LESS && function!=GL_LEQUAL) ||
++           polygon[0]!=GL_FILL || polygon[1]!=GL_FILL ||
++           std::ranges::any_of(color,[](const auto c){return c!=GL_TRUE;}))return 8;
++        for(const auto state:{GL_SCISSOR_TEST,GL_STENCIL_TEST,GL_COLOR_LOGIC_OP,
++                GL_POLYGON_OFFSET_FILL,GL_RASTERIZER_DISCARD,GL_DEPTH_CLAMP,
++                GL_SAMPLE_ALPHA_TO_COVERAGE,GL_SAMPLE_COVERAGE,GL_SAMPLE_MASK}) {
++            ++background_sky_stats.gl_state_queries;if(glIsEnabled(state))return 8;
++        }
++        GLint clip_distances{};glGetIntegerv(GL_MAX_CLIP_DISTANCES,&clip_distances);
++        ++background_sky_stats.gl_state_queries;
++        for(GLint i=0;i<clip_distances;++i){++background_sky_stats.gl_state_queries;if(glIsEnabled(GL_CLIP_DISTANCE0+i))return 8;}
++        const auto vp=camera_view_projection(camera,extent);if(!vp || !vp.matrix)return 16;
++        const auto safe=[&](const GpuWorldResources* gpu,const RenderMatrix4& mvp){
++            ++background_sky_stats.bounds_tested;
++            return gpu && gpu->backdrop_depth_bounds &&
++                sky_depth_guard(*gpu->backdrop_depth_bounds,mvp,bits);
++        };
++        // Even world commands can carry a non-identity model transform. Use
++        // precisely the multiplication used by the unchanged draw loop below.
++        if(world.visible_draw_list) {
++            for(const auto& command:world.visible_draw_list->commands()) {
++                const auto* gpu=command.object_kind==world_visibility::WorldVisibleObjectKind::world_surface?world_gpu:brush_gpu;
++                if(!safe(gpu,renderer::multiply(*vp.matrix,command.model_transform)))return 16;
++            }
++        }else if(!safe(world_gpu,*vp.matrix))return 16;
++        if(world.runtime_brushes)for(const auto& instance:world.runtime_brushes->instances)
++            if(!safe(brush_gpu,renderer::multiply(*vp.matrix,instance.model_transform)))return 16;
++        return 0;
++    }
++
+     [[nodiscard]] GpuWorldResources& ensure_resources(
+         const std::shared_ptr<const world_render::WorldRenderPackage>& package)
+     {
+@@ -3930,6 +4032,26 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
+         background.blue,
+         background.alpha);
+     glClearDepth(1.0);
++    // Observe eligibility BEFORE the clear: a scissored/masked clear must not
++    // be treated as a fresh depth buffer. All checks are inside submission CPU.
++    background_sky_render_started=true;
++    const bool depth_requested=background_sky_policy==BackgroundSkyPolicy::depth;
++    // The default/original path does not enter any new per-frame bounds,
++    // resource, far-depth or GL-state guard. Opt-in keeps every existing guard.
++    const auto backdrop_fallback=depth_requested
++        ? implementation_->backdrop_fallback(scene,view_camera,{width,height}) : 0U;
++    const bool late_backdrop=depth_requested && backdrop_fallback==0;
++    ++background_sky_stats.frames;
++    if(late_backdrop)++background_sky_stats.late_frames;
++    else {
++        ++background_sky_stats.early_frames;
++        if(!depth_requested)++background_sky_stats.original_frames;
++        else {
++            background_sky_stats.fallback_bits|=backdrop_fallback;
++            for(std::size_t bit=0;bit<background_sky_stats.fallback_counts.size();++bit)
++                if(backdrop_fallback&(std::uint64_t{1}<<bit))++background_sky_stats.fallback_counts[bit];
++        }
++    }
+     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+     require_no_gl_error(
+         OpenGlRendererErrorCode::gl_operation_failed,
+@@ -3939,11 +4061,11 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
+         ++statistics.rendered_frame_count;
+         return;
+     }
+-    implementation_->gpu_world_subpass_boundary(OpenGlWorldGpuSubpass::sky);
++    if(!late_backdrop)implementation_->gpu_world_subpass_boundary(OpenGlWorldGpuSubpass::sky);
+     const auto sky_texture=implementation_->prepare_sky(scene.skybox);
+     implementation_->startup_boundary("sky_prepared");
+-    implementation_->render_sky(sky_texture,view_camera,{width,height});
+-    implementation_->startup_boundary("sky_drawn");
++    if(!late_backdrop){implementation_->render_sky(sky_texture,view_camera,{width,height});
++        implementation_->startup_boundary("sky_drawn");}
+     // Unit2 and seamless cube filtering are owned for this frame. Portal sky
+     // polygons keep their actual depth: entities behind a sky brush stay hidden.
+     struct SkyDrawState {
+@@ -4539,6 +4661,14 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
+     glBindVertexArray(0U);
+     glUseProgram(0U);
+ 
++    // FrameDrawState has ended: no later draw consumes its cached bindings.
++    // Finite sky geometry has already run in its ORIGINAL order/depth. Decals
++    // and every blend-dependent pass below now see the completed background.
++    if(late_backdrop) {
++        implementation_->gpu_world_subpass_boundary(OpenGlWorldGpuSubpass::sky);
++        implementation_->render_sky(sky_texture,view_camera,{width,height},true);
++        implementation_->startup_boundary("sky_drawn");
++    }
+     implementation_->gpu_pass_boundary(OpenGlGpuPass::effects_decals);
+     if (scene.world_decals)
+         implementation_->render_decals(*scene.world_decals,*matrix.matrix,frame);
+diff --git a/experiments/background-sky-20261028/include/background_sky_policy.hpp b/experiments/background-sky-20261028/include/background_sky_policy.hpp
+new file mode 100644
+--- /dev/null
++++ b/experiments/background-sky-20261028/include/background_sky_policy.hpp
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include <cstdlib>
++#include <memory>
++#include <optional>
++#include <stdexcept>
++#include <string_view>
++
++// One explicit process-startup decision; renderer frames never read environment.
++enum class BackgroundSkyPolicy { original, depth };
++[[nodiscard]] constexpr std::optional<BackgroundSkyPolicy>
++parse_background_sky_policy(std::string_view value) noexcept {
++    if(value == "original") return BackgroundSkyPolicy::original;
++    if(value == "depth") return BackgroundSkyPolicy::depth;
++    return std::nullopt;
++}
++[[nodiscard]] constexpr std::string_view
++background_sky_policy_name(BackgroundSkyPolicy policy) noexcept {
++    return policy == BackgroundSkyPolicy::depth ? "depth" : "original";
++}
++[[nodiscard]] inline BackgroundSkyPolicy read_background_sky_policy() {
++#ifdef _WIN32
++    char* value{};
++    std::size_t bytes{};
++    if(::_dupenv_s(&value, &bytes, "HLC_BACKGROUND_SKY_POLICY") != 0)
++        throw std::runtime_error("Unable to read HLC_BACKGROUND_SKY_POLICY");
++    const std::unique_ptr<char, decltype(&std::free)> owner{value, &std::free};
++#else
++    const char* value = std::getenv("HLC_BACKGROUND_SKY_POLICY");
++#endif
++    // Unset is the accepted original path. Empty/unknown values are errors.
++    const auto parsed = parse_background_sky_policy(value ? value : "original");
++    if(!parsed) throw std::invalid_argument(
++        "HLC_BACKGROUND_SKY_POLICY must be original or depth (default: original)");
++    return *parsed;
++}
+diff --git a/experiments/background-sky-20261028/include/sky_candidate_api.hpp b/experiments/background-sky-20261028/include/sky_candidate_api.hpp
+new file mode 100644
+--- /dev/null
++++ b/experiments/background-sky-20261028/include/sky_candidate_api.hpp
+@@ -0,0 +1,18 @@
++#pragma once
++#include "background_sky_policy.hpp"
++#include <array>
++#include <cstdint>
++// Task-only diagnostics; no public renderer ABI/config changes.
++struct SkyCandidateStats {
++    std::uint64_t frames{},late_frames{},early_frames{},fallback_bits{};
++    std::uint64_t bounds_tested{},gl_state_queries{};
++    std::uint64_t original_frames{};
++    // Bits 1,2,4,8,16: sky/resources, world identity, depth attachment,
++    // unknown/unsupported GL state, conservative far-depth/bounds guard.
++    std::array<std::uint64_t,5> fallback_counts{};
++};
++// Configure once before creating a renderer; the policy cannot change in-flight.
++extern "C" bool hlc_background_sky_set_policy(BackgroundSkyPolicy);
++extern "C" BackgroundSkyPolicy hlc_background_sky_policy();
++extern "C" SkyCandidateStats hlc_background_sky_stats();
++extern "C" void hlc_background_sky_reset_stats();
+diff --git a/experiments/background-sky-20261028/include/sky_depth_guard.hpp b/experiments/background-sky-20261028/include/sky_depth_guard.hpp
+new file mode 100644
+--- /dev/null
++++ b/experiments/background-sky-20261028/include/sky_depth_guard.hpp
+@@ -0,0 +1,56 @@
++#pragma once
++
++#include <hlclient/assets/asset_types.hpp>
++#include <hlclient/renderer/render_scene.hpp>
++#include <algorithm>
++#include <cmath>
++#include <limits>
++
++namespace hlclient::renderer::opengl {
++
++// Pure, task-only eligibility test. Bounds must enclose the actual indexed
++// positions of every draw being moved before the backdrop. Supply the SAME
++// float MVP uploaded for that draw, not a separately recomputed transform.
++// A false result means keep the original early-backdrop order; it is never
++// permission to omit geometry or change its depth/shader/material behavior.
++[[nodiscard]] inline bool sky_depth_guard(const assets::WorldBounds& bounds,
++    const renderer::RenderMatrix4& mvp, int depth_bits) noexcept {
++    if (depth_bits < 16) return false;
++    const double minimum[3]{bounds.minimum.x, bounds.minimum.y, bounds.minimum.z};
++    const double maximum[3]{bounds.maximum.x, bounds.maximum.y, bounds.maximum.z};
++    for (unsigned axis = 0; axis < 3; ++axis) {
++        if (!std::isfinite(minimum[axis]) || !std::isfinite(maximum[axis]) ||
++            minimum[axis] > maximum[axis]) return false;
++    }
++    for (const float value : mvp.values) if (!std::isfinite(value)) return false;
++
++    const int effective_bits = (std::min)(depth_bits, 24);
++    const double epsilon = static_cast<double>(std::numeric_limits<float>::epsilon());
++    const double delta = (std::max)(4.0 / (std::ldexp(1.0, effective_bits) - 1.0), 32.0 * epsilon);
++    const double scale = 1.0 - 2.0 * delta;
++    const double maximum_float = static_cast<double>((std::numeric_limits<float>::max)());
++    for (unsigned corner = 0; corner < 8; ++corner) {
++        const double position[4]{
++            (corner & 1U) ? maximum[0] : minimum[0],
++            (corner & 2U) ? maximum[1] : minimum[1],
++            (corner & 4U) ? maximum[2] : minimum[2], 1.0};
++        double z{}, w{}, z_magnitude{}, w_magnitude{};
++        for (unsigned column = 0; column < 4; ++column) {
++            // Column-major, column-vector multiplication: rows z and w.
++            const double z_term = static_cast<double>(mvp.values[column * 4U + 2U]) * position[column];
++            const double w_term = static_cast<double>(mvp.values[column * 4U + 3U]) * position[column];
++            z += z_term; w += w_term;
++            z_magnitude += std::abs(z_term); w_magnitude += std::abs(w_term);
++        }
++        // The float-roundoff allowance is not valid across float overflow.
++        // This extra fail-closed bound also covers any sum-of-products order.
++        if (!std::isfinite(z) || !std::isfinite(w) ||
++            !std::isfinite(z_magnitude) || !std::isfinite(w_magnitude) ||
++            z_magnitude > maximum_float || w_magnitude > maximum_float) return false;
++        const double q = scale * w - z;
++        const double roundoff = 64.0 * epsilon * (z_magnitude + w_magnitude + 1.0);
++        if (!std::isfinite(q) || !std::isfinite(roundoff) || !(q > roundoff)) return false;
++    }
++    return true;
++}
++} // namespace hlclient::renderer::opengl
+diff --git a/experiments/background-sky-20261028/include/sky_gameplay_capture.hpp b/experiments/background-sky-20261028/include/sky_gameplay_capture.hpp
+new file mode 100644
+--- /dev/null
++++ b/experiments/background-sky-20261028/include/sky_gameplay_capture.hpp
+@@ -0,0 +1,115 @@
++#pragma once
++// Task-only adaptation of the existing b6 present_probe RAM recorder.
++// No renderer/input/pose changes; serialization happens after the live loop.
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include "sky_candidate_api.hpp"
++#include <windows.h>
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstdint>
++#include <filesystem>
++#include <fstream>
++#include <iomanip>
++#include <iostream>
++#include <memory>
++#include <optional>
++#include <stdexcept>
++
++namespace sky_gameplay_capture {
++inline std::uint64_t qpc() noexcept { LARGE_INTEGER v{};QueryPerformanceCounter(&v);return static_cast<std::uint64_t>(v.QuadPart); }
++struct Row {
++    std::uint64_t frame{},after_swap_qpc{},render_begin_qpc{},render_end_qpc{},swap_begin_qpc{};
++    std::array<float,3> eye{},target{};
++    float fov{};int width{},height{};
++    bool focused{},captured{},active{},alive{};
++    std::uint64_t draw_calls{},triangles{},network_generation{},map_generation{};
++    SkyCandidateStats sky;
++    std::optional<double> gpu_ms;
++};
++class Capture final {
++public:
++    static constexpr std::size_t capacity=200000;
++    Capture() {
++        std::array<wchar_t,32768> value{};
++        const auto n=GetEnvironmentVariableW(L"HLC_SKY_GAMEPLAY_CAPTURE",value.data(),static_cast<DWORD>(value.size()));
++        if(!n)return;
++        if(n>=value.size())throw std::runtime_error{"Sky capture path too long"};
++        path_=std::filesystem::path{std::wstring{value.data(),n}};
++        if(!path_.is_absolute() || std::filesystem::exists(path_) || !std::filesystem::is_directory(path_.parent_path()))
++            throw std::runtime_error{"Sky capture requires a new absolute output in an existing task directory"};
++        LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);frequency_=static_cast<std::uint64_t>(frequency.QuadPart);
++        rows_=std::make_unique<Row[]>(capacity);
++        std::cout<<"[sky-gameplay-capture] enabled=true capacity="<<capacity<<" warmup_seconds=30 measure_seconds=20 drain_seconds=2\n"<<std::flush;
++    }
++    ~Capture() noexcept {try{save();}catch(...){std::cerr<<"[sky-gameplay-capture] save_failed=true\n";}}
++    [[nodiscard]] bool enabled() const noexcept {return static_cast<bool>(rows_);}
++    // True asks the existing live loop to finish normally after the fixed window.
++    [[nodiscard]] bool observe(Row value) {
++        if(!rows_)return false;
++        rows_[value.frame%capacity]=std::move(value);++total_;
++        const auto& row=rows_[value.frame%capacity];last_frame_=row.frame;
++        if(!anchor_ && row.focused && row.captured && row.active && row.alive) {
++            anchor_=row.after_swap_qpc;
++            std::cout<<std::setprecision(9)<<"[sky-gameplay-capture] anchor_qpc="<<anchor_
++                <<" eye="<<row.eye[0]<<','<<row.eye[1]<<','<<row.eye[2]
++                <<" target="<<row.target[0]<<','<<row.target[1]<<','<<row.target[2]
++                <<" fov="<<row.fov<<" extent="<<row.width<<'x'<<row.height<<'\n'<<std::flush;
++        }
++        return anchor_ && row.after_swap_qpc>=anchor_+52U*frequency_;
++    }
++    void gpu(std::uint64_t frame,double milliseconds) noexcept {
++        if(!rows_ || !std::isfinite(milliseconds) || milliseconds<0.0)return;
++        auto& row=rows_[frame%capacity];
++        if(row.frame!=frame){++gpu_unmatched_;return;}
++        if(row.gpu_ms){++gpu_duplicates_;return;}
++        row.gpu_ms=milliseconds;++gpu_observed_;
++    }
++private:
++    void save() {
++        if(!rows_)return;
++        std::ofstream out{path_,std::ios::binary|std::ios::out};
++        if(!out)throw std::runtime_error{"Cannot save sky gameplay capture"};
++        const auto stored=(std::min)(total_,static_cast<std::uint64_t>(capacity));
++        out<<std::setprecision(15)<<"{\"schema\":\"hlc.sky-real-client.native-capture.v1\",\"policy\":\""
++            <<background_sky_policy_name(hlc_background_sky_policy())<<"\",\"process_id\":"<<GetCurrentProcessId()
++            <<",\"qpc_frequency\":"<<frequency_<<",\"anchor_qpc\":"<<anchor_
++            <<",\"analysis_start_qpc\":"<<(anchor_?anchor_+30U*frequency_:0)
++            <<",\"analysis_end_qpc\":"<<(anchor_?anchor_+50U*frequency_:0)
++            <<",\"total_observed\":"<<total_<<",\"overwritten_rows\":"<<(total_-stored)
++            <<",\"gpu_observed\":"<<gpu_observed_<<",\"gpu_unmatched\":"<<gpu_unmatched_
++            <<",\"gpu_duplicates\":"<<gpu_duplicates_<<",\"timed_file_io\":false"
++            <<",\"primary_metric\":\"normal_client_post_swap_return_qpc_cadence\""
++            <<",\"cpu_render_scope\":\"entire_existing_render_block_including_guards_and_existing_diagnostic_accounting\""
++            <<",\"gpu_scope\":\"existing_bounded_pool_total_elapsed_sparse_not_full_frame_population\",\"rows\":[";
++        bool first=true;
++        for(std::uint64_t frame=last_frame_>=stored?last_frame_-stored+1:1;frame<=last_frame_;++frame) {
++            const auto& r=rows_[frame%capacity];if(r.frame!=frame)continue;
++            if(!first)out<<',';first=false;
++            out<<"\n{\"frame\":"<<r.frame<<",\"after_swap_qpc\":"<<r.after_swap_qpc
++                <<",\"render_begin_qpc\":"<<r.render_begin_qpc<<",\"render_end_qpc\":"<<r.render_end_qpc
++                <<",\"swap_begin_qpc\":"<<r.swap_begin_qpc<<",\"eye\":["<<r.eye[0]<<','<<r.eye[1]<<','<<r.eye[2]
++                <<"],\"target\":["<<r.target[0]<<','<<r.target[1]<<','<<r.target[2]<<"],\"fov\":"<<r.fov
++                <<",\"width\":"<<r.width<<",\"height\":"<<r.height
++                <<",\"focused\":"<<(r.focused?"true":"false")<<",\"captured\":"<<(r.captured?"true":"false")
++                <<",\"active\":"<<(r.active?"true":"false")<<",\"alive\":"<<(r.alive?"true":"false")
++                <<",\"draw_calls_cumulative\":"<<r.draw_calls<<",\"triangles_cumulative\":"<<r.triangles
++                <<",\"network_generation\":"<<r.network_generation<<",\"map_generation\":"<<r.map_generation
++                <<",\"sky_frames\":"<<r.sky.frames<<",\"sky_late\":"<<r.sky.late_frames
++                <<",\"sky_early\":"<<r.sky.early_frames<<",\"sky_original\":"<<r.sky.original_frames
++                <<",\"sky_bounds\":"<<r.sky.bounds_tested<<",\"sky_gl_queries\":"<<r.sky.gl_state_queries
++                <<",\"fallback_counts\":[";
++            for(std::size_t i=0;i<r.sky.fallback_counts.size();++i){if(i)out<<',';out<<r.sky.fallback_counts[i];}
++            out<<"],\"gpu_ms\":";if(r.gpu_ms)out<<*r.gpu_ms;else out<<"null";out<<'}';
++        }
++        out<<"\n]}\n";out.close();if(!out)throw std::runtime_error{"Incomplete sky capture output"};
++    }
++    std::filesystem::path path_;std::unique_ptr<Row[]> rows_;
++    std::uint64_t frequency_{},anchor_{},total_{},last_frame_{},gpu_observed_{},gpu_unmatched_{},gpu_duplicates_{};
++};
++}

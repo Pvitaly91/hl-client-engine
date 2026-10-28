@@ -1258,6 +1258,7 @@ if(WIN32)
 
     hlclient_add_library(hlclient_external_launcher
         include/hlclient/platform/windows/external_launcher.hpp
+        include/hlclient/platform/windows/executable_launch_path.hpp
         src/platform/windows/external_launcher.cpp)
     add_library(hlclient::external_launcher ALIAS hlclient_external_launcher)
     target_compile_definitions(hlclient_external_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -2510,6 +2511,8 @@ hlclient_add_library(
     hlclient_renderer_opengl
     include/hlclient/renderer/opengl/opengl_renderer.hpp
     src/renderer/opengl/opengl_renderer.cpp
+    src/renderer/opengl/prepared_world_visibility.hpp
+    src/renderer/opengl/prepared_world_visibility.cpp
     src/renderer/opengl/opengl_entity_renderer.hpp
     src/renderer/opengl/opengl_entity_renderer.cpp
 )
@@ -2612,7 +2615,7 @@ if(WIN32)
     target_link_options(hlclient_launcher PRIVATE /DELAYLOAD:SDL3.dll)
     target_link_libraries(hlclient_launcher PRIVATE hlclient::external_launcher
         hlclient::platform SDL3::SDL3-shared hlclient::windows_network_isolation hlclient::hash_sha256
-        hlclient::session_receipts user32 gdi32 comctl32 shell32 ole32 uuid delayimp)
+        hlclient::session_receipts user32 gdi32 comctl32 shell32 ole32 uuid delayimp advapi32)
     add_custom_command(TARGET hlclient_launcher POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:SDL3::SDL3-shared>"
             "$<TARGET_FILE_DIR:hlclient_launcher>" VERBATIM)
@@ -2621,10 +2624,34 @@ if(WIN32)
             COMMAND hlclient_launcher --offline-ui-check)
         set_tests_properties(hlclient_external_launcher_ui_offline PROPERTIES
             LABELS "offline;e31;launcher" TIMEOUT 30)
+        add_executable(hlclient_launcher_gpu_tests tests/test_launcher_gpu_preference_standalone.cpp)
+        target_compile_features(hlclient_launcher_gpu_tests PRIVATE cxx_std_20)
+        target_compile_options(hlclient_launcher_gpu_tests PRIVATE /utf-8)
+        target_compile_definitions(hlclient_launcher_gpu_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+        target_link_libraries(hlclient_launcher_gpu_tests PRIVATE advapi32)
+        hlclient_enable_warnings(hlclient_launcher_gpu_tests)
+        add_test(NAME hlclient_launcher_gpu_preference_offline COMMAND hlclient_launcher_gpu_tests)
+        set_tests_properties(hlclient_launcher_gpu_preference_offline PROPERTIES LABELS "offline;launcher;gpu" TIMEOUT 30)
+        add_executable(hlclient_original_hl_launch_tests tests/test_original_half_life_standalone.cpp)
+        target_compile_features(hlclient_original_hl_launch_tests PRIVATE cxx_std_20)
+        target_compile_options(hlclient_original_hl_launch_tests PRIVATE /utf-8)
+        target_compile_definitions(hlclient_original_hl_launch_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+        target_link_libraries(hlclient_original_hl_launch_tests PRIVATE advapi32 user32 shell32)
+        hlclient_enable_warnings(hlclient_original_hl_launch_tests)
+        add_test(NAME hlclient_original_hl_launch_plan_offline COMMAND hlclient_original_hl_launch_tests)
+        set_tests_properties(hlclient_original_hl_launch_plan_offline PROPERTIES LABELS "offline;launcher;original-hl" TIMEOUT 30)
         add_executable(hlclient_external_process_fixture apps/hlclient_external_process_fixture/main.cpp)
         hlclient_enable_warnings(hlclient_external_process_fixture)
         target_compile_definitions(hlclient_external_process_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         set_property(TARGET hlclient_external_process_fixture PROPERTY FOLDER "Tests/Fixtures")
+        add_executable(hlclient_launcher_gpu_path_tests tests/test_launcher_gpu_path_standalone.cpp)
+        target_compile_features(hlclient_launcher_gpu_path_tests PRIVATE cxx_std_20)
+        target_compile_options(hlclient_launcher_gpu_path_tests PRIVATE /utf-8)
+        target_compile_definitions(hlclient_launcher_gpu_path_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+        target_link_libraries(hlclient_launcher_gpu_path_tests PRIVATE hlclient::external_launcher user32 shell32)
+        hlclient_enable_warnings(hlclient_launcher_gpu_path_tests)
+        add_test(NAME hlclient_launcher_gpu_process_path_offline COMMAND hlclient_launcher_gpu_path_tests $<TARGET_FILE:hlclient_external_process_fixture>)
+        set_tests_properties(hlclient_launcher_gpu_process_path_offline PROPERTIES LABELS "offline;launcher;gpu;process" TIMEOUT 30)
     endif()
 endif()
 

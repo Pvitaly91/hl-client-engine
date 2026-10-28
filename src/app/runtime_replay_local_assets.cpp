@@ -497,6 +497,59 @@ assets::WorldBounds bounds(const assets::WorldBounds &b,
   return *result;
 }
 
+// A deliberately narrow authored static-sequence contract. The sequence box
+// is compiled after the model's bone transform, unlike the header clip box or
+// bone-local vertex AABBs. Controllers, animation transitions and dependent
+// groups are not generalized here. The legacy late box must also reject the
+// instance before the caller may omit its render-only pose request.
+bool early_studio_static_sequence(const assets::SkeletalModelAssetData& model) noexcept {
+  if(model.bones.size()!=1U || model.bones[0].parent_index!=-1 ||
+      !model.bone_controllers.empty() || !model.attachments.empty() ||
+      model.sequences.size()!=1U ||
+      std::ranges::any_of(model.bones[0].controller_indices,[](auto index){return index!=-1;}))
+    return false;
+  const auto& sequence=model.sequences[0];
+  if(sequence.frame_count!=1U || sequence.blend_count!=1U ||
+      sequence.animation_blends.size()!=1U || !sequence.events.empty() ||
+      sequence.motion_type!=0 || sequence.linear_movement.x!=0.0F ||
+      sequence.linear_movement.y!=0.0F || sequence.linear_movement.z!=0.0F ||
+      !std::isfinite(sequence.frames_per_second) || sequence.frames_per_second<0.0F ||
+      !r::finite_entity_render_bounds({sequence.bounds.minimum,sequence.bounds.maximum}) ||
+      sequence.bounds.minimum.x>=sequence.bounds.maximum.x ||
+      sequence.bounds.minimum.y>=sequence.bounds.maximum.y ||
+      sequence.bounds.minimum.z>=sequence.bounds.maximum.z)
+    return false;
+  const auto& blend=sequence.animation_blends[0];
+  if(blend.bone_tracks.size()!=1U || blend.bone_tracks[0].bone_index!=0U) return false;
+  for(std::size_t channel=0;channel<6U;++channel) {
+    const auto& value=blend.bone_tracks[0].channels[channel];
+    if(static_cast<std::size_t>(value.semantic)!=channel || value.frame_coverage!=1U ||
+        value.source_sequence_group_ordinal!=sequence.sequence_group_index ||
+        !std::isfinite(value.source_default) || !std::isfinite(value.source_scale)) return false;
+    // Finite source scalars can still overflow when an RLE value is scaled.
+    // Validate the sole endpoint with the existing bounded sampler, not a
+    // skeleton evaluation, before claiming that this static pose is usable.
+    if(!g::studio::StudioFractionalAnimationChannelSampler::sample_fractional_frame(value,0.0))
+      return false;
+  }
+  return true;
+}
+
+bool early_studio_referenced(
+    const std::vector<client::RuntimePacketEntityObservation>& entities,
+    const std::uint32_t number) noexcept {
+  return std::ranges::any_of(entities,[number](const auto& entity) {
+    if(entity.owner_entity_reference && *entity.owner_entity_reference!=0U &&
+        (entity.entity_number==number || *entity.owner_entity_reference==number)) return true;
+    if(entity.custom_beam &&
+        (entity.custom_beam->start_reference.entity==number ||
+         entity.custom_beam->end_reference.entity==number)) return true;
+    // No negotiated follow graph is available here. Any MOVETYPE_FOLLOW
+    // participant conservatively keeps the whole dependent frame on its path.
+    return entity.brush_move_type==12U;
+  });
+}
+
 std::optional<client::RenderCameraState> spectator_camera(
     const std::shared_ptr<const collision::CollisionWorldPackage> &world,
     const assets::AssetVector3 &origin) {
@@ -1827,6 +1880,8 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         ++next.rendered_model_slots[slot]; // Preserve unbound diagnostic slots.
     };
     next.ordinary_pose_evaluations=next.ordinary_pose_reuses=0U;
+    next.early_studio_tested=next.early_studio_culled=0U;
+    next.early_studio_pose_requests_skipped=next.early_studio_consumer_retained=0U;
     std::vector<OrdinaryFramePose> ordinary_poses;
     std::size_t ordinary_pose_bytes{};
     std::array<game_api::RemoteWeaponPoseSample,32> next_weapon_poses{};
@@ -2268,6 +2323,78 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
                 ordinary_pose_seconds=context.sample_server_seconds;
                 if(context.previous && sampled_player_previous_)
                   ordinary_previous_seconds=sampled_player_previous_->server_time_seconds;
+              }
+            }
+          }
+          // Sampling above must run even when no render pose is needed: it
+          // owns transition/lifetime/interpolation clocks. Missing composition
+          // or an active previous/layer pose keeps the established full path.
+          if(early_studio_frustum_selection_ && sampled_game_ && input.view_frustum &&
+              input.camera_cull_exempt_entity_number!=entity.entity_number &&
+              sampled_receiving_entity_!=entity.entity_number && ordinary_composition &&
+              !ordinary_composition->previous && !ordinary_composition->layer &&
+              early_studio_static_sequence(model)) {
+            ++next.early_studio_tested;
+            // The diagnostic producer currently publishes an evaluated pose
+            // observation/cache outcome. Keep that complete path instead of
+            // inventing a cache hit or silently omitting a required producer.
+            const bool pose_needed=(diagnostic_sink_ && diagnostic_sink_->enabled()) ||
+                entity_follow_.statistics().accepted!=0U ||
+                early_studio_referenced(observation.packet_entities,entity.entity_number) ||
+                (current_entities_ && early_studio_referenced(current_entities_->packet_entities,entity.entity_number)) ||
+                (previous_entities_ && early_studio_referenced(previous_entities_->packet_entities,entity.entity_number));
+            if(pose_needed) {
+              ++next.early_studio_consumer_retained;
+            } else {
+              const auto& sequence=model.sequences[0];
+              // One model-space unit of compiler/roundoff slack, transformed
+              // by the exact entity rotation and scale used by this frame.
+              const assets::WorldBounds padded{
+                  {sequence.bounds.minimum.x-1.0F,sequence.bounds.minimum.y-1.0F,sequence.bounds.minimum.z-1.0F},
+                  {sequence.bounds.maximum.x+1.0F,sequence.bounds.maximum.y+1.0F,sequence.bounds.maximum.z+1.0F}};
+              const auto early_bounds=r::transform_entity_render_bounds(padded,transform);
+              const auto& asset=*package_->studio_assets()[visual_render_index];
+              const auto late_bounds=r::transform_entity_render_bounds(
+                  {asset.bounds().minimum,asset.bounds().maximum},transform);
+              const auto rejected=[&](const auto& value) {
+                if(!value)return false;
+                const auto classification=input.view_frustum->classify(*value);
+                return classification && classification.classification==world_visibility::WorldBoundsClassification::outside;
+              };
+              const bool render_needed=!(rejected(early_bounds) && rejected(late_bounds));
+              if(!render_needed) {
+                const auto support=r::studio_entity_material_support(asset,
+                    static_cast<std::uint32_t>(pose_input.body_value),pose_input.skin_family_index);
+                if(support && *support!=r::StudioEntityMaterialSupportStatus::unsupported_material) {
+                  r::StudioEntityRenderInstance instance;
+                  instance.entity_number=entity.entity_number;
+                  instance.studio_asset_index=static_cast<std::uint32_t>(visual_render_index);
+                  instance.pose_index=std::numeric_limits<std::uint32_t>::max();
+                  instance.transform=transform;
+                  instance.body_value=static_cast<std::uint32_t>(pose_input.body_value);
+                  instance.skin_family_index=pose_input.skin_family_index;
+                  instance.material_support_status=*support;
+                  instance.interpolated_bounds=*late_bounds;
+                  instance.visibility_status=r::RuntimeEntityVisibilityStatus::culled_by_frustum;
+                  instance.preparation_status=r::StudioRenderPreparationStatus::frustum_rejected_before_pose;
+                  instance.early_frustum_bounds=*early_bounds;
+                  if(entity.render_mode.value_or(0U)!=0U) {
+                    instance.blend_mode=entity.render_mode==5U ? r::StudioBlendMode::additive : r::StudioBlendMode::alpha_blended;
+                    instance.opacity=static_cast<float>(entity.render_amount.value_or(255U))/255.0F;
+                    if(entity.render_mode==1U)
+                      for(std::size_t channel=0;channel<instance.tint.size();++channel)
+                        instance.tint[channel]=static_cast<float>(entity.render_color[channel].value_or(255U))/255.0F;
+                  }
+                  // Explicitly valid culled identity, not a fake bone palette
+                  // or fabricated lighting. The builder revalidates both bounds.
+                  input.studio_instances.push_back(std::move(instance));
+                  ++next.early_studio_culled;
+                  ++next.early_studio_pose_requests_skipped;
+                  ++next.rendered_instances;
+                  add_coverage(binding.status);
+                  add_rendered_slot(*entity.model_index);
+                  continue;
+                }
               }
             }
           }

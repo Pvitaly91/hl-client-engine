@@ -79,21 +79,27 @@ bool valid_prediction_work(const core::PredictionWorkDiagnostics& value) noexcep
     return true;
 }
 bool valid_static_world(const MovementStaticWorldFrameRecord& value) noexcept {
-    if(value.path>MovementStaticWorldPath::visible_commands ||
-        value.fallback_reason>MovementStaticWorldFallbackReason::fragmented_batch)return false;
+    if(value.path>MovementStaticWorldPath::prepared_bsp ||
+        value.fallback_reason>MovementStaticWorldFallbackReason::pvs_conservative)return false;
     if(value.selected_blocks && value.considered_blocks &&
         *value.selected_blocks>*value.considered_blocks)return false;
     if(value.selected_surfaces && value.considered_surfaces &&
         *value.selected_surfaces>*value.considered_surfaces)return false;
     if(value.resource_id.has_value()!=value.resource_revision.has_value())return false;
+    if(value.pvs_fallback_code && *value.pvs_fallback_code>5U)return false;
+    if(value.pvs_index_upload_bytes && *value.pvs_index_upload_bytes>(std::uint64_t{1U}<<30U))return false;
     if(value.path==MovementStaticWorldPath::none &&
         (value.resource_id || value.considered_blocks || value.tested_bounds ||
          value.selected_blocks || value.considered_surfaces || value.selected_surfaces ||
          value.submitted_draws || value.submitted_triangles || value.prepared_rebuilds ||
-         value.selection_preparation_ms ||
+         value.bsp_visited_nodes || value.bsp_pvs_rejected_nodes || value.bsp_frustum_rejected_nodes ||
+         value.pvs_rebuilds || value.pvs_cache_hits || value.pvs_fallback_code || value.pvs_index_upload_bytes ||
+         value.prepared_bytes || value.prepared_allocations ||
+         value.submitted_surfaces || value.submitted_ranges || value.selection_preparation_ms ||
+         value.command_preparation_ms || value.submission_ms ||
          value.fallback_reason!=MovementStaticWorldFallbackReason::none))return false;
-    if(value.selection_preparation_ms && (!std::isfinite(*value.selection_preparation_ms) ||
-        *value.selection_preparation_ms<0 || *value.selection_preparation_ms>1'000'000'000.0))return false;
+    for(const auto* duration:{&value.selection_preparation_ms,&value.command_preparation_ms,&value.submission_ms})
+        if(*duration && (!std::isfinite(**duration) || **duration<0 || **duration>1'000'000'000.0))return false;
     return true;
 }
 void sanitize(Record& value,std::uint64_t& invalid) noexcept {
@@ -183,9 +189,9 @@ std::string encode_prediction_work(const std::optional<core::PredictionWorkDiagn
 }
 std::string encode_static_world(const std::optional<MovementStaticWorldFrameRecord>& value) {
     if(!value)return "null";
-    constexpr std::array paths{"none","original_batches","prepared_bypass","prepared_selected","visible_commands"};
+    constexpr std::array paths{"none","original_batches","prepared_bypass","prepared_selected","visible_commands","prepared_bsp"};
     constexpr std::array reasons{"none","prepared_unavailable","insufficient_probe_rejections",
-        "invalid_prepared_batch","fragmented_batch"};
+        "invalid_prepared_batch","fragmented_batch","bsp_unavailable","pvs_conservative"};
     std::string text="{\"path\":"+core::external_json_string(paths[static_cast<std::size_t>(value->path)]);
     text+=",\"fallback_reason\":"+core::external_json_string(reasons[static_cast<std::size_t>(value->fallback_reason)]);
 #define STATIC_WORLD_FIELD(name) field(text,#name,value->name)
@@ -194,6 +200,12 @@ std::string encode_static_world(const std::optional<MovementStaticWorldFrameReco
     STATIC_WORLD_FIELD(considered_surfaces);STATIC_WORLD_FIELD(selected_surfaces);
     STATIC_WORLD_FIELD(submitted_draws);STATIC_WORLD_FIELD(submitted_triangles);STATIC_WORLD_FIELD(prepared_rebuilds);
     STATIC_WORLD_FIELD(selection_preparation_ms);
+    STATIC_WORLD_FIELD(bsp_visited_nodes);STATIC_WORLD_FIELD(bsp_pvs_rejected_nodes);STATIC_WORLD_FIELD(bsp_frustum_rejected_nodes);
+    STATIC_WORLD_FIELD(pvs_rebuilds);STATIC_WORLD_FIELD(pvs_cache_hits);STATIC_WORLD_FIELD(pvs_fallback_code);
+    STATIC_WORLD_FIELD(pvs_index_upload_bytes);
+    STATIC_WORLD_FIELD(prepared_bytes);STATIC_WORLD_FIELD(prepared_allocations);
+    STATIC_WORLD_FIELD(submitted_surfaces);STATIC_WORLD_FIELD(submitted_ranges);
+    STATIC_WORLD_FIELD(command_preparation_ms);STATIC_WORLD_FIELD(submission_ms);
 #undef STATIC_WORLD_FIELD
     return text+'}';
 }
@@ -913,7 +925,7 @@ std::optional<std::string> MovementIncidentRecorder::encode(const SessionReceipt
         text+=",\"local_clock\":\"application_steady_microseconds\",\"quantiles\":\"nearest_rank_recorded_recent_window\"";
         text+=",\"gpu_policy\":\"delayed_identity_bound_nonblocking_or_not_available\",\"causality\":\"observations_not_root_cause_proof\"";
         text+=",\"prediction_work_semantics\":\"durations_overlap_prediction_ms_collision_query_ms_is_subset_counts_are_actual_calls_traversal_steps_are_successfully_reported\"";
-        if(enabled_)text+=",\"static_world_receipt\":{\"schema\":\"hlclient.static-world-frame.v1\",\"scope\":\"completed_renderer_frame_in_recent_window_or_incident\",\"counter_semantics\":\"per_frame_not_cumulative\",\"considered_blocks_semantics\":\"eligible_immutable_pool\",\"tested_bounds_semantics\":\"frustum_calls_including_retests\",\"selected_blocks_semantics\":\"submitted_pool_blocks\",\"selection_preparation_scope\":\"frustum_probe_range_decisions_excludes_gl_submission_and_map_load\",\"submitted_triangles_semantics\":\"geometry_not_visible_pixels\",\"unknown\":\"null\",\"omission\":\"bounded_recent_window_and_incident_sampling\"}";
+        if(enabled_)text+=",\"static_world_receipt\":{\"schema\":\"hlclient.static-world-frame.v1\",\"scope\":\"completed_renderer_frame_in_recent_window_or_incident\",\"counter_semantics\":\"per_frame_not_cumulative\",\"considered_blocks_semantics\":\"eligible_immutable_pool\",\"tested_bounds_semantics\":\"frustum_calls_including_retests\",\"selected_blocks_semantics\":\"submitted_pool_blocks\",\"selection_preparation_scope\":\"visibility_classification_excludes_gl_submission_and_map_load\",\"command_preparation_scope\":\"selected_geometry_command_preparation\",\"submission_scope\":\"cpu_static_world_gl_submission_not_gpu_time\",\"duration_relationship\":\"separate_scopes_do_not_infer_additivity_with_frame_or_gpu\",\"prepared_bytes_semantics\":\"retained_prepared_resource_bytes_gauge_not_delta\",\"prepared_allocations_semantics\":\"per_frame_prepared_vector_storage_events_not_all_runtime_allocations\",\"submitted_ranges_semantics\":\"index_ranges_not_gl_api_call_count\",\"submitted_triangles_semantics\":\"geometry_not_visible_pixels\",\"unknown\":\"null\",\"omission\":\"bounded_recent_window_and_incident_sampling\"}";
         if(enabled_)text+=",\"pacing_wait_policy\":\"previous_completed_iteration_not_current_frame_execution\"";
         text+=",\"receive_counter_scope\":\"owned_peer\",\"rejected_sequence_is_packet_loss\":false,\"choke_marker_is_server_load_proof\":false";
         text+=",\"limits\":{\"recent_frames\":"+scalar(maximum_recent_frames);field(text,"retention_us",retention_us);

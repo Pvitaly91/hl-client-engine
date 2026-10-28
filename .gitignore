@@ -3,6 +3,7 @@
 /build-*/
 /out/
 /dist/
+/test-sky/
 /portable/portable-settings.json
 /portable/logs/
 /CMakeFiles/

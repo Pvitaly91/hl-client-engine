@@ -1,0 +1,2166 @@
+{
+  "schema": "hlclient.win10-msaa4-100fps-50b5ffe1.v1",
+  "status": "no_accepted_candidate_after_C1_not_optimization_complete",
+  "continuation_C1": {
+    "summary": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/C1-final-summary.json",
+    "delivery_observation": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/C1-delivery-observation.json",
+    "timed_processes": 72,
+    "raw_frames": 110592,
+    "production_restored_exact_B0": true,
+    "normal_client_rebuilt": false,
+    "new_delivery": false,
+    "full_suite_repeated": false,
+    "old_4190_pass_75_skip_scope": "Original current-task B0; not the C1 candidates",
+    "P2d": {
+      "status": "time_gain_not_established",
+      "gain_ms": 0.05402803421020508,
+      "gate_ms": 0.14541840314865115,
+      "analysis_sha256": "7ad375ac676516aa15cc998c9da492937cfdd0d2598df4bfef3fe8b931a10757"
+    },
+    "P1c": {
+      "status": "measured_control_regressions_notaccepted",
+      "resolve_paired_p50_gain_ms": 0.3794960379600525,
+      "gpu_total_paired_p50_gain_ms": 0.3949919999999998,
+      "recurring_regression_flags": 11,
+      "correctness_cases": 20,
+      "correctness_assertions": 1230284,
+      "analysis_sha256": "82715e751c6140d05baf9a37791f40d43c0d3039a05ead142f0790c4d13d7a8c"
+    },
+    "B2q": {
+      "status": "operations_only_time_gain_not_established",
+      "cpu_owned_gain_ms": 0.06459999999999999,
+      "cpu_owned_gate_ms": 0.24640000000000017,
+      "correctness_cases": 11,
+      "correctness_assertions": 1229534,
+      "binding_proof_cases": 1,
+      "binding_proof_assertions": 26,
+      "first_attempt_blocked_timed_processes": 0,
+      "resumed_after_local_idle_check_without_user_confirmation": true,
+      "analysis_sha256": "4d105e94aec5ec88fabcbbfd9e1842393c43e952513347e2f7ae3dc2ff8b372c"
+    },
+    "host_guard": "Pre/post CIM plus100ms target polling with actual gaps recorded; WMI start trace access denied; no absolute absence-of-load proof",
+    "next_unclosed_operation": "Measure present_entities per-player history/continuity scan and project_entities separately before any new CPU cache; do not freeze animation or repeat rejected merge/cache work",
+    "target_PC_timing": "not_run",
+    "target_100fps": "not_achieved_unproven"
+  },
+  "checkpoint_date": "2026-10-24",
+  "task_record_root": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024",
+  "manual": "not_run",
+  "target_100fps": "unproven",
+  "new_agent_live_sessions": 0,
+  "git_mutations": {
+    "staging": false,
+    "commit": false,
+    "push": false,
+    "reset": false,
+    "clean": false,
+    "stash": false,
+    "restore": false,
+    "rebase": false,
+    "amend": false,
+    "branch_switch": false
+  },
+  "repository": {
+    "root": "D:/DEV/CPP/HL-Client-engine",
+    "branch": "main",
+    "head": "6a86ce0e3b826341c90bbcee8c603771f1dc58c8",
+    "working_tree": "preexisting_dirty_preserved",
+    "clean_commit_claim": false
+  },
+  "intake": {
+    "run_id": "50b5ffe11be28794b66dcd524a34fc7d",
+    "outer_archive": "C:/Users/admin/Downloads/codex_msaa4.zip",
+    "outer_archive_sha256": "c03ff36b4961d65684bf91961579f91d87ae91f6631baa796c734b68a581194e",
+    "primary_archive_sha256": "22ffb084575cc4d59b04ac60d4ecdaa1ab87ba4dfbfb91c6b0e4feb1650a9883",
+    "exact_expected_primary_hash_matches": true,
+    "safe_extraction": {
+      "all_entry_confinement_checked": true,
+      "traversal_checked": true,
+      "duplicate_names_checked": true,
+      "symlink_attributes_checked": true
+    },
+    "raw_logs_modified": false,
+    "bundled_analysis_script_executed": false,
+    "supplied_analysis_used_as": "evidence_not_authority",
+    "config_hash_matches_manifest": true,
+    "preserved_attempts": [
+      {
+        "stage": "initial_ingestion",
+        "status": "failed_after_source_and_library_freeze",
+        "cause": "Guessed helper filename not present; no baseline source/library overwrite."
+      },
+      {
+        "stage": "complete_ingestion",
+        "status": "completed",
+        "cause": "Audited actual HLClientSystemDiagnostics.exe and SDL3.dll, verified prior copied client/launcher."
+      }
+    ]
+  },
+  "baseline": {
+    "kind": "current_task_pre_edit_source_binary",
+    "previous_task_baseline_is_not_current_b0": true,
+    "frozen_utc": "2026-10-24T13:26:20.8422594Z",
+    "source_file_count": 1319,
+    "release_library_count": 124,
+    "release_binary_count": 4,
+    "active_local_binaries_rehashed_separately": [
+      {
+        "path": "hlclient.exe",
+        "size_bytes": 5581312,
+        "sha256": "7765414555a74e4ab5cd3bdf7ddce9da03d998c4ba76659acf43fce92022cd22"
+      },
+      {
+        "path": "HLClientLauncher.exe",
+        "size_bytes": 367104,
+        "sha256": "9d401a751adc933831f86bcd52d6c468fb801981d1af4fb499e44530ce1fb9da"
+      },
+      {
+        "path": "HLClientSystemDiagnostics.exe",
+        "size_bytes": 148992,
+        "sha256": "dac64eb2490be791dcd8e183e044977e047a2edff71782efe6d2dc3438be9659"
+      },
+      {
+        "path": "SDL3.dll",
+        "size_bytes": 2285568,
+        "sha256": "ad833f09fad8d99eadfdb1a765a76f9f20872a3ab6fadbef648f09334f2fac87"
+      }
+    ],
+    "report_client_sha256": "7765414555a74e4ab5cd3bdf7ddce9da03d998c4ba76659acf43fce92022cd22",
+    "report_identity_is_not_sole_binary_proof": true
+  },
+  "target_provenance": {
+    "user_identifies_windows10": true,
+    "startup_logs_in_archive": false,
+    "windows_build_from_startup": "not_available",
+    "gl_vendor_renderer_version": "not_available",
+    "attachment_color_format": "not_available",
+    "pdh_adapter_label": "Intel(R) HD Graphics 4600",
+    "adapter_label_is_gl_renderer_proof": false,
+    "shared_storage_read": "unavailable during this audit",
+    "no_driver_or_power_changes": true,
+    "later_root_checkpoint": "Fresh 2026-10-24T15:53:19.2432563Z read verified all 12 shipped files across local/shared/dist at B0 identities and canonical ZIP unchanged; writes0, test-data untouched."
+  },
+  "primary": {
+    "actual_video": {
+      "width": 1920,
+      "height": 1080,
+      "msaa": 4,
+      "fallback": "none",
+      "complete": true,
+      "vsync": false,
+      "swap_interval": 0,
+      "cap": 0,
+      "brightness": 0,
+      "gamma": 1,
+      "contrast": 1,
+      "default_framebuffer_samples": 0,
+      "allocations": 1,
+      "releases": 0
+    },
+    "controlled_alive_counts": {
+      "frames": 2549,
+      "prediction_active_frames": 2549,
+      "prediction_inactive_frames": 0,
+      "prediction_unknown_frames": 0,
+      "fallback_entries": 0,
+      "correction_samples": 953,
+      "correction_ordinal_advances_unmeasured": 0,
+      "frame_over20_ms": 151,
+      "frame_over33_3_ms": 6,
+      "frame_over50_ms": 1,
+      "startsolid_frames": 2,
+      "allsolid_frames": 0,
+      "committed_records": 979,
+      "replayed_commands": 971,
+      "bytes": 655657,
+      "fallback_observed_interval_us": 0
+    },
+    "controlled_alive_metrics": {
+      "frame_interval_ms": {
+        "observed": 2548,
+        "mean": 16.94345545525902,
+        "maximum": 53.2252,
+        "not_available": 1,
+        "p50_upper_bound": 20,
+        "p95_upper_bound": 25,
+        "p99_upper_bound": 25
+      },
+      "cpu_update_ms": {
+        "observed": 2549,
+        "mean": 8.13853954491956,
+        "maximum": 38.3493,
+        "not_available": 0,
+        "p50_upper_bound": 8,
+        "p95_upper_bound": 14,
+        "p99_upper_bound": 20
+      },
+      "network_ms": {
+        "observed": 2549,
+        "mean": 0.08906834052569629,
+        "maximum": 0.384,
+        "not_available": 0,
+        "p50_upper_bound": 0.25,
+        "p95_upper_bound": 0.25,
+        "p99_upper_bound": 0.25
+      },
+      "parse_commit_ms": {
+        "observed": 2549,
+        "mean": 1.1534954491957614,
+        "maximum": 9.906,
+        "not_available": 0,
+        "p50_upper_bound": 0,
+        "p95_upper_bound": 4,
+        "p99_upper_bound": 6
+      },
+      "prediction_ms": {
+        "observed": 2549,
+        "mean": 0.7999379756767339,
+        "maximum": 6.7854,
+        "not_available": 0,
+        "p50_upper_bound": 1,
+        "p95_upper_bound": 4,
+        "p99_upper_bound": 4
+      },
+      "collision_ms": {
+        "observed": 2549,
+        "mean": 0.032365280502157714,
+        "maximum": 0.3799,
+        "not_available": 0,
+        "p50_upper_bound": 0,
+        "p95_upper_bound": 0.25,
+        "p99_upper_bound": 0.25
+      },
+      "studio_ms": {
+        "observed": 2549,
+        "mean": 4.134473911337779,
+        "maximum": 27.046699999999998,
+        "not_available": 0,
+        "p50_upper_bound": 6,
+        "p95_upper_bound": 8,
+        "p99_upper_bound": 8
+      },
+      "asset_ms": {
+        "observed": 2549,
+        "mean": 0.0005451549627304627,
+        "maximum": 0.0169,
+        "not_available": 0,
+        "p50_upper_bound": 0.25,
+        "p95_upper_bound": 0.25,
+        "p99_upper_bound": 0.25
+      },
+      "render_ms": {
+        "observed": 2549,
+        "mean": 2.2879437818752515,
+        "maximum": 7.494,
+        "not_available": 0,
+        "p50_upper_bound": 4,
+        "p95_upper_bound": 4,
+        "p99_upper_bound": 6
+      },
+      "present_ms": {
+        "observed": 2549,
+        "mean": 6.284559984307578,
+        "maximum": 13.2027,
+        "not_available": 0,
+        "p50_upper_bound": 8,
+        "p95_upper_bound": 12,
+        "p99_upper_bound": 12
+      },
+      "report_ms": {
+        "observed": 2549,
+        "mean": 0.0038378579835229537,
+        "maximum": 0.13440000000000002,
+        "not_available": 0,
+        "p50_upper_bound": 0.25,
+        "p95_upper_bound": 0.25,
+        "p99_upper_bound": 0.25
+      },
+      "gpu_ms": {
+        "observed": 2549,
+        "mean": 15.045183209101609,
+        "maximum": 20.25992,
+        "not_available": 0,
+        "p50_upper_bound": 16.667,
+        "p95_upper_bound": 20,
+        "p99_upper_bound": 20
+      },
+      "state_age_ms": {
+        "observed": 2549,
+        "mean": 13.321277755982763,
+        "maximum": 51.215,
+        "not_available": 0,
+        "p50_upper_bound": 14,
+        "p95_upper_bound": 33.334,
+        "p99_upper_bound": 40
+      },
+      "raw_correction_on_ordinal_sample_units": {
+        "observed": 953,
+        "mean": 0.10663864145774132,
+        "maximum": 5.986820066628404,
+        "not_available": 0,
+        "p50_upper_bound": 0.25,
+        "p95_upper_bound": 0.25,
+        "p99_upper_bound": 4
+      },
+      "camera_jump_snapshot_on_ordinal_units": {
+        "observed": 953,
+        "mean": 0.06833515476619535,
+        "maximum": 8.382539352737886,
+        "not_available": 0,
+        "p50_upper_bound": 0.25,
+        "p95_upper_bound": 0.25,
+        "p99_upper_bound": 0.5
+      },
+      "replay_duration_ms": {
+        "observed": 2549,
+        "mean": 7.618673989799921,
+        "maximum": 60,
+        "not_available": 0,
+        "p50_upper_bound": 0,
+        "p95_upper_bound": 40,
+        "p99_upper_bound": 40
+      },
+      "fallback_duration_snapshot_ms": {
+        "observed": 0,
+        "mean": null,
+        "maximum": null,
+        "not_available": 2549,
+        "p50_upper_bound": null,
+        "p95_upper_bound": null,
+        "p99_upper_bound": null
+      },
+      "raw_error_on_fallback_entry_units": {
+        "observed": 0,
+        "mean": null,
+        "maximum": null,
+        "not_available": 0,
+        "p50_upper_bound": null,
+        "p95_upper_bound": null,
+        "p99_upper_bound": null
+      }
+    },
+    "active_fps_equivalent": 59.01983822843017,
+    "active_interval_seconds": 43.17192449999999,
+    "full_active_bins": 42,
+    "full_active_bin_fps": {
+      "count": 42,
+      "mean": 59.027358128272205,
+      "p50_nearest_rank": 57.77621538494948,
+      "p95_nearest_rank": 70.79965376946456,
+      "p99_nearest_rank": 81.83031665538337,
+      "maximum": 81.83031665538337,
+      "minimum": 51.291283197277345
+    },
+    "full_active_bins_at_least_100fps": 0,
+    "bounded_scope": {
+      "frames": 144,
+      "first_frame": 2773,
+      "last_frame": 2916,
+      "not_whole_match": true,
+      "gpu_world_subpasses": {
+        "target_setup_clear": {
+          "count": 144,
+          "mean": 1.889716666666667,
+          "p50_nearest_rank": 1.66288,
+          "p95_nearest_rank": 3.67776,
+          "p99_nearest_rank": 3.996,
+          "maximum": 4.032,
+          "minimum": 1.536
+        },
+        "sky": {
+          "count": 144,
+          "mean": 1.8446894444444442,
+          "p50_nearest_rank": 1.794,
+          "p95_nearest_rank": 2.00144,
+          "p99_nearest_rank": 3.77472,
+          "maximum": 3.8088,
+          "minimum": 1.7224
+        },
+        "static_world": {
+          "count": 144,
+          "mean": 8.172524999999998,
+          "p50_nearest_rank": 8.46432,
+          "p95_nearest_rank": 9.94264,
+          "p99_nearest_rank": 10.12984,
+          "maximum": 10.41976,
+          "minimum": 5.97048
+        },
+        "runtime_brushes": {
+          "count": 144,
+          "mean": 0.186855,
+          "p50_nearest_rank": 0.07688,
+          "p95_nearest_rank": 1.02392,
+          "p99_nearest_rank": 2.6244,
+          "maximum": 2.94536,
+          "minimum": 0.0224
+        }
+      },
+      "gpu_passes": {
+        "studio_viewmodel": {
+          "count": 144,
+          "mean": 0.7164177772222224,
+          "p50_nearest_rank": 0.65496004,
+          "p95_nearest_rank": 1.06896,
+          "p99_nearest_rank": 2.56856,
+          "maximum": 2.8960001,
+          "minimum": 0.42024
+        },
+        "effects_decals": {
+          "count": 144,
+          "mean": 0.11447333343055556,
+          "p50_nearest_rank": 0.04368,
+          "p95_nearest_rank": 0.089200005,
+          "p99_nearest_rank": 2.13248,
+          "maximum": 2.2247999,
+          "minimum": 0.02616
+        },
+        "msaa_resolve": {
+          "count": 144,
+          "mean": 1.7494788888888881,
+          "p50_nearest_rank": 1.66984,
+          "p95_nearest_rank": 2.05208,
+          "p99_nearest_rank": 3.7252,
+          "maximum": 3.93072,
+          "minimum": 1.53984
+        },
+        "image_adjustments": {
+          "count": 144,
+          "mean": 0.000560555555555556,
+          "p50_nearest_rank": 0.00048,
+          "p95_nearest_rank": 0.00048,
+          "p99_nearest_rank": 0.0068,
+          "maximum": 0.00712,
+          "minimum": 0.0004
+        },
+        "hud_console": {
+          "count": 144,
+          "mean": 0.2592816666666667,
+          "p50_nearest_rank": 0.03968,
+          "p95_nearest_rank": 1.96776,
+          "p99_nearest_rank": 2.09064,
+          "maximum": 2.13168,
+          "minimum": 0.0324
+        }
+      },
+      "gpu_total": {
+        "count": 144,
+        "mean": 14.934698333333333,
+        "p50_nearest_rank": 14.88232,
+        "p95_nearest_rank": 16.21072,
+        "p99_nearest_rank": 16.55528,
+        "maximum": 16.64808,
+        "minimum": 12.32
+      },
+      "selection_ms": {
+        "count": 144,
+        "mean": 0.05292152777777778,
+        "p50_nearest_rank": 0.0479,
+        "p95_nearest_rank": 0.0759,
+        "p99_nearest_rank": 0.128,
+        "maximum": 0.1402,
+        "minimum": 0.0168
+      }
+    },
+    "p1_counters": {
+      "direct_adjustment_frames": 0,
+      "output_color_blits": 3000,
+      "resolved_texture_reads": 0,
+      "framebuffer_copies": 0,
+      "adjusted_frames": 0,
+      "neutral_frames": 3003,
+      "resolved_frames": 3000
+    },
+    "witnesses": [
+      {
+        "frame_number": 660,
+        "monotonic_us": 9804254,
+        "frame_interval_ms": 43.6253,
+        "cpu_update_ms": 38.3493,
+        "studio_ms": 27.046699999999998,
+        "parse_commit_ms": 4.8255,
+        "submission_ms": 3.7005,
+        "gpu_ms": 11.24856,
+        "eye": [
+          -532.9486083984375,
+          920.6676025390625,
+          -1631.9779052734375
+        ],
+        "final_angles": [
+          2.7,
+          -148.8,
+          0
+        ],
+        "static_world": {
+          "path": "prepared_selected",
+          "fallback_reason": "none",
+          "resource_id": 16669263479570096000,
+          "resource_revision": 10604994978005289000,
+          "considered_blocks": 272,
+          "tested_bounds": 260,
+          "selected_blocks": 89,
+          "considered_surfaces": 3738,
+          "selected_surfaces": 1289,
+          "submitted_draws": 36,
+          "submitted_triangles": 3584,
+          "prepared_rebuilds": null,
+          "selection_preparation_ms": 0.0588
+        },
+        "gpu_passes": {
+          "status": "ready",
+          "valid_mask": 63,
+          "world": 8.62632,
+          "studio_viewmodel": 0.6508,
+          "effects_decals": 0.03224,
+          "msaa_resolve": 1.88944,
+          "image_adjustments": 0.00048,
+          "hud_console": 0.04872,
+          "world_subpasses": {
+            "valid_mask": 15,
+            "target_setup_clear": 1.57416,
+            "sky": 1.72408,
+            "static_world": 5.31152,
+            "runtime_brushes": 0.01656
+          }
+        }
+      },
+      {
+        "frame_number": 710,
+        "monotonic_us": 10620251,
+        "frame_interval_ms": 53.2252,
+        "cpu_update_ms": 20.6402,
+        "studio_ms": 6.1386,
+        "parse_commit_ms": 5.335699999999999,
+        "submission_ms": 3.0932,
+        "gpu_ms": 10.51264,
+        "eye": [
+          -781.3941040039062,
+          815.1005859375,
+          -1632
+        ],
+        "final_angles": [
+          -6.4,
+          143.5,
+          0
+        ],
+        "static_world": {
+          "path": "prepared_selected",
+          "fallback_reason": "none",
+          "resource_id": 16669263479570096000,
+          "resource_revision": 10604994978005289000,
+          "considered_blocks": 272,
+          "tested_bounds": 247,
+          "selected_blocks": 35,
+          "considered_surfaces": 3738,
+          "selected_surfaces": 520,
+          "submitted_draws": 21,
+          "submitted_triangles": 1517,
+          "prepared_rebuilds": null,
+          "selection_preparation_ms": 0.0444
+        },
+        "gpu_passes": {
+          "status": "ready",
+          "valid_mask": 63,
+          "world": 7.83696,
+          "studio_viewmodel": 0.53016,
+          "effects_decals": 0.04312,
+          "msaa_resolve": 2.0464,
+          "image_adjustments": 0.00048,
+          "hud_console": 0.0548,
+          "world_subpasses": {
+            "valid_mask": 15,
+            "target_setup_clear": 1.62048,
+            "sky": 1.72304,
+            "static_world": 4.43456,
+            "runtime_brushes": 0.05888
+          }
+        }
+      },
+      {
+        "frame_number": 2875,
+        "monotonic_us": 47510212,
+        "frame_interval_ms": 17.4389,
+        "cpu_update_ms": 3.0978,
+        "studio_ms": 2.086,
+        "parse_commit_ms": 0,
+        "submission_ms": 1.6254,
+        "gpu_ms": 16.22144,
+        "eye": [
+          -898.7626342773438,
+          54.29488754272461,
+          -1471.9969482421875
+        ],
+        "final_angles": [
+          -4.5,
+          18.2,
+          0
+        ],
+        "static_world": {
+          "path": "prepared_selected",
+          "fallback_reason": "none",
+          "resource_id": 16669263479570096000,
+          "resource_revision": 10604994978005289000,
+          "considered_blocks": 272,
+          "tested_bounds": 273,
+          "selected_blocks": 173,
+          "considered_surfaces": 3738,
+          "selected_surfaces": 2510,
+          "submitted_draws": 48,
+          "submitted_triangles": 6894,
+          "prepared_rebuilds": null,
+          "selection_preparation_ms": 0.0507
+        },
+        "gpu_passes": {
+          "status": "ready",
+          "valid_mask": 63,
+          "world": 13.92912,
+          "studio_viewmodel": 0.5988,
+          "effects_decals": 0.0288,
+          "msaa_resolve": 1.62856,
+          "image_adjustments": 0.00048,
+          "hud_console": 0.03496,
+          "world_subpasses": {
+            "valid_mask": 15,
+            "target_setup_clear": 1.61152,
+            "sky": 1.84864,
+            "static_world": 10.41976,
+            "runtime_brushes": 0.0492
+          }
+        }
+      },
+      {
+        "frame_number": 2908,
+        "monotonic_us": 48081106,
+        "frame_interval_ms": 17.4215,
+        "cpu_update_ms": 12.0253,
+        "studio_ms": 3.3206,
+        "parse_commit_ms": 3.3049999999999997,
+        "submission_ms": 2.2903,
+        "gpu_ms": 16.64808,
+        "eye": [
+          -917.7095947265625,
+          224.34974670410156,
+          -1471.982666015625
+        ],
+        "final_angles": [
+          -3.2,
+          27,
+          0
+        ],
+        "static_world": {
+          "path": "prepared_selected",
+          "fallback_reason": "none",
+          "resource_id": 16669263479570096000,
+          "resource_revision": 10604994978005289000,
+          "considered_blocks": 272,
+          "tested_bounds": 276,
+          "selected_blocks": 165,
+          "considered_surfaces": 3738,
+          "selected_surfaces": 2418,
+          "submitted_draws": 47,
+          "submitted_triangles": 6637,
+          "prepared_rebuilds": null,
+          "selection_preparation_ms": 0.0496
+        },
+        "gpu_passes": {
+          "status": "ready",
+          "valid_mask": 63,
+          "world": 13.9364,
+          "studio_viewmodel": 0.87928,
+          "effects_decals": 0.05528,
+          "msaa_resolve": 1.72544,
+          "image_adjustments": 0.00048,
+          "hud_console": 0.05048,
+          "world_subpasses": {
+            "valid_mask": 15,
+            "target_setup_clear": 3.84336,
+            "sky": 1.89184,
+            "static_world": 8.13584,
+            "runtime_brushes": 0.06536
+          }
+        }
+      }
+    ],
+    "scope_caveats": [
+      "CPU/GPU/present may overlap; never summed.",
+      "Studio is nested inclusive CPU scope.",
+      "GPU elapsed is not pure shader busy time.",
+      "Histogram percentile upper bounds are not exact raw percentiles.",
+      "Camera seeds are not a historical complete RenderScene replay."
+    ]
+  },
+  "previous_cpu_integration": {
+    "report": "docs/CPU_STUDIO_SUBMISSION_0C29F4CA.md",
+    "final_status": "no_candidate_accepted_source_restored",
+    "rejected_variants_not_reintroduced": [
+      "local-only child merge/reserve",
+      "GL state cache",
+      "B2 metadata plan",
+      "B3 command-local setters"
+    ],
+    "previous_accepted_A_D_metadata_and_pose_paths_preserved": true,
+    "retained_regression_tests_preserved": true,
+    "previous_counts_reused_as_new_proof": false
+  },
+  "candidates": {
+    "P1": {
+      "status": "P1inactive_notaccepted",
+      "acceptance_rule": "All correctness exact; primary4 resolve GPU p50 median paired gain > max(B0 run-p50 span,5% B0 median)+0.01ms and >=2/3 positive. Full GPU/CPU owned subset and all controls reject recurring >=2/3 p50 or p95 or p99 regressions above same B0-only gate. Max retained separately. No scope sums/no liveFPS claim.",
+      "process_counts": {
+        "planned": 54,
+        "executed": 54,
+        "passed": 54,
+        "skipped": 0,
+        "failed": 0,
+        "retries": 0
+      },
+      "raw_samples_verified": 10368,
+      "assertions": 59430,
+      "correctness_exact": true,
+      "neutral_direct_resolve_active": false,
+      "primary_timing_gate_passed": false,
+      "recurring_tail_warning_count": 61,
+      "changed_scope": [
+        "src/renderer/opengl/opengl_scene_target.hpp",
+        "neutral_msaa_output_compatible",
+        "SceneTarget::begin",
+        "SceneTarget::resolve"
+      ],
+      "source_and_libraries": "P1-frozen",
+      "correctness": {
+        "cases": 16,
+        "passed": 16,
+        "failed": 0,
+        "assertions": 1230062,
+        "log": "P1-correctness.log"
+      },
+      "actual_offline_context": {
+        "major": 3,
+        "minor": 3,
+        "default_encoding": "sRGB",
+        "rgba_bits": [
+          8,
+          8,
+          8,
+          8
+        ],
+        "default_samples": 0,
+        "neutral_direct_eligible": false,
+        "target_pc_context_claim": false
+      },
+      "preserved_failed_build": {
+        "path": "isolated-fixtures/B0/msaa4_p1_b0/build.log",
+        "status": "failed_link",
+        "codes": [
+          "LNK2019",
+          "LNK1120"
+        ],
+        "cause": "Fixture omitted gauss_world_visibility_control.cpp; separate _linkfix targets supplied it.",
+        "timing_retry": false
+      },
+      "performance_gain_claim": false
+    },
+    "P1b": {
+      "status": "rejected_long_corroboration_failed_source_withdrawn",
+      "scope": [
+        "SceneTargetFrame framebuffer sRGB capture/restore",
+        "SceneTarget allocation format/key/lifecycle",
+        "neutral same-format GL_SRGB8_ALPHA8 eligibility",
+        "renderer wants_adjustment input"
+      ],
+      "prelazy_attempt": {
+        "status": "failed",
+        "cases": 19,
+        "passed": 18,
+        "failed": 1,
+        "assertions": 1230243,
+        "assertions_passed": 1230242,
+        "assertions_failed": 1,
+        "log": "P1b-prelazy-correctness.log",
+        "assertion": "same_available_channels(adjusted,draw_to_custom_color(*context,scene,caller_format),output.alpha)",
+        "line_at_failure": "tests/test_msaa_e311.cpp:625",
+        "srgb_enabled": true,
+        "cause_status": "Legacy default-vs-custom sRGB mismatch reproduced independently in both B0 and B1; corresponding B0-vs-B1 pipelines exact. Original failing attempt retained.",
+        "tolerances_relaxed": false
+      },
+      "followup_root_reported_not_yet_integrated": {
+        "status": "superseded_by_verified_long_corroboration_below",
+        "initial_campaign": "P1b_notaccepted_nine_flags"
+      },
+      "final_source_sha": null,
+      "final_correctness": null,
+      "final_timings": null,
+      "final_verdict": "rejected_not_accepted",
+      "adjusted_pipeline_diagnostic": {
+        "path": "P1b-adjusted-diagnostic-20261024T140938213Z-7f72a4",
+        "independent_B0_B1_binaries": true,
+        "cases_each": 1,
+        "assertions_each": 77,
+        "B0_B1_corresponding_pipeline_exact": true,
+        "srgb_off": {
+          "default_fnv1a64": "12422780832854808869",
+          "custom_fnv1a64": "12422780832854808869"
+        },
+        "srgb_on": {
+          "default_fnv1a64": "16646336782649773805",
+          "custom_fnv1a64": "12218293762972316198"
+        },
+        "tolerances_relaxed": false
+      },
+      "lazy_correctness": {
+        "log": "P1b-lazy-correctness.log",
+        "status": "passed",
+        "cases": 20,
+        "assertions": 1230284,
+        "not_final_shipped_source_proof": true
+      },
+      "long_corroboration": {
+        "status": "long_corroboration_failed_notaccepted",
+        "accepted": false,
+        "processes": 78,
+        "raw_samples_verified": 119808,
+        "rule": "UNCHANGED: for every group/scope/p50,p95,p99 independently, gate=max(B0 repeated same-quantile span,5% B0 same-quantile median)+0.01 ms; reject recurring >=2/3 adverse pairs over that gate. Primary resolve p50 median paired gain must exceed its own B0 gate and >=2/3 pairs positive. Full GPU total, CPU owned_subset, all controls and other scoped tails retain these same gates; max is reported separately. Exact output/depth/geometry and active neutral direct path remain required. No pooled runs, discarded samples, changed thresholds, scope sums, live FPS claim or automatic acceptance.",
+        "decision": "Original initial failures remain immutable. This analyzer cannot accept the candidate; independent review must reconcile original, long and null evidence. Null regressions cannot excuse candidate regressions.",
+        "null_exact": true,
+        "null_flags": [
+          {
+            "group": "aa8",
+            "scope": "gpu_total",
+            "quantile": "p99",
+            "gate_ms": 0.1863866,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.20898800000000017,
+              -0.17097600000000002,
+              -0.3451240000000002
+            ]
+          },
+          {
+            "group": "aa8",
+            "scope": "gpu_world",
+            "quantile": "p99",
+            "gate_ms": 0.11463700294494629,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.15522003173828125,
+              -0.08085966110229492,
+              -0.35562801361083984
+            ]
+          },
+          {
+            "group": "aa8",
+            "scope": "gpu_msaa_resolve",
+            "quantile": "p99",
+            "gate_ms": 0.07178640127182007,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.09531605243682861,
+              -0.006031990051269531,
+              -0.09812402725219727
+            ]
+          }
+        ],
+        "long_exact": true,
+        "long_flags": [
+          {
+            "group": "secondary4",
+            "scope": "gpu_world",
+            "quantile": "p99",
+            "gate_ms": 0.18004001140594483,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.3023279905319214,
+              -0.3377399444580078,
+              0.0852280855178833
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "studio_prepare",
+            "quantile": "p50",
+            "gate_ms": 0.052445000000000006,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.13180000000000003,
+              -0.21320000000000006,
+              0.015600000000000058
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "studio_prepare",
+            "quantile": "p95",
+            "gate_ms": 0.1035999999999999,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.7933000000000001,
+              -0.8061,
+              0.021199999999999886
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "studio_prepare",
+            "quantile": "p99",
+            "gate_ms": 0.4128999999999998,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.48439999999999994,
+              -0.8917999999999999,
+              -0.14100000000000001
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "viewmodel_scene_prepare",
+            "quantile": "p95",
+            "gate_ms": 0.01448,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.0651,
+              -0.05639999999999999,
+              -0.004400000000000001
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "viewmodel_scene_prepare",
+            "quantile": "p99",
+            "gate_ms": 0.026900000000000014,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.0572,
+              -0.058300000000000005,
+              -0.01419999999999999
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "render_submit",
+            "quantile": "p50",
+            "gate_ms": 0.028565,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.02949999999999997,
+              -0.05499999999999999,
+              0.016800000000000037
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "render_submit",
+            "quantile": "p95",
+            "gate_ms": 0.035155,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.3822,
+              -0.2898,
+              -0.01970000000000005
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "render_submit",
+            "quantile": "p99",
+            "gate_ms": 0.20509999999999995,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.36150000000000004,
+              -0.4354,
+              -0.1049
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "owned_subset",
+            "quantile": "p50",
+            "gate_ms": 0.07671,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.18600000000000017,
+              -0.3044,
+              0.028999999999999915
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "owned_subset",
+            "quantile": "p95",
+            "gate_ms": 0.1613,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -1.1810999999999998,
+              -1.1300999999999999,
+              -0.011199999999999877
+            ]
+          },
+          {
+            "group": "one4",
+            "scope": "owned_subset",
+            "quantile": "p99",
+            "gate_ms": 0.32510000000000017,
+            "adverse_pairs": 3,
+            "gains_ms": [
+              -1.0355999999999996,
+              -1.2817000000000003,
+              -0.45310000000000006
+            ]
+          },
+          {
+            "group": "many4",
+            "scope": "studio_prepare",
+            "quantile": "p95",
+            "gate_ms": 0.08190000000000007,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.3409,
+              -0.37739999999999996,
+              0.07420000000000004
+            ]
+          },
+          {
+            "group": "many4",
+            "scope": "studio_prepare",
+            "quantile": "p99",
+            "gate_ms": 0.45940000000000003,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.6147,
+              -0.8266000000000002,
+              0.40159999999999996
+            ]
+          },
+          {
+            "group": "many4",
+            "scope": "viewmodel_scene_prepare",
+            "quantile": "p95",
+            "gate_ms": 0.015900000000000004,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.024500000000000008,
+              -0.0232,
+              0.0059999999999999915
+            ]
+          },
+          {
+            "group": "many4",
+            "scope": "render_submit",
+            "quantile": "p95",
+            "gate_ms": 0.05159999999999997,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.15539999999999998,
+              -0.11639999999999995,
+              0.04219999999999996
+            ]
+          },
+          {
+            "group": "many4",
+            "scope": "owned_subset",
+            "quantile": "p95",
+            "gate_ms": 0.17320000000000002,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.5754000000000001,
+              -0.5865999999999998,
+              0.15549999999999997
+            ]
+          },
+          {
+            "group": "many4",
+            "scope": "owned_subset",
+            "quantile": "p99",
+            "gate_ms": 0.5105000000000002,
+            "adverse_pairs": 2,
+            "gains_ms": [
+              -0.9686000000000003,
+              -1.0193000000000003,
+              0.6115999999999999
+            ]
+          }
+        ],
+        "analysis": "P1b-world-corroboration-analysis.json",
+        "null_failures_do_not_waive_candidate_failures": true,
+        "no_new_performance_pass_claim": true
+      },
+      "withdrawal": {
+        "status": "completed_header_test_exact_B0_readonly_SHA256_verified",
+        "expected_B0": {
+          "src/renderer/opengl/opengl_scene_target.hpp": "de22ec4855b422696594ca83e8b2e8e51c2762cfc695386f9778f42047f28d7a",
+          "tests/test_msaa_e311.cpp": "c2f1916efd88da9f7e09baad59f0faeebe35406dd005f132fb7c727ec1d2166a"
+        },
+        "snapshot_candidate_hashes_not_accepted": {
+          "src/renderer/opengl/opengl_scene_target.hpp": "49ecef37a142386e626119eb9fa10bdbe3bb4b5d139c78045e1cb074a746ba57",
+          "tests/test_msaa_e311.cpp": "6bff18b09247bbc72ff56c0273b504370fa353c9c20283fb23f26941ea1f893f"
+        },
+        "verified_restored_sha256": {
+          "src/renderer/opengl/opengl_scene_target.hpp": "de22ec4855b422696594ca83e8b2e8e51c2762cfc695386f9778f42047f28d7a",
+          "tests/test_msaa_e311.cpp": "c2f1916efd88da9f7e09baad59f0faeebe35406dd005f132fb7c727ec1d2166a"
+        },
+        "renderer_callsite_restored": "root_reported_before_independent_P2",
+        "final_renderer_consumer_relink": "Release_21_project_build_and_final_canonical_runtime_passed"
+      }
+    },
+    "P2": {
+      "status": "initial_CPU_AABB_proof_blocked_by_independent_review",
+      "prepared_patch": "candidate-P2.patch",
+      "review": "P2-PREAPPLY-REVIEW.txt",
+      "intended_scope": "Conservative zero-contribution-light routing for prepared static-world draws using existing no-light shader; preserve precision/near/tangent/unsupported fallback.",
+      "final_source_sha": null,
+      "final_correctness": null,
+      "final_timings": null,
+      "final_verdict": "initial_CPU_AABB_candidate_blocked_before_build_all_bounded_followups_rejected",
+      "scope_audit": {
+        "target_setup_clear": "Includes validation/preparation, target allocation/cache decisions, state setup and clear; timer starts before glClear.",
+        "sky": "Necessary view-dependent sky pass.",
+        "proved_redundant_clear_removed": false,
+        "timer_boundaries_moved": false
+      },
+      "initial_candidate_review": {
+        "status": "blocked_before_build_or_measurement",
+        "cause": "Non-centroid MSAA interpolation may evaluate fragment inputs outside geometric primitive bounds; CPU geometric AABB alone does not prove zero contribution for every evaluated fragment.",
+        "build": "not_run",
+        "measurements": "not_run",
+        "performance_gain_claimed": false
+      },
+      "next_candidate": "none_after_final_P2d_rejection"
+    },
+    "P3": {
+      "status": "rejected_not_beneficial_compiler_already_hoisted",
+      "attempt_source_sha256": "06a79d01b5b180dc9f5cac1ac9419905171e96c3e5b0953e227d385fa05d8947",
+      "restored_production_source": "src/entity_render/entity_render_frame_composer.cpp",
+      "restored_source_sha256": "62e4a05de3193a6be698ed6e2ab5341f29076ac29278a2482c2ee2780fb59cb7",
+      "exact_b0_restored": true,
+      "forbidden_withdrawn_candidate_library_sha256": "b82880aa5f97f29a8cf68180f6990bf21669ef00b6ebd516fbbc76f3ed6448f6",
+      "compiled_proof": {
+        "symbol": "transformed_bounds in entity_render_frame_composer.obj",
+        "tool": "dumpbin14.34.31948.0",
+        "baseline_trig_calls": [
+          "0x73",
+          "0x85",
+          "0x97",
+          "0xA6",
+          "0xB5",
+          "0xC7"
+        ],
+        "baseline_loop_entry": "0x131",
+        "baseline_backedge": "0x3D1 -> 0x131",
+        "candidate_trig_calls": [
+          "0x6F",
+          "0x81",
+          "0x93",
+          "0xA2",
+          "0xB1",
+          "0xC3"
+        ],
+        "runtime_48_to_6_saving_exists": false
+      },
+      "retained_test": {
+        "file": "tests/test_entity_render_frame_composer.cpp",
+        "tag": "[50b5-bounds]",
+        "oracle": "independent original double arithmetic and bitwise float bounds or matching rejection",
+        "edge_inputs": 600,
+        "fixed_seed_inputs": 4096,
+        "invalid_overflow_inputs": 18,
+        "execution": "passed_one_case_in_both_final_focused_Release_and_Debug"
+      },
+      "microbenchmark_added": false,
+      "microbenchmark_executed": false
+    },
+    "P2b": {
+      "status": "rejected_source_withdrawn_frozen_campaign_preserved",
+      "baseline": "Independent original B0; rejected P1/P1b not included",
+      "scope": "Bounded shader-local zero-contribution light guard; not CPU geometric-AABB proof",
+      "correctness": {
+        "attempt": "P2b-proof-20261024T150058728Z-b5fd5d",
+        "independent_variants": [
+          "B0",
+          "B1"
+        ],
+        "cases_each": 1,
+        "assertions_each": 6973,
+        "exact_color_depth_pairs_each": 512,
+        "non_exact_pairs_each": 0,
+        "actual_AA_modes": [
+          0,
+          2,
+          4,
+          8
+        ],
+        "B0_stdout_sha256": "225dac45305c24617c27e805c3617e4bac9ba6ba11f6e340cfef005a9fa8cd39",
+        "B1_stdout_sha256": "1c92171a249ea4b290500418abfaa0c01969e11d9b46abb0029715a08f0da0ef"
+      },
+      "campaign": {
+        "status": "completed_rejected",
+        "plan": "P2b-campaign-plan.json",
+        "planned_processes": 60,
+        "groups": 10,
+        "paired_repeats": 3,
+        "warm_frames": 128,
+        "samples_per_process": 1536,
+        "primary_scope": "one-light primary4 gpu_static_world",
+        "controls": [
+          "none4",
+          "far4",
+          "many4",
+          "secondary4",
+          "off",
+          "aa2",
+          "aa8",
+          "adjusted4",
+          "diagnosticsOff4"
+        ],
+        "baseline_only_per_scope_quantile_noise_gates": true,
+        "far_only_gain_cannot_rescue_primary": true,
+        "whole_GPU_owned_CPU_operations_exact_controls_required": true,
+        "performance_acceptance": "rejected",
+        "analysis": "P2b-campaign-analysis.json",
+        "analysis_sha256": "91bee56db2cc093ba79678a3a02e6d2c62fc93653c9dac930d8e26f205f0c2b4",
+        "executed_processes": 60,
+        "passed_processes": 60,
+        "skipped_processes": 0,
+        "failed_processes": 0,
+        "retries": 0,
+        "assertions": 494484,
+        "raw_samples": 92160,
+        "all_exact_controls": true,
+        "required_operations_preserved": true,
+        "primary_gain_ms": -1.9983079433,
+        "primary_noise_gate_ms": 0.1448776,
+        "recurring_scope_tail_flags": 89,
+        "accepted": false
+      },
+      "final_verdict": "rejected_not_accepted"
+    },
+    "P2c": {
+      "status": "rejected_primary_R1_completed_original_interruption_preserved",
+      "source_scope": "Opaque-lit count==1 literal effect index0 specialization only; otherwise original loop. No rejected P1/P1b/P2b code.",
+      "source_sha256": {
+        "src/renderer/opengl/opengl_renderer.cpp": "59ec72f6f8e83fc9cc856f53d649482b38bf5fa897bf3494bb86ad8a15f76084",
+        "tests/test_opengl_world_renderer.cpp": "768b5fbb3525be34e3de02cd5d786be332812b1d015f918565748a3ca8bee0fa"
+      },
+      "compiled_fixture_executables": 4,
+      "frozen_manifest": "P2c-frozen/frozen-manifest.json",
+      "current_production_library": "historical_rejected_P2c_not_an_accepted_delivery",
+      "correctness": {
+        "attempt": "P2c-proof-20261024T151649537Z-3d9399",
+        "cases_each": 1,
+        "assertions_each": 6973,
+        "exact_color_depth_pairs_each": 512,
+        "actual_AA_modes": [
+          0,
+          2,
+          4,
+          8
+        ],
+        "B0_compiled_specialized_shader_sources": 0,
+        "B1_compiled_specialized_shader_sources": 32,
+        "states": 32,
+        "layouts": 4
+      },
+      "campaign": {
+        "status": "interrupted_incomplete_not_performance_verdict",
+        "session": 5214,
+        "attempt": "P2c-primary4-20261024T151653-5d14a1",
+        "manifest_status": "failed",
+        "manifest_sha256": "77e835d61e8579c5ce3bce1005aa8b69946c295ae26ceec8e9f4ee318077a372",
+        "started_utc": "2026-10-24T15:16:53.9544945Z",
+        "interrupted_utc": "2026-10-24T15:17:13.0814264Z",
+        "completed_runs": 2,
+        "retained_B0_B1_pairs": 1,
+        "run_exit_codes": [
+          0,
+          0
+        ],
+        "guard_error": "Concurrent build/test/game exists; no process will be terminated",
+        "specific_interfering_process": "not_established",
+        "evidence_agent_compiled_program_or_CTest_discovery_during_interruption": false,
+        "silent_retry_or_pooling_allowed": false,
+        "next_attempt": "one_bounded_R1_completed_same_frozen_binaries_primary_rejected_recorded_below"
+      },
+      "required_analyzer_arguments": [
+        "-BaselineSingleEffectProofLog",
+        "-CandidateSingleEffectProofLog"
+      ],
+      "final_verdict": "rejected_primary_gate_failed",
+      "restart1": {
+        "status": "completed_primary_failed_notaccepted",
+        "reason": "Host-idle guard orchestration interruption, not performance-based selection",
+        "runner": "run-P2c-restart1-campaign.ps1",
+        "host_guard": "run-P2c-restart1-interleaved.ps1",
+        "analyzer": "analyze-P2c-restart1-campaign.ps1",
+        "same_frozen_executables_harness_settings": true,
+        "warm": 128,
+        "samples": 1536,
+        "original_completed_runs_retained": 2,
+        "original_runs_excluded_from_restart_metrics": true,
+        "exclusion_reason": "Original three-pair group interrupted; no partial pairing or sample selection",
+        "fresh_primary_pairs": 3,
+        "primary_screen": "reject_only_unchanged_primary_gate",
+        "other_nine_groups_if_primary_fails": "not_run",
+        "acceptance_requires_all_processes": 60,
+        "all_original_gates_required": true,
+        "further_automatic_retries": false,
+        "pooling": false,
+        "analysis": "P2c-restart1-campaign-analysis.json",
+        "analysis_sha256": "7bbfa7e844065c335a02c1a75ba5eebf4045bffb8810e47b9cdf81157c4578e0",
+        "planned_processes": 60,
+        "executed_processes": 6,
+        "passed_processes": 6,
+        "not_run_processes": 54,
+        "failed_processes": 0,
+        "skipped_processes": 0,
+        "process_retries": 0,
+        "orchestration_retry_count": 1,
+        "assertions": 50442,
+        "raw_samples": 9216,
+        "exact_controls": true,
+        "primary_gain_ms": -0.1069118976593,
+        "primary_gate_ms": 0.14213200569,
+        "recurring_scope_tail_flags": 5,
+        "accepted": false,
+        "no_full_control_campaign_pass_claim": true
+      }
+    },
+    "P2d": {
+      "status": "rejected_primary_gain_below_noise_gate",
+      "scope": "Full nested ordered uniform count guards with literal effect indices0..7, only opaque-lit shader differs from original B0.",
+      "renderer_source_sha256": "c85cb681b085b947271382b1a79ed113630b910816c39697a58131d1a6f0c2c8",
+      "proof_harness_sha256": "322386c51acc1ea6c7d5d78765dbfe23ba0dc126d82a4d3bc23296ecdaf15b86",
+      "built": true,
+      "correctness": {
+        "attempt": "P2d-proof-20261024T153948561Z-c00218",
+        "variants": 2,
+        "cases_each": 1,
+        "assertions_each": 7621,
+        "exact_unique_color_resolved_depth_pairs_each": 560,
+        "actual_AA_modes": [
+          0,
+          2,
+          4,
+          8
+        ],
+        "states": 35,
+        "layouts": 4,
+        "program_receipts_each": 280,
+        "program_receipts_identical": true,
+        "shader_source_probe_B0": 0,
+        "shader_source_probe_B1": 32,
+        "previous_32_numeric_states_unchanged": true,
+        "extra_light_counts": [
+          4,
+          5,
+          7
+        ],
+        "individual_MSAA_depth_samples_separately_read": false
+      },
+      "independent_review": {
+        "path": "P2d-independent-source-review.json",
+        "sha256": "f3b1b4c4800b94a9abf1b33b9bdaab88b9481fd72ac9e0e6271e7d55e9623067",
+        "status": "historical_review_source_and_offline_correctness_verified_before_final_R1_performance_rejection",
+        "mechanical_entire_shader_expansion_verified": true,
+        "all_other_renderer_bytes_exact_B0": true,
+        "accepted_for_delivery": false,
+        "test_host_not_target_GPU": true
+      },
+      "campaign": {
+        "status": "interrupted_confirmed_external_compilation_not_performance_rejection",
+        "attempt": "P2d-primary4-20261024T153954-1847be",
+        "manifest_sha256": "bd6a5462a4b6d40066b845f569f77da15870e773cd5375687b21750521f301eb",
+        "completed_processes": 1,
+        "completed_variant": "B0",
+        "completed_run_exit_code": 0,
+        "complete_pairs": 0,
+        "candidate_timing_runs": 0,
+        "baseline_stdout_sha256": "f73e638214befa27a4b03d5e7c5441c426bfe3cedf82253c4b069df75b5ef653",
+        "busy_inventory_utc": "2026-10-24T15:40:04.4181063Z",
+        "busy_processes": [
+          {
+            "name": "MSBuild.exe",
+            "pid": 12736,
+            "parent_pid": 2320
+          },
+          {
+            "name": "cl.exe",
+            "pid": 15560,
+            "parent_pid": 21800
+          }
+        ],
+        "completed_utc": "2026-10-24T15:40:04.6901496Z",
+        "processes_terminated": false,
+        "original_logs_preserved": true
+      },
+      "restart1": {
+        "status": "completed_primary_failed_notaccepted",
+        "bounded": true,
+        "same_source_proof_and_gates": true,
+        "automatic_performance_acceptance": false,
+        "analysis": "P2d-restart1-campaign-analysis.json",
+        "analysis_sha256": "bf58f9799ab386934e74a7b3479d80f870565a16650b4bf04a455ec42e873ac7",
+        "planned_processes": 60,
+        "executed_processes": 6,
+        "passed_processes": 6,
+        "skipped_processes": 0,
+        "failed_processes": 0,
+        "not_run_processes": 54,
+        "process_retries": 0,
+        "orchestration_restarts": 1,
+        "assertions": 50442,
+        "raw_samples": 9216,
+        "exact_equality": true,
+        "primary_gain_ms": 0.041964054107666,
+        "primary_gate_ms": 0.1418303942680359,
+        "recurring_flags": 0,
+        "unmatched_original_B0_process_preserved": 1,
+        "original_interrupted_campaign_not_performance_rejection": true,
+        "immutable_analysis_naming_caveat": "excluded_candidate_processes=1 is a misnamed field: actual retained exclusion is one incomplete baseline B0 process, with no B1 process; original analysis unchanged."
+      },
+      "performance": "rejected_positive_gain_below_measured_B0_noise_gate_no_recurring_regression_flags",
+      "accepted": false,
+      "accepted_for_delivery": false,
+      "last_bounded_candidate": true,
+      "withdrawal": {
+        "status": "production_renderer_restored_exact_B0",
+        "renderer_source_sha256": "e477a6ac45ddcb06e3a9841966e373048b620a18897a1c2d1c0712bf2507ca33",
+        "attempt_source_preserved": "P2d-withdrawn-source/manifest.json",
+        "manifest_sha256": "d587ba71859736403747d167dfd7c250e2333440cedf41f141140b954e89d0f4",
+        "matching_library_rebuild_and_final_quality": "Release_library_21_consumers_and_Debug_graphs_rebuilt_final_baseline_runtime_passed",
+        "rebuilt_renderer_library_sha256": "b859aef5186ee222f038b65bb984e4ba7c777c1fda276cc937c2ed3e654d4437"
+      }
+    }
+  },
+  "quality": {
+    "status": "baseline_offline_quality_passed_with_explicit_skips",
+    "scripts_preparation_is_not_execution": true,
+    "scripts_static_parse": "passed_at_preparation",
+    "build_compiler": "MSVC14.34.31933",
+    "architecture": "Win32",
+    "parallelism": "/m:1 /nr:false",
+    "active_four_binary_guards": true,
+    "private_candidate_build_script": "build-private-candidate.ps1",
+    "focused_script": "run-quality-focused.ps1",
+    "full_ctest_script": "run-quality-full-ctest.ps1",
+    "shadow_script": "new-quality-ctest-shadow.ps1",
+    "asan_script": "run-quality-asan-core.ps1",
+    "source_manifest_script": "write-quality-source-manifest.ps1",
+    "orchestration_failures_preserved": [
+      {
+        "attempt": 1,
+        "status": "failed_before_compilation",
+        "cause": "Broad ProjectReference XPath included defaults node without Include attribute.",
+        "fix": "ItemGroup/ProjectReference[@Include], GetAttribute and element checks."
+      },
+      {
+        "attempt": 2,
+        "status": "failed_before_compilation",
+        "cause": "Non-explicit normal client dependency rejected before build.",
+        "fix": "Record non-explicit delivery executable dependencies as existing/not built; still forbid explicit delivery executable targets."
+      }
+    ],
+    "focused_debug": {
+      "status": "passed",
+      "attempt": "quality-focused-Debug-20261024T161517241Z-a893f7",
+      "summary_sha256": "915fbc996f90841da681b88f5c801870ccf31ecdbf37b061a7c3b9668e403810",
+      "gates": 33,
+      "executed": 339,
+      "skipped": 5,
+      "failures": 0,
+      "application_gates_skipped_in_this_runner": true,
+      "application_coverage": "separate_canonical_Release_full_suite_passed_with_explicit_skips",
+      "active_four_binaries_unchanged": true,
+      "optional_skips": [
+        "installed weapon MDL/WAV read",
+        "installed HUD full coverage",
+        "installed menu WAV decode without playback",
+        "installed SPR HUD pixels/layout",
+        "installed Steam runtime signed-x86 inspection without initialization"
+      ]
+    },
+    "focused_release": {
+      "status": "passed",
+      "attempt": "quality-focused-Release-20261024T161448960Z-358349",
+      "summary_sha256": "5b1406c6046c71614859a2945488945e0377e98d6c18c64ecff602d05f2ff265",
+      "gates": 33,
+      "executed": 339,
+      "skipped": 5,
+      "failures": 0,
+      "application_gates_skipped_in_this_runner": true,
+      "application_coverage": "separate_canonical_Release_full_suite_passed_with_explicit_skips",
+      "active_four_binaries_unchanged": true,
+      "optional_skips": [
+        "installed weapon MDL/WAV read",
+        "installed HUD full coverage",
+        "installed menu WAV decode without playback",
+        "installed SPR HUD pixels/layout",
+        "installed Steam runtime signed-x86 inspection without initialization"
+      ]
+    },
+    "msaa_opaque_gl33_final": "passed_focused_Debug_Release_and_final_canonical_suite",
+    "actual_assets_final": "bounded_candidate_asset_campaigns_recorded_all_rejected_no_accepted_candidate",
+    "synthetic_final": "bounded_candidate_proof_controls_passed_no_accepted_performance_candidate",
+    "null": "passed_final_canonical_Release",
+    "core_only": "Release_and_Debug_two_named_core_API_architecture_gates_passed",
+    "alternate_module": "passed_final_canonical_Release",
+    "architecture_guard": "passed_Release_Debug_named_core_and_final_canonical",
+    "launcher_preflight": "passed_required_focused_Debug_Release_and_final_canonical_optional_Steam_inspection_skipped",
+    "git_diff_check_final": {
+      "status": "passed",
+      "exit_code": 0,
+      "branch": "main",
+      "head": "6a86ce0e3b826341c90bbcee8c603771f1dc58c8",
+      "staging": false,
+      "commit": false,
+      "push": false,
+      "receipt": "final-git-readonly-check.json"
+    },
+    "final_release_offline_ctest": {
+      "status": "passed",
+      "attempt": "quality-final-baseline-Release-20261024T161937175Z-30c810",
+      "fresh_registered": 4265,
+      "accounted": 4265,
+      "executed": 4190,
+      "skipped": 75,
+      "failures": 0,
+      "exit_code": 0,
+      "existing_baseline_client": true,
+      "environment_restored": true,
+      "sources_unchanged": true,
+      "active_B0_binaries_unchanged": true,
+      "new_live_sessions": 0,
+      "manual": "not_run",
+      "completed_utc": "2026-10-24T16:29:09.1461299Z",
+      "summary_sha256": "1b36746087650557399c451b2d108b70cc255cb7ead075d8f4a3c3eddbe1597f",
+      "discovery_sha256": "0a73737009c49e2ef7fa9b85f88908927d92367bf334d2d7e22d9ec748d738bf",
+      "junit_sha256": "bf61911b20623977702a55b52a928a39030d57d1ba55cfcc3455faffc80468ca",
+      "fresh_discovery_and_JUnit_names_and_count_exact": true,
+      "verification": "final-runtime-verification.json",
+      "skipped_not_counted_executed": true,
+      "skips_cover": "Explicit installed-asset/audio/Steam opt-ins and capability-gated WFP/window/reparse fixtures; individual75 skipped names retained in JUnit."
+    },
+    "asan_configure": "short_path_retry_passed_initial_failure_preserved",
+    "asan_build": "short_path_build_log_succeeded_but_wrapper_interrupted_exit1_MSBuild_exit_not_captured",
+    "asan_runtime": "passed_runtime_only_original_build_wrapper_still_interrupted",
+    "previous_asan_failures_reused_as_new_outcome": false,
+    "initial_release_graph_build": {
+      "status": "passed",
+      "projects": 137,
+      "path": "quality-build-Release-20261024T141423790Z-ee9d24",
+      "not_final_post_withdrawal_acceptance": true
+    },
+    "changed_libraries_only_option": {
+      "explicit_opt_in": "-CurrentTaskChangedLibrariesOnly",
+      "full_production_B0_audit_before_after": true,
+      "allowed_changes": [
+        "src/renderer/opengl/opengl_scene_target.hpp",
+        "src/renderer/opengl/opengl_renderer.cpp"
+      ],
+      "normal_build_project_count": 11,
+      "core_only_build_project_count": 1,
+      "reused_dependencies_not_freshly_rebuilt": true,
+      "final_renderer_consumers": {
+        "option": "-FinalRendererConsumers",
+        "configuration": "Release",
+        "requires_changed_libraries_only": true,
+        "projects": 21,
+        "renderer_libraries": 1,
+        "test_executables": 19,
+        "entity_viewers": 1,
+        "additional_renderer_test_targets": [
+          "hlclient_console_tests",
+          "hlclient_early_signon_tests",
+          "hlclient_gauss_71b97_tests",
+          "hlclient_installation_check_tests",
+          "hlclient_movement_c6_tests",
+          "hlclient_public_server_control_tests",
+          "hlclient_resource_transition_tests",
+          "hlclient_steam_diagnostics_tests",
+          "hlclient_viewmodel_tests"
+        ],
+        "additional_cli_target": "hlclient_entity_viewer",
+        "entity_viewer_registered_cli_gates": 13,
+        "status": "prepared_not_executed_by_evidence_agent",
+        "reason": "Statically linked test EXEs must be relinked after P1b withdrawal; library replacement alone does not remove old object code."
+      }
+    },
+    "asan_initial_attempt": {
+      "path": "quality-asan-core-Debug-20261024T143759786Z-6fcea4",
+      "configure": "failed",
+      "build": "not_run",
+      "runtime": "not_run",
+      "error": "MSB6003 System.IO.DirectoryNotFoundException in TrackedDependencies.ExpandWildcards for cmTC_78f62.tlog during CMake C compiler try_compile",
+      "reported_tracking_directory_length": 223,
+      "path_limit_root_cause_proven": false,
+      "original_attempt_preserved": true
+    },
+    "asan_short_path_retry": {
+      "status": "configure_passed_build_wrapper_interrupted_after_completed_build_log",
+      "build_root": "D:/DEV/CPP/HL-Client-engine/build-asan-50b5-core",
+      "must_not_exist": true,
+      "reports_stay_in_fresh_task_attempt": true,
+      "compiler_flags_changed": false,
+      "sanitizer_flags_changed": false,
+      "warning_policy_relaxed": false,
+      "attempt": "quality-asan-core-Debug-20261024T144411870Z-1d932c",
+      "configure": "passed",
+      "build_log": "Build succeeded; 0 warnings; 0 errors",
+      "build_process_exit_code": null,
+      "wrapper_exit_code": 1,
+      "wrapper_interrupted_by_root": true,
+      "initial_attempt_modified": false,
+      "runtime": "not_run_by_original_wrapper",
+      "source_summary_is_stale_running": true,
+      "exact_wrapper_stall_cause": "not_proven",
+      "root_process_inventory": "MSBuild/CTest/ASan child absent before interrupting only owned wrapper"
+    },
+    "asan_runtime_resume": {
+      "script": "resume-quality-asan-runtime.ps1",
+      "status": "passed_runtime_only",
+      "rebuild": false,
+      "source_build_exit_success_claimed": false,
+      "source_build_exit_code": null,
+      "own_fresh_attempt": true,
+      "executable_before_after_SHA": true,
+      "timeout_seconds": 120,
+      "matching_toolset_runtime": true,
+      "original_logs_modified": false,
+      "attempt": "quality-asan-core-runtime-resume-Debug-20261024T150103329Z-4c3cb3",
+      "runtime_exit_code": 0,
+      "outer_CTest": {
+        "cases": 1,
+        "passed": 1,
+        "skipped": 0,
+        "failures": 0
+      },
+      "inner_Catch": {
+        "cases": 535,
+        "passed": 534,
+        "skipped": 1,
+        "assertions": 670593,
+        "assertions_passed": 670593,
+        "skip_reason": "Optional installed-sky audit, tests/test_sky_assets.cpp:73, HLCLIENT_SKY_ASSET_ROOT unset",
+        "full_log": "build-asan-50b5-core/Testing/Temporary/LastTest.log",
+        "full_log_sha256": "5cd9d5f3b06ea66ac7a90ae683f913ddf6f2f8a5d7b57f05af24bb6f6a469d7e",
+        "JUnit_system_out_truncated_bytes": 1024
+      },
+      "executable_sha256_before_after": "a4b7e8bb26219aa9122b0bf468f15d277ec125010c483ca203b04d5ea0974379",
+      "active_four_binaries_unchanged": true,
+      "does_not_retroactively_make_build_wrapper_passed": true
+    },
+    "process_helper": {
+      "start_process_wait": false,
+      "owned_process_wait": "Process.WaitForExit()",
+      "redirected_output_handlers_complete_before_hashes": true,
+      "pid_recorded": true,
+      "exit_code_captured_not_inferred_from_log": true,
+      "prior_interrupted_receipts_not_rewritten": true
+    },
+    "final_commands_document": "FINAL_QUALITY_COMMANDS.txt",
+    "full_offline_environment_guards": {
+      "status": "prepared_readonly_source_audited_not_executed",
+      "script": "run-quality-full-ctest.ps1",
+      "scope": "process_only",
+      "restore_in_finally": true,
+      "prior_values_logged": false,
+      "overrides": {
+        "HLCLIENT_0C29_SUBMISSION_TIMING": "0",
+        "HLC_RX_BURST_BENCHMARK": "0",
+        "HLC_RX_BURST_DIAGNOSTICS": "0",
+        "HLCLIENT_ALLOW_INSTALLED_ASSET_TESTS": "0",
+        "HLCLIENT_E31_STEAM_RUNTIME": null,
+        "HLCLIENT_RUN_WFP_CAPABILITY_TEST": "0",
+        "HLCLIENT_STUDIO_POSE_BENCH": "0",
+        "HLCLIENT_P3_BATCH_BENCH": "0"
+      },
+      "authoritative_sources": [
+        "tests/test_external_launch_preflight_e31.cpp",
+        "tests/test_windows_network_isolation.cpp",
+        "tests/test_studio_pose_evaluator.cpp",
+        "tests/test_flash_batch_p3.cpp",
+        "tests/test_studio_submission_0c29.cpp",
+        "tests/test_runtime_replay_session.cpp"
+      ],
+      "steam_optional_test_would_initialize": false,
+      "WFP_optin_would_modify_dynamic_system_filters": true,
+      "required_correctness_tests_not_disabled": true,
+      "system_or_Steam_settings_changed": false
+    },
+    "core_current_results": {
+      "Release_build": {
+        "status": "passed",
+        "attempt": "quality-build-Release-20261024T152240400Z-ebc0a8",
+        "core_only": true,
+        "changed_libraries_only": true,
+        "explicit_target": "hlclient_core_api_tests",
+        "unchanged_core_dependencies_reused": true
+      },
+      "Debug_build": {
+        "status": "failed_link_missing_dependency",
+        "attempt": "quality-build-Debug-20261024T152250330Z-c7dcf4",
+        "error": "LINK fatal error LNK1104: cannot open ../../lib/Debug/hlclient_console.lib",
+        "code_compile_failure_established": false,
+        "warnings": 0,
+        "errors": 1,
+        "original_attempt_preserved": true,
+        "current_built_runtime": "not_run",
+        "subsequent_resolution": "Fresh Catch2/Catch2WithMain prerequisites and full86-project dependency build passed; previous failed attempt retained."
+      },
+      "Release_runtime": {
+        "status": "passed",
+        "attempt": "quality-core-Release-20261024T152716472Z-94f83b",
+        "gates": [
+          "hlclient_core_api_offline",
+          "hlclient_game_boundary_guard"
+        ],
+        "CTest_cases": 2,
+        "passed": 2,
+        "skipped": 0,
+        "failures": 0,
+        "exit_code": 0,
+        "completed_utc": "2026-10-24T15:27:21.6719834Z",
+        "JUnit_sha256": "eddfaf71ca4e9bcba4c4780e64824f14eed2f41ee3fb144428e37b97416a8394"
+      },
+      "performed_by_root_while_campaigns_stopped": true,
+      "does_not_prove_final_full_suite": true,
+      "Debug_runtime": {
+        "status": "passed",
+        "attempt": "quality-core-api-architecture-Debug-20261024T161920641Z-51a03f",
+        "gates": [
+          "hlclient_core_api_offline",
+          "hlclient_game_boundary_guard"
+        ],
+        "accounted": 2,
+        "executed": 2,
+        "skipped": 0,
+        "failures": 0,
+        "exit_code": 0,
+        "completed_utc": "2026-10-24T16:19:37.1409617Z",
+        "junit_sha256": "a9bbc233909fea4a84032d8fcfda45470e675979e82edd78708cebb5dcf32214"
+      }
+    },
+    "final_release_build": {
+      "status": "passed",
+      "attempt": "quality-build-Release-20261024T155224404Z-86ed5a",
+      "projects": 21,
+      "plan_sha256": "20e81e8656a8d21d72095692b11023fefa9511c3918244f36904475a4d240c10",
+      "production_files_checked": 754,
+      "production_files_exact_B0": 754,
+      "production_changed_paths": [],
+      "preexisting_dirty_launcher_preserved": true,
+      "normal_client_launcher_helper_built": false,
+      "renderer_library_sha256": "b859aef5186ee222f038b65bb984e4ba7c777c1fda276cc937c2ed3e654d4437",
+      "runtime_pass_claimed": false
+    },
+    "final_production_source_manifest": {
+      "attempt": "quality-source-manifest-20261024T160019044Z-7833bd",
+      "restored_paths": 3
+    },
+    "final_debug_builds": {
+      "status": "passed",
+      "main": {
+        "attempt": "quality-build-Debug-20261024T155818741Z-3a72d8",
+        "projects": 137,
+        "plan_sha256": "77522a507b2496a9753f550e25898d31c4a7b7fb2395aa80b48d8737b870b728"
+      },
+      "core_prerequisites": {
+        "attempt": "quality-core-debug-catch-prerequisites-20261024T160141572Z-6764b3",
+        "targets": [
+          "Catch2",
+          "Catch2WithMain"
+        ],
+        "both_exit_codes": 0
+      },
+      "core": {
+        "attempt": "quality-build-Debug-20261024T160304496Z-bee0d6",
+        "projects": 86,
+        "plan_sha256": "9a0f0bfab1d4d783418e667d45d1ec35ce10312bda2411f7cce16c026f04ce48"
+      },
+      "previous_missing_library_failure_resolved_by_fresh_dependency_build": true,
+      "previous_failure_records_preserved": true,
+      "all_active_binaries_unchanged": true,
+      "runtime_pass_claimed": false
+    },
+    "current_runtime_execution": "complete_focused_Debug_Release_named_core_Debug_and_full_canonical_Release_passed_no_timing_runs",
+    "focused_release_initial_runtime_failure": {
+      "attempt": "quality-focused-Release-20261024T160828200Z-9c7f8a",
+      "status": "failed_orchestration_empty_presence_optin",
+      "failed_group": "audio-weapon",
+      "testcases": 15,
+      "failed_cases": 1,
+      "skipped_cases": 0,
+      "test": "E2 opt in original MDL event records and referenced WAV decode read only",
+      "source": "tests/test_local_weapon_audio.cpp:78",
+      "failure": "REQUIRE(in)",
+      "cause": "Process environment variable remained present with zero length after PowerShell .NET null setter, so SDL_getenv presence-only optional installed-asset test attempted a relative MDL read.",
+      "client_regression_established": false,
+      "audio_device_optin_executed": false,
+      "full_suite_started": false,
+      "production_or_shipped_binaries_changed": false,
+      "original_logs_preserved": true,
+      "orchestration_retry": 1
+    },
+    "environment_absence_fix": {
+      "presence_probe": "quality-environment-presence-probe-20261024T161123029Z-bc3a0c",
+      "nullstring_probe": "quality-environment-nullstring-probe-20261024T161206121Z-e86444",
+      "ordinary_null_child_present": true,
+      "ordinary_null_child_length": 0,
+      "explicit_NullString_child_present": false,
+      "helper": "quality-common.ps1::Set-QualityEnvironment",
+      "scope": "process_only",
+      "system_settings_changed": false,
+      "applies_to": "focused Steam unset and final baseline runner apply/restore",
+      "preserved_failed_attempt": true
+    },
+    "focused_release_retry1_orchestration_failure": {
+      "attempt": "quality-focused-Release-20261024T161251547Z-1d674c",
+      "status": "failed_before_checkonly_process_spawn",
+      "successful_gates": 31,
+      "prior_nullstring_fix_confirmed": true,
+      "optional_installed_audio_asset": "skipped_no_failure",
+      "cause": "Get-Command pwsh returned two executable paths; scalar File argument joined them with newline and became an invalid filename.",
+      "fix": "Select first resolved pwsh command only.",
+      "client_source_changed": false,
+      "test_assertions_weakened": false,
+      "prior_attempts_preserved": true,
+      "performance_runs": 0
+    },
+    "core_broad_discovery_orchestration_failure": {
+      "attempt": "quality-core-complete-Debug-20261024T161747685Z-5d616f",
+      "status": "failed_wrong_full_tree_selection",
+      "accounted": 45,
+      "skipped": 12,
+      "executed": 33,
+      "failures": 29,
+      "passed": 4,
+      "exit_code": 8,
+      "cause": "Entire core-OFF registered tree selected instead of planned two named API/architecture gates; unbuilt tools/app executables.",
+      "production_source_failure_established": false,
+      "original_preserved": true,
+      "retry_scope_is_original_plan": true,
+      "normal_application_gates": "canonical normal-tree Release full suite subsequently passed with explicit skips",
+      "junit_sha256": "e6e71dca527a413747a074c5631faaaa92bfde34856a05908cc2a99b0f1548ca"
+    }
+  },
+  "delivery": {
+    "status": "no_new_binary_delivery_no_accepted_candidate",
+    "single_verified_build_required": true,
+    "launcher_helper_rebuild_required": false,
+    "local": {
+      "path": "D:/DEV/CPP/HL-Client-engine/build/bin/Release",
+      "status": "unchanged_B0_freshly_verified"
+    },
+    "shared": {
+      "path": "\\\\192.168.0.104\\storage\\HLClient-Win10-Test",
+      "status": "unchanged_B0_freshly_verified"
+    },
+    "dist": {
+      "path": "D:/DEV/CPP/HL-Client-engine/dist/HLClientEngine",
+      "status": "unchanged_B0_freshly_verified"
+    },
+    "canonical_zip": {
+      "path": "D:/DEV/CPP/HL-Client-engine/dist/HLClientEngine-Win10.zip",
+      "status": "unchanged_freshly_verified",
+      "sha256": "67b9b79ae631b34efb747cbc42f7f144fb6eaab5b1253da190007e9e66515412",
+      "bytes": 4183966
+    },
+    "rollback": "current_task_B0_snapshot_preserved_no_new_delivery_or_rollback_needed",
+    "settings_logs_auth_copied": false,
+    "shared_test_data_overwritten": false,
+    "postdelivery_changed_binary_sha_comparison": "not_applicable_no_changed_shipped_binary",
+    "optimized_binary_delivered": false,
+    "final_identity_audit": {
+      "path": "final-unchanged-deliveries.json",
+      "sha256": "b3606a3f93233617b683cc0fdafa5b105c7dc245620707fac776ef87d20150a0",
+      "checked_utc": "2026-10-24T15:53:19.2432563Z",
+      "files": 12,
+      "local_shared_dist_match_B0": true,
+      "canonical_zip_unchanged": true,
+      "writes": 0,
+      "test_data_touched": false
+    },
+    "final_postquality_identity_audit": {
+      "path": "final-deliveries-after-quality.json",
+      "sha256": "a4b29a2a451d695619cd7bc4b610a255f82c7115a5c1bda564c70682b3a55f35",
+      "files": 12,
+      "local_shared_dist_match_B0": true,
+      "canonical_zip_unchanged": true,
+      "writes": 0,
+      "test_data_touched": false,
+      "settings_changed": false
+    }
+  },
+  "constraints": {
+    "resolution_unchanged": true,
+    "msaa_quality_unchanged": true,
+    "models_lights_effects_geometry_not_reduced": true,
+    "animation_rate_not_reduced": true,
+    "fps_counter_not_changed_for_gain": true,
+    "prediction_physics_weapons_damage_command_time_unchanged": true,
+    "diagnostics_not_silently_disabled": true,
+    "server_steam_auth_bots_rates_unchanged": true,
+    "drivers_power_system_settings_unchanged": true,
+    "remote_execution": false,
+    "offline_readback_outside_timing_required": true,
+    "hidden_fixture_is_live_fps": false,
+    "whole_historical_scene_reconstructed": false
+  },
+  "official_references": [
+    {
+      "url": "https://registry.khronos.org/OpenGL/specs/gl/glspec33.core.pdf",
+      "section": "4.3.2, printed p227",
+      "purpose": "GL3.3 multisample blit identical-format and extent restrictions"
+    },
+    {
+      "url": "https://registry.khronos.org/OpenGL/specs/gl/glspec44.core.pdf",
+      "section": "18.3, printed pp485-486;17.3.9",
+      "purpose": "Type-compatible blit conversions and sRGB semantics"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process#-wait",
+      "purpose": "Start-Process -Wait includes descendants; future helper avoids descendant-tree waiting."
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.waitforexit",
+      "purpose": "Wait for owned process and redirected asynchronous event handlers before recording exit/log hashes."
+    }
+  ],
+  "record_hashes": [
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/baseline/source-manifest.json",
+      "sha256": "751d5f881a18404a6cfc1ae4b9773a14f3ae87ddf3fbd520655008c6f9212f3d"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/baseline/library-manifest.json",
+      "sha256": "b7a9ae116a178bfc604785ce6c11b12d98a03a8f899756be003d95fc543e5f50"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/baseline/binary-manifest.json",
+      "sha256": "53c79bb9e21e027fb8b96de2c9e971d17ffe58e52790b42856b35575575f7463"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/input-receipt.json",
+      "sha256": "4f5cf3dfa63e908b775413fab452ae700a13fe2938c6e0b238ccc58fe4e22031"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/primary-analysis.json",
+      "sha256": "6c29691af1602ca5b6955bb66dbae0b11a439e1e0f2ddc61b825d22857aacdef"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1-campaign-analysis.json",
+      "sha256": "b7ae34587ab16e852a45eb81e2844bc10f7ca27ef1416715f9d6002b507e717c"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1-baseline-noise-gates.json",
+      "sha256": "7ddf3c07c120648b799f46571801fb84630e538f045c14b243776e9563ca7c10"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1-correctness.log",
+      "sha256": "b8d497a3869a08d4893e3085e9ef45aeef7f11acd72a173c31cdb40a02e77300"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1b-prelazy-correctness.log",
+      "sha256": "c923fe208bb78bc2e201752759bc54ff3b54f3b44f98d1f4dbf2840e27722104"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P3-B0-composition-disasm.txt",
+      "sha256": "bc577e80ca8f009d88a81fc74bae00c13b670a085fdd939e82e33251bd154cb7"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P3-candidate-composition-disasm.txt",
+      "sha256": "5e658acd61b654dcb155e3fa5fc83a8b8b17e5f63b813ff65ec97217908c82fb"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P3-notes.txt",
+      "sha256": "59f8bed41314dc20a464ecbcd88c3cb12edf38178aab420ea24afb213e0f77e0"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1b-campaign-analysis.json",
+      "sha256": "64746dfbeebc512973d582131981cd513a84877177727a8e40dd018315663639"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1b-independent-tail-audit.json",
+      "sha256": "f5fdc133aeded00f4ba1377ad83dc7de454bef018473877d76b2ae08bacaf6d2"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1b-world-corroboration-analysis.json",
+      "sha256": "b896cd920a4a64253bff8d5a516ce081757e2d1dd625c9263c03632cce593aaf"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1b-world-corroboration-baseline-gates.json",
+      "sha256": "af23cf579e666efbb05287dd7adfc5481d3fa22dd07b45a90d46ce58411e4b71"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1b-lazy-correctness.log",
+      "sha256": "9d0317aed9197526ef84db9380ddb4c5007450635f276c991d7cbaea6fcf04ca"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1b-adjusted-diagnostic-20261024T140938213Z-7f72a4/B0-run.stdout.log",
+      "sha256": "e3627f6c2961ac0dbc396fb5556ea84f576fa211d9c9fcb90ff7900d55e17f98"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P1b-adjusted-diagnostic-20261024T140938213Z-7f72a4/B1-run.stdout.log",
+      "sha256": "afd1f907d0c30268ffd7905a6a3f6f8e5250e0a0d92094ce2532599f3d0d4f97"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-asan-core-Debug-20261024T143759786Z-6fcea4/configure.stderr.log",
+      "sha256": "e9318647946b0784f0bf292d5d3b09f7bb4fc1e7e7513645aceb5ac172683382"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-asan-core-Debug-20261024T143759786Z-6fcea4/summary.json",
+      "sha256": "a10ad7322098514a4fa66e098e9ed8986d0981ab2acff21195cc3a6a9e094d34"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-asan-core-runtime-resume-Debug-20261024T150103329Z-4c3cb3/summary.json",
+      "sha256": "c9a82f8f516e8595b504e253a27ecefd097d093f5f6c062912f9ebce67d645e4"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-asan-core-runtime-resume-Debug-20261024T150103329Z-4c3cb3/asan-core.junit.xml",
+      "sha256": "ebb3e7836f0810bfadb520b78074fbe8e902b56f83321a5168a4f0fa8b534850"
+    },
+    {
+      "path": "build-asan-50b5-core/Testing/Temporary/LastTest.log",
+      "sha256": "5cd9d5f3b06ea66ac7a90ae683f913ddf6f2f8a5d7b57f05af24bb6f6a469d7e"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2b-campaign-plan.json",
+      "sha256": "4c4a212306e75afd4313895f73496c28af25cd5d234d27cc416761fa7f54cc07"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2b-proof-20261024T150058728Z-b5fd5d/B0.stdout.log",
+      "sha256": "225dac45305c24617c27e805c3617e4bac9ba6ba11f6e340cfef005a9fa8cd39"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2b-proof-20261024T150058728Z-b5fd5d/B1.stdout.log",
+      "sha256": "1c92171a249ea4b290500418abfaa0c01969e11d9b46abb0029715a08f0da0ef"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2b-campaign-analysis.json",
+      "sha256": "91bee56db2cc093ba79678a3a02e6d2c62fc93653c9dac930d8e26f205f0c2b4"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2c-primary4-20261024T151653-5d14a1/manifest.json",
+      "sha256": "77e835d61e8579c5ce3bce1005aa8b69946c295ae26ceec8e9f4ee318077a372"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-core-Release-20261024T152716472Z-94f83b/core.junit.xml",
+      "sha256": "eddfaf71ca4e9bcba4c4780e64824f14eed2f41ee3fb144428e37b97416a8394"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2c-restart1-campaign-analysis.json",
+      "sha256": "7bbfa7e844065c335a02c1a75ba5eebf4045bffb8810e47b9cdf81157c4578e0"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2d-primary4-20261024T153954-1847be/manifest.json",
+      "sha256": "bd6a5462a4b6d40066b845f569f77da15870e773cd5375687b21750521f301eb"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2d-independent-source-review.json",
+      "sha256": "f3b1b4c4800b94a9abf1b33b9bdaab88b9481fd72ac9e0e6271e7d55e9623067"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2d-restart1-campaign-analysis.json",
+      "sha256": "bf58f9799ab386934e74a7b3479d80f870565a16650b4bf04a455ec42e873ac7"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/P2d-withdrawn-source/manifest.json",
+      "sha256": "d587ba71859736403747d167dfd7c250e2333440cedf41f141140b954e89d0f4"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/final-unchanged-deliveries.json",
+      "sha256": "b3606a3f93233617b683cc0fdafa5b105c7dc245620707fac776ef87d20150a0"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-build-Release-20261024T155224404Z-86ed5a/plan.json",
+      "sha256": "20e81e8656a8d21d72095692b11023fefa9511c3918244f36904475a4d240c10"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-build-Debug-20261024T155818741Z-3a72d8/plan.json",
+      "sha256": "77522a507b2496a9753f550e25898d31c4a7b7fb2395aa80b48d8737b870b728"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-build-Debug-20261024T160304496Z-bee0d6/plan.json",
+      "sha256": "9a0f0bfab1d4d783418e667d45d1ec35ce10312bda2411f7cce16c026f04ce48"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-focused-Release-20261024T161448960Z-358349/summary.json",
+      "sha256": "5b1406c6046c71614859a2945488945e0377e98d6c18c64ecff602d05f2ff265"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-focused-Debug-20261024T161517241Z-a893f7/summary.json",
+      "sha256": "915fbc996f90841da681b88f5c801870ccf31ecdbf37b061a7c3b9668e403810"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-core-api-architecture-Debug-20261024T161920641Z-51a03f/core.junit.xml",
+      "sha256": "a9bbc233909fea4a84032d8fcfda45470e675979e82edd78708cebb5dcf32214"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-core-complete-Debug-20261024T161747685Z-5d616f/core.junit.xml",
+      "sha256": "e6e71dca527a413747a074c5631faaaa92bfde34856a05908cc2a99b0f1548ca"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-final-baseline-Release-20261024T161937175Z-30c810/summary.json",
+      "sha256": "1b36746087650557399c451b2d108b70cc255cb7ead075d8f4a3c3eddbe1597f"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-final-baseline-Release-20261024T161937175Z-30c810/discovery.stdout.log",
+      "sha256": "0a73737009c49e2ef7fa9b85f88908927d92367bf334d2d7e22d9ec748d738bf"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/quality-final-baseline-Release-20261024T161937175Z-30c810/full.junit.xml",
+      "sha256": "bf61911b20623977702a55b52a928a39030d57d1ba55cfcc3455faffc80468ca"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/final-runtime-verification.json",
+      "sha256": "a77c96012acfa503c0a7659da7ada3ac6a08164a70da6621340295cf371a3f24"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/final-git-readonly-check.json",
+      "sha256": "96e029a00c096d1e0f6a4a9adbb5daf2d9a6300e8759013b68b8364ff98e5ac4"
+    },
+    {
+      "path": "manual-artifacts/task-records/win10-msaa4-50b5ffe1-20261024/final-deliveries-after-quality.json",
+      "sha256": "a4b29a2a451d695619cd7bc4b610a255f82c7115a5c1bda564c70682b3a55f35"
+    }
+  ],
+  "limitations": [
+    "Target GL renderer/version/default format unavailable in primary archive.",
+    "Win10 build not in primary archive; PDH adapter label is not GL renderer proof.",
+    "No accepted candidate: P1/P1b/P2b/P2c rejected, P2d final gain below B0 noise gate. Original P2 AABB proof blocked; P3 hoist already performed by compiler. Optimization objective not achieved.",
+    "100 FPS on target PC unproven until user's same-settings test.",
+    "All original failures and adverse tails remain evidence.",
+    "User subsequently confirmed another compilation still running (recorded16:06:25Z). Exact overlap with P2d R1 not established despite idle pre-run guards; clean quiet-window final performance is not established. Further timing stopped; immutable results remain rejected against their gates, not proof of universal regression."
+  ],
+  "final_outcome_plan": {
+    "status": "resolved_no_accepted_candidate_baseline_quality_verified_waiting_user_quiet_window",
+    "document": "FINAL_OUTCOME_STRUCTURE.txt",
+    "optimization_objective": "not_achieved",
+    "restore_only_owned_production_to_current_task_B0": "renderer_source_restored_exact_B0",
+    "matching_B0_library_and_consumer_quality": "Release_Debug_builds_and_final_runtime_passed_with_explicit_skips",
+    "preserve_preexisting_dirty_and_useful_tests": true,
+    "preserve_all_attempts_including_interrupted_P2c_and_P2d": true,
+    "ship_rejected_candidate_binaries": false,
+    "active_binaries": "unchanged_B0_fresh_SHA_verified_local_shared_dist",
+    "canonical_zip": "unchanged_fresh_SHA_verified",
+    "new_delivery_claim": false,
+    "do_not_hide_unresolved_quality_gates": true,
+    "manual": "not_run",
+    "target100fps": "unproven",
+    "further_candidates_or_threshold_changes": false,
+    "final_production_files_exact_B0": 754,
+    "continuation": "User reports other compilation ongoing; no further performance measurement until fresh completion confirmation and separate declared attempt."
+  },
+  "optimization_objective": "not_achieved",
+  "external_compile_confirmation": {
+    "recorded_utc": "2026-10-24T16:06:25Z",
+    "source": "Root relayed fresh human async reply: other compilation still running.",
+    "exact_user_reply_timestamp_not_available": true,
+    "performance_measurements_stopped": true,
+    "correctness_work_not_requested_to_stop": true,
+    "P2d_R1_pre_run_host_guards_reported_idle": true,
+    "exact_overlap_with_P2d_R1_1549_1550_not_established": true,
+    "quiet_window_final_performance_established": false,
+    "immutable_campaigns_or_gates_modified": false,
+    "existing_gate_result": "not_met_no_accepted_candidate",
+    "universal_or_target_GPU_regression_proven": false,
+    "new_performance_retry": "not_authorized_or_run; requires fresh user completion confirmation and a separately declared receipt; bounded R1 already consumed",
+    "continuous_monitoring_for_future_campaign": "Consider a during-run host-busy guard; pre-run idle checks do not prove absence of competing work for the whole interval."
+  }
+}

@@ -58,6 +58,11 @@ struct StudioRenderPose {
 
 enum class StudioBlendMode : std::uint8_t { opaque, alpha_blended, additive };
 
+enum class StudioRenderPreparationStatus : std::uint8_t {
+    complete,
+    frustum_rejected_before_pose,
+};
+
 struct StudioEntityRenderInstance {
     std::uint32_t entity_number{0U};
     std::uint32_t studio_asset_index{0U};
@@ -80,6 +85,13 @@ struct StudioEntityRenderInstance {
     StudioBlendMode blend_mode{StudioBlendMode::opaque};
     float opacity{1.0F};
     std::array<float, 3U> tint{1.0F, 1.0F, 1.0F};
+    // Final-camera-only omission: UINT32_MAX pose_index explicitly means no
+    // palette exists. Both the conservative early envelope and established
+    // late-render bounds must be outside the current frustum. A different
+    // camera must rematerialize this instance, never reveal a stale/fake pose.
+    StudioRenderPreparationStatus preparation_status{
+        StudioRenderPreparationStatus::complete};
+    std::optional<assets::WorldBounds> early_frustum_bounds;
 };
 
 enum class SpriteBlendMode : std::uint8_t {

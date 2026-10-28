@@ -1,0 +1,51 @@
+{
+  "schema": "hlc.inactive-sky-source-archive.v1",
+  "base_commit": "97fd41e0f9d709255dc71723f035d88400c4d2e2",
+  "not_applied_to_current_sources": true,
+  "cmake_registration": "none",
+  "client_sha256": "9f4616bd8a23430f0369993fbe0ff4a4d029605defdee490a6f824435db85679",
+  "launcher_sha256": "727cb99d5bb910f3825eb411fd87fdb981b15fd5ab9e133917e8f10f7c6490a9",
+  "source_inputs": [
+    {
+      "path": "apps/hlclient/main.cpp",
+      "baseline_git_blob": "c79f642d167a04eab964254253244e1e2db45509",
+      "baseline_sha256": "8f5fd9fee33997f6f256ce1cf979b3838557265fe9dd9e16635426badd55a7a1",
+      "candidate_git_blob": "ccb796a47dec1480e0da715eed002a4415918266",
+      "candidate_sha256": "89951bc14903f52f7f70e0904402a738929fa8ec7c5516bde8fc2b5bdbf4e6a1"
+    },
+    {
+      "path": "src/renderer/opengl/opengl_renderer.cpp",
+      "baseline_git_blob": "adca3a07af7e6da5d1359a91202109664953a6a7",
+      "baseline_sha256": "0d3acc1918f085b0ece689137641e658672c2f4d84ffd47f3fa2aad0600e44b2",
+      "candidate_git_blob": "5d187e7bd10e86b379e6b58e0c25230fe9dcc6bf",
+      "candidate_sha256": "af7e167a1d5c0405a7cfdf3fb5b019fdeb9e65849c81a876c2546f02bcef2cbd"
+    },
+    {
+      "path": "experiments/background-sky-20261028/include/background_sky_policy.hpp",
+      "baseline_git_blob": null,
+      "candidate_git_blob": "f74df1f61e5c0cbcc4a7a3411e64fc58575e43bc",
+      "candidate_sha256": "71c6ede6bc00e179d3c2dc56b1dcfedd2265055c597dfa0ebef42526456a2ffd"
+    },
+    {
+      "path": "experiments/background-sky-20261028/include/sky_candidate_api.hpp",
+      "baseline_git_blob": null,
+      "candidate_git_blob": "db6be26dcd23248194524cd1cb75dc8f066b8e1b",
+      "candidate_sha256": "aed6aec1201aa3e166c345888f27a37bcea8c0b5b228e1e71b3a967a9c8d8b26"
+    },
+    {
+      "path": "experiments/background-sky-20261028/include/sky_depth_guard.hpp",
+      "baseline_git_blob": null,
+      "candidate_git_blob": "cfb841717f3a10b24429c0ee5a448fc8a45599ce",
+      "candidate_sha256": "5c3fab7e53f5412f647a34b745883a38d728a0822566341ef0b2dee926d0448d"
+    },
+    {
+      "path": "experiments/background-sky-20261028/include/sky_gameplay_capture.hpp",
+      "baseline_git_blob": null,
+      "candidate_git_blob": "1abe060283e471d02cd5f8f4eb767929cd18f338",
+      "candidate_sha256": "ffbf3fe60c55867cb20ad350f62e6727949c88e0e55c6750120a37d1454bf3db"
+    }
+  ],
+  "patch_sha256": "9c3194dbb94d341111ee5698d9f6c626aa405b15473546bdaf180ee47e1bab3b",
+  "performance_status": "not_accepted; tested live views all fallback; late_frames=0",
+  "binary_reproducibility": "source delta only; frozen build flags, dependencies and libraries needed for exact original binary"
+}

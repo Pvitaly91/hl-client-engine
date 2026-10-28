@@ -1,6 +1,11 @@
 #if HLCLIENT_HAS_GAME_HALFLIFE
 #include <hlclient/app/runtime_replay_local_assets.hpp>
 #include "gauss_world_visibility_control.hpp"
+#include "bsp_world_metrics.hpp"
+#include "pvs_negative_control_diagnostics.hpp"
+#include "bsp_world_exact_matrix.hpp"
+#include "bsp_world_causal_trace.hpp"
+#include "bsp_sky_geometry_witness.hpp"
 #include <hlclient/client/client_scene_source.hpp>
 #include <hlclient/entity_visual/entity_visual_asset_library.hpp>
 #include <hlclient/game_api/game_client_host.hpp>
@@ -122,6 +127,7 @@ std::string optional_environment(const char* name) {
 }
 struct RawWorldSample {
   std::array<double,5> cpu{};
+  double fixture_iteration_ms{},query_backpressure_ms{};
   std::optional<double> gpu_total;
   std::array<std::optional<double>,6> gpu_pass{};
   std::array<std::optional<double>,4> world_subpass{};
@@ -271,6 +277,7 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
   const auto raw_setting=optional_environment("HLCLIENT_22AD_RAW_W");
   REQUIRE((raw_setting.empty()||raw_setting=="1"));
   const bool emit_raw=raw_setting=="1";
+  const bool bsp_metrics=optional_environment("HLCLIENT_BSP_METRICS")=="1";
   const auto old_comparison=optional_environment("HLCLIENT_51_OLD_VISIBILITY_DIFF");
   REQUIRE((old_comparison.empty()||old_comparison=="1"));
   const bool compare_old_visibility=old_comparison=="1";
@@ -311,6 +318,29 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
   auto gl=f::entity_opengl_fixture::try_context(extent.width,extent.height);
   if(!gl||!f::entity_opengl_fixture::capable_context())SKIP("OpenGL3.3 actual context unavailable");
   gl->initialize_renderer();auto& renderer=gl->renderer();
+#ifdef HLCLIENT_BSP_CANDIDATE
+  const auto bsp_policy_setting=optional_environment("HLCLIENT_BSP_POLICY");
+  REQUIRE((bsp_policy_setting.empty()||bsp_policy_setting=="legacy"||bsp_policy_setting=="bsp"||bsp_policy_setting=="bsp_sky_frustum"));
+  const auto fixture_policy=bsp_policy_setting=="legacy"
+      ?rr::opengl::OpenGlStaticWorldSelectionPolicy::legacy_prepared_frustum
+      :bsp_policy_setting=="bsp_sky_frustum"
+          ?rr::opengl::OpenGlStaticWorldSelectionPolicy::prepared_bsp_sky_frustum
+          :rr::opengl::OpenGlStaticWorldSelectionPolicy::prepared_bsp;
+  renderer.set_static_world_selection_policy(fixture_policy);
+  const auto sky_order_setting=optional_environment("HLCLIENT_SKY_ORDER");
+  REQUIRE((sky_order_setting.empty()||sky_order_setting=="original"||sky_order_setting=="deferred"));
+  const auto fixture_order=sky_order_setting=="deferred"
+      ?rr::opengl::OpenGlStaticWorldOrderPolicy::defer_safe_sky
+      :rr::opengl::OpenGlStaticWorldOrderPolicy::original;
+  renderer.set_static_world_order_policy(fixture_order);
+  const auto multidraw_setting=optional_environment("HLCLIENT_BSP_MULTIDRAW");
+  REQUIRE((multidraw_setting.empty()||multidraw_setting=="native"||multidraw_setting=="loop"));
+  f::bsp_world_causal_trace::LoopMultiDraw multidraw_control{multidraw_setting=="loop"};
+  std::cout<<"[bsp-fixture-policy] {\"policy\":\""
+      <<(bsp_policy_setting.empty()?"bsp":bsp_policy_setting)<<"\",\"multidraw\":\""
+      <<(multidraw_setting=="loop"?"loop":"native")<<"\",\"sky_order\":\""
+      <<(sky_order_setting=="deferred"?"deferred":"original")<<"\",\"runtime_test_control\":true}\n";
+#endif
   std::cout<<std::setprecision(std::numeric_limits<double>::max_digits10);
   const auto& hardware=renderer.information();
   std::cout<<"[71b97-hardware] {\"vendor\":"<<std::quoted(hardware.vendor)
@@ -353,6 +383,7 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       {"f8_yaw180",marker_eye,143.999146},{"approach_128",{-1086.56F,787.41F,-1472},-36.000854},
       {"adjacent_128",{-907.77F,815.73F,-1472},-36.000854}};
   views.push_back({"f8_yaw_sweep",marker_eye,-36.000854});
+  views.push_back({"bsp_leaf_transitions",marker_eye,-36.000854});
   // Camera-only controls from the retained MSAA8 run. Actors, effects,
   // lighting, and animation remain this fixed synthetic fixture, not a
   // reconstruction of the historical live frame.
@@ -401,6 +432,12 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
     std::array<std::vector<double>,5> cpu;
     std::array<std::vector<double>,7> gpu;
     std::array<std::vector<double>,4> world_gpu;
+    std::vector<double> fixture_iteration_ms,query_backpressure_ms;
+    fixture_iteration_ms.reserve(samples);query_backpressure_ms.reserve(samples);
+#ifdef HLCLIENT_BSP_CANDIDATE
+    const auto multi_calls_before=multidraw_control.intercepted_calls;
+    const auto multi_ranges_before=multidraw_control.submitted_ranges;
+#endif
     std::vector<RawWorldSample> raw_samples(emit_raw?samples:0U);
     const auto first_sample_frame=next_frame+warm;
     std::map<std::uint64_t,bool> accepted;
@@ -431,11 +468,13 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
     std::uint64_t world_uploads{},studio_uploads{},sprite_uploads{},program_binds{},vao_binds{},sky_binds{},transform_uploads{},camera_uploads{},light_uploads{},material_uniform_uploads{};
     std::uint64_t prepared_selected_blocks{},prepared_rejected_blocks{},prepared_batch_fallbacks{};
     std::uint64_t prepared_probed_blocks{},prepared_all_batch_bypass_frames{};
+    std::vector<hlclient::tests::BspWorldMetricSample> bsp_samples(bsp_metrics?samples:0U);
     double pixel_yaw=view.yaw;
     unsigned slot_wait_timeouts{};
     double cold_render_ms{};
     std::uint64_t omitted_timing_samples{},light_state_changes{},previous_lights{};
     for(unsigned i=0;i<warm+samples;++i) {
+      const auto iteration_begin=Clock::now();
       // Test-only bounded back-pressure outside CPU measurement prevents the
       // eight-slot asynchronous query ring from biasing GPU sample selection.
       // This is deliberately not part of the normal nonblocking render loop.
@@ -444,9 +483,20 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
         collect();std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
       if(renderer.gpu_timing_statistics().pending>=6)++slot_wait_timeouts;
+      const auto backpressure_end=Clock::now();
       auto current_view=view;
       if(std::string_view{view.label}=="f8_yaw_sweep"||std::string_view{view.label}=="9de_primary_sweep")
         current_view.yaw+=static_cast<double>(i)*.05;
+      if(std::string_view{view.label}=="bsp_leaf_transitions") {
+        // Deterministic camera-only context changes; the actors/effects/time
+        // stay fixed. Includes the known EMPTY/SOLID near-clip boundary.
+        switch((i/8U)%4U) {
+        case 1U: current_view.eye={-907.77F,815.73F,-1472.F};break;
+        case 2U: current_view.eye={-1086.56F,787.41F,-1472.F};break;
+        case 3U: current_view.eye={-1086.56F,787.41F,-1472.125F};break;
+        default: break;
+        }
+      }
       pixel_yaw=current_view.yaw;
       world.set_camera(camera(current_view));
       const auto begin=Clock::now();
@@ -466,7 +516,7 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       const auto id=next_frame++;if(timed)accepted.emplace(id,i>=warm);
       const auto timing_submitted=renderer.gpu_timing_statistics().submitted;
       const auto render_begin=Clock::now();
-      if(timed)renderer.render_with_gpu_timing(scene,extent,id);else renderer.render(scene,extent);
+      if(timed)renderer.render_with_gpu_timing(scene,extent,id,bsp_metrics);else renderer.render(scene,extent);
       if(i==0U&&renderer.scene_target_statistics().actual_samples!=requested_msaa)
         SKIP("Requested MSAA mode is unavailable in the actual OpenGL context");
       if(timed&&renderer.gpu_timing_statistics().submitted==timing_submitted) {
@@ -492,6 +542,8 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
         if(i==warm||previous_lights!=light_inputs)++light_state_changes;
         previous_lights=light_inputs;
         const auto& w=renderer.statistics();const auto& e=renderer.entity_statistics();
+        if(bsp_metrics&&w.last_static_world_frame)
+          bsp_samples[i-warm].capture(*w.last_static_world_frame);
         world_draws+=w.draw_call_count-ws.draw_call_count;world_triangles+=w.triangle_count-ws.triangle_count;
         prepared_selected_blocks+=w.prepared_world_selected_block_count-ws.prepared_world_selected_block_count;
         prepared_rejected_blocks+=w.prepared_world_rejected_block_count-ws.prepared_world_rejected_block_count;
@@ -507,9 +559,26 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
         sky_binds+=w.sky_texture_bind_count-ws.sky_texture_bind_count;transform_uploads+=w.transform_upload_count-ws.transform_upload_count;
         camera_uploads+=w.camera_upload_count-ws.camera_upload_count;light_uploads+=w.light_upload_count-ws.light_upload_count;
         if(const auto uniform_count=material_uniform_delta(ws,w))material_uniform_uploads+=*uniform_count;
+        const auto iteration_end=Clock::now();
+        const double iteration=std::chrono::duration<double,std::milli>(iteration_end-iteration_begin).count();
+        const double backpressure=std::chrono::duration<double,std::milli>(backpressure_end-iteration_begin).count();
+        fixture_iteration_ms.push_back(iteration);query_backpressure_ms.push_back(backpressure);
+        if(emit_raw) {
+          raw_samples[i-warm].fixture_iteration_ms=iteration;
+          raw_samples[i-warm].query_backpressure_ms=backpressure;
+        }
       }
     }
+#ifdef HLCLIENT_BSP_CANDIDATE
+    std::cout<<"[bsp-fixture-multidraw] {\"view\":"<<std::quoted(view.label)
+        <<",\"remote_capture\":"<<(capture?"true":"false")
+        <<",\"mode\":\""<<(multidraw_setting=="loop"?"loop":"native")
+        <<"\",\"scope\":\"warm_and_measured_render_calls_only\",\"intercepted_multi_calls\":"
+        <<multidraw_control.intercepted_calls-multi_calls_before<<",\"loop_draw_elements_calls\":"
+        <<multidraw_control.submitted_ranges-multi_ranges_before<<"}\n";
+#endif
     const auto deadline=Clock::now()+std::chrono::seconds(5);
+    for(std::size_t i=0;i<bsp_samples.size();++i)bsp_samples[i].print(i);
     while(!accepted.empty()&&Clock::now()<deadline){collect();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
     CHECK(glGetError()==GL_NO_ERROR);
     const auto pixels=renderer.observe_framebuffer(extent,scene.clear_color,false);REQUIRE(pixels);
@@ -656,6 +725,11 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
             <<",\"missing_depth_pixels\":"<<missing_depth
             <<",\"extra_depth_pixels\":"<<extra_depth
             <<",\"diff_bounds_bottom_origin\":["<<min_x<<','<<min_y<<','<<max_x<<','<<max_y<<"]}\n";
+          auto original_world=world_only;
+          original_world.static_world=scene.static_world;
+          f::pvs_negative_diagnostics::diagnose(renderer,original_world,extent,
+              view.label,capture,*selected_scene.static_world->visible_draw_list,
+              baseline_world_color.rgba8,depth,selected_world_color.rgba8,selected_depth);
         }
       }
     }
@@ -741,6 +815,11 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       <<",\"gpu_pending\":"<<timing.pending<<",\"gpu_capacity_drops\":"<<timing.capacity_drops<<",\"gpu_unavailable\":"<<timing.unavailable
       <<",\"unobserved_frame_ids\":"<<accepted.size()<<",\"gpu_sample_count\":"<<gpu[0].size()<<",\"test_slot_wait_timeouts\":"<<slot_wait_timeouts<<"}\n";
     constexpr std::array cpu_names{"studio_prepare","viewmodel_scene_prepare","world_visibility","render_submit","owned_subset"};
+    // Complete offline loop iteration, including its artificial query-ring
+    // backpressure and test assertions/counters. This is NOT game frame time
+    // or present latency: this hidden fixture never swaps buffers.
+    quantile(view.label,capture,"fixture_iteration_including_query_backpressure",std::move(fixture_iteration_ms));
+    quantile(view.label,capture,"fixture_query_backpressure",std::move(query_backpressure_ms));
     constexpr std::array gpu_names{"gpu_total","gpu_world","gpu_studio_viewmodel","gpu_effects_decals","gpu_msaa_resolve","gpu_image_adjustments","gpu_hud_console"};
     for(std::size_t i=0;i<cpu.size();++i)quantile(view.label,capture,cpu_names[i],std::move(cpu[i]));
     for(std::size_t i=0;i<gpu.size();++i)quantile(view.label,capture,gpu_names[i],std::move(gpu[i]));
@@ -763,7 +842,9 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       for(std::size_t stage=0;stage<raw.cpu.size();++stage) {
         if(stage)std::cout<<',';std::cout<<raw.cpu[stage];
       }
-      std::cout<<"],\"gpu_total_ms\":";print_optional(raw.gpu_total);
+      std::cout<<"],\"fixture_iteration_ms\":"<<raw.fixture_iteration_ms
+        <<",\"query_backpressure_ms\":"<<raw.query_backpressure_ms
+        <<",\"gpu_total_ms\":";print_optional(raw.gpu_total);
       std::cout<<",\"gpu_pass_ms\":[";
       for(std::size_t pass=0;pass<raw.gpu_pass.size();++pass) {
         if(pass)std::cout<<',';print_optional(raw.gpu_pass[pass]);
@@ -775,6 +856,39 @@ TEST_CASE("71b97 opt-in actual Crossfire matched cameras expose production prepa
       std::cout<<"],\"valid_pass_mask\":"<<unsigned(raw.pass_mask)
         <<",\"valid_world_subpass_mask\":"<<unsigned(raw.world_subpass_mask)<<"}\n";
     }
+#ifdef HLCLIENT_BSP_CANDIDATE
+    if(optional_environment("HLCLIENT_SKY_SELECTION_EXACT")=="1") {
+      REQUIRE(requested_msaa==0U);REQUIRE_FALSE(selected_visibility);
+      f::bsp_world_exact_matrix::compare(renderer,scene,extent,view.label,capture,next_frame,fixture_policy,fixture_order,false,true);
+    }
+    if(optional_environment("HLCLIENT_SKY_SELECTION_TRACE")=="1") {
+      REQUIRE(requested_msaa==0U);REQUIRE_FALSE(selected_visibility);
+      f::bsp_sky_geometry_witness::compare_candidate(renderer,scene,extent,view.label,capture,fixture_policy,fixture_order);
+    }
+    if(optional_environment("HLCLIENT_SKY_GEOMETRY_WITNESS")=="1") {
+      REQUIRE(requested_msaa==0U);REQUIRE_FALSE(selected_visibility);
+      f::bsp_sky_geometry_witness::run(renderer,scene,extent,view.label,capture,next_frame,fixture_policy,fixture_order);
+    }
+    if(optional_environment("HLCLIENT_BSP_CAUSAL_TRACE")=="1") {
+      REQUIRE(requested_msaa==0U);REQUIRE_FALSE(selected_visibility);
+      renderer.set_static_world_order_policy(rr::opengl::OpenGlStaticWorldOrderPolicy::original);
+      f::bsp_world_causal_trace::compare(renderer,scene,extent,view.label,capture);
+      renderer.set_static_world_selection_policy(fixture_policy);
+      renderer.set_static_world_order_policy(fixture_order);
+    }
+    if(optional_environment("HLCLIENT_BSP_EXACT_MATRIX")=="1") {
+      REQUIRE(requested_msaa==0U);REQUIRE_FALSE(selected_visibility);
+      f::bsp_world_exact_matrix::compare(renderer,scene,extent,view.label,capture,next_frame,fixture_policy,fixture_order);
+    }
+    if(optional_environment("HLCLIENT_SKY_ORDER_TRACE")=="1") {
+      REQUIRE(requested_msaa==0U);REQUIRE_FALSE(selected_visibility);
+      f::bsp_world_causal_trace::compare_sky_order(renderer,scene,extent,view.label,capture,fixture_policy,fixture_order);
+    }
+    if(optional_environment("HLCLIENT_SKY_EXACT_MATRIX")=="1") {
+      REQUIRE(requested_msaa==0U);REQUIRE_FALSE(selected_visibility);
+      f::bsp_world_exact_matrix::compare(renderer,scene,extent,view.label,capture,next_frame,fixture_policy,fixture_order,true);
+    }
+#endif
   }
   }
   REQUIRE((selected_view.empty()||matched_views==1U));

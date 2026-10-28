@@ -5,6 +5,7 @@
 
 #include "opengl_entity_renderer.hpp"
 #include "opengl_scene_target.hpp"
+#include "prepared_world_visibility.hpp"
 
 #include <hlclient/assets/world_lightmap_types.hpp>
 #include "opengl_effect_lights.hpp"
@@ -30,6 +31,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -1338,6 +1340,19 @@ struct GeometryState {
     return result;
 }
 
+struct WorldOrderProjectedBounds {
+    double left{},right{},bottom{},top{},near_depth{},far_depth{};
+    bool valid{};
+};
+
+struct WorldOrderScratch {
+    const world_render::WorldRenderPackage* owner{};
+    std::vector<assets::WorldBounds> bounds;
+    std::vector<WorldOrderProjectedBounds> projected;
+    std::vector<std::size_t> order,pending;
+    std::uint64_t moved{},blocked{};
+};
+
 struct GpuWorldResources {
     std::shared_ptr<const world_render::WorldRenderPackage> package_instance;
     world_render::WorldRendererResourceIdentity identity{};
@@ -1350,6 +1365,156 @@ struct GpuWorldResources {
     std::vector<GlObject> base_textures;
     std::vector<GlObject> lightmap_pages;
     GlObject white_lightmap;
+    WorldOrderScratch order_scratch;
+};
+
+// The shader receives these exact float matrix/position inputs. A four-term
+// float dot product has seven rounded operations (FMA only reduces the error).
+// Keep the bound in double and round outward. AABB corners bound a projective
+// transform only while the whole box is in front of the eye/near plane.
+[[nodiscard]] WorldOrderProjectedBounds project_world_order_bounds(
+    const assets::WorldBounds& bounds,const RenderMatrix4& matrix,
+    RenderExtent extent,const unsigned depth_bits) noexcept
+{
+    WorldOrderProjectedBounds result;
+    result.left=result.bottom=result.near_depth=std::numeric_limits<double>::infinity();
+    result.right=result.top=result.far_depth=-std::numeric_limits<double>::infinity();
+    constexpr double unit=std::numeric_limits<float>::epsilon()/2.0;
+    constexpr double gamma7=7.0*unit/(1.0-7.0*unit);
+    constexpr double gamma3=3.0*unit/(1.0-3.0*unit);
+    const auto outward=[](double value,bool upper) {
+        return std::nextafter(value,upper ? std::numeric_limits<double>::infinity()
+                                         : -std::numeric_limits<double>::infinity());
+    };
+    for(unsigned corner=0;corner<8;++corner) {
+        const std::array<double,4> position{
+            (corner&1U) ? bounds.maximum.x : bounds.minimum.x,
+            (corner&2U) ? bounds.maximum.y : bounds.minimum.y,
+            (corner&4U) ? bounds.maximum.z : bounds.minimum.z,1.0};
+        std::array<double,4> low{},high{};
+        for(std::size_t row=0;row<4;++row) {
+            double sum{},magnitude{};
+            for(std::size_t column=0;column<4;++column) {
+                const double term=matrix.values[column*4+row]*position[column];
+                sum+=term;magnitude+=std::abs(term);
+            }
+            // A finite double result does not prove the shader's float
+            // products/intermediate sums cannot overflow.
+            if(magnitude>std::numeric_limits<float>::max()) return {};
+            const double error=gamma7*magnitude+
+                8.0*std::numeric_limits<float>::denorm_min();
+            low[row]=outward(sum-error,false);
+            high[row]=outward(sum+error,true);
+            if(!std::isfinite(low[row]) || !std::isfinite(high[row])) return {};
+        }
+        if(low[3]<=0.0 || low[2]+low[3]<=0.0 || high[2]>=low[3]) return {};
+        for(std::size_t axis=0;axis<3;++axis) {
+            const std::array<double,4> ratios{low[axis]/low[3],low[axis]/high[3],
+                high[axis]/low[3],high[axis]/high[3]};
+            const auto [minimum,maximum]=std::minmax_element(ratios.begin(),ratios.end());
+            // Division and the two viewport operations are rounded too.
+            const double error=gamma3*(1.0+std::max(std::abs(*minimum),std::abs(*maximum)));
+            const double lo=outward((*minimum+1.0)*0.5-error,false);
+            const double hi=outward((*maximum+1.0)*0.5+error,true);
+            if(!std::isfinite(lo) || !std::isfinite(hi)) return {};
+            if(axis==0) {result.left=std::min(result.left,lo*extent.width);
+                        result.right=std::max(result.right,hi*extent.width);}
+            if(axis==1) {result.bottom=std::min(result.bottom,lo*extent.height);
+                        result.top=std::max(result.top,hi*extent.height);}
+            if(axis==2) {result.near_depth=std::min(result.near_depth,lo);
+                        result.far_depth=std::max(result.far_depth,hi);}
+        }
+    }
+    // Cover raster sample/subpixel rounding in addition to transform error.
+    // Disjoint padded integer rectangles cannot address the same sample.
+    result.left=std::floor(result.left)-1.0;result.right=std::ceil(result.right)+1.0;
+    result.bottom=std::floor(result.bottom)-1.0;result.top=std::ceil(result.top)+1.0;
+    if(depth_bits>0U && depth_bits<=32U) {
+        // Use the actual attachment precision, not world-distance epsilon.
+        // Float depth uses at most one float ULP in [0,1]; normalized fixed
+        // depth uses its actual quantum. Expand both intervals before testing
+        // separation, including float interpolation/viewport roundoff.
+        const double quantum=std::max(1.0/(std::ldexp(1.0,static_cast<int>(depth_bits))-1.0),
+            static_cast<double>(std::numeric_limits<float>::epsilon()));
+        const double error=quantum+gamma7;
+        result.near_depth=outward(result.near_depth-error,false);
+        result.far_depth=outward(result.far_depth+error,true);
+    } else {
+        result.near_depth=-std::numeric_limits<double>::infinity();
+        result.far_depth=std::numeric_limits<double>::infinity();
+    }
+    result.valid=true;
+    return result;
+}
+
+// Only stable crossings of sky and ordinary opaque batches are considered.
+// Bounds cover the complete immutable batches, so either visibility selector
+// may submit any subset without changing the safety decision. Masked and
+// non-sky special surfaces (including water) are hard ordering barriers.
+[[nodiscard]] std::span<const std::size_t> prepare_world_order(
+    GpuWorldResources& resources,const world_render::WorldRenderPackage& package,
+    const RenderMatrix4& matrix,RenderExtent extent,unsigned depth_bits,
+    OpenGlStaticWorldOrderPolicy policy)
+{
+    auto& scratch=resources.order_scratch;
+    scratch.moved=scratch.blocked=0U;
+    if(policy!=OpenGlStaticWorldOrderPolicy::defer_safe_sky) return {};
+    const auto batches=package.draw_batches();
+    const auto materials=package.materials();
+    if(scratch.owner!=&package) {
+        // Owner replacement and map/reset destruction invalidate all bounds.
+        scratch.owner=nullptr;
+        scratch.bounds.resize(batches.size());
+        scratch.projected.resize(batches.size());
+        scratch.order.reserve(batches.size());scratch.pending.reserve(batches.size());
+        const auto vertices=package.vertices();const auto indices=package.indices();
+        for(std::size_t b=0;b<batches.size();++b) {
+            const auto& batch=batches[b];
+            auto& bounds=scratch.bounds[b];
+            const auto& first=vertices[indices[batch.first_index]].position;
+            bounds.minimum=bounds.maximum=first;
+            for(std::size_t i=batch.first_index;i<static_cast<std::size_t>(batch.first_index)+batch.index_count;++i) {
+                const auto& p=vertices[indices[i]].position;
+                bounds.minimum.x=std::min(bounds.minimum.x,p.x);bounds.maximum.x=std::max(bounds.maximum.x,p.x);
+                bounds.minimum.y=std::min(bounds.minimum.y,p.y);bounds.maximum.y=std::max(bounds.maximum.y,p.y);
+                bounds.minimum.z=std::min(bounds.minimum.z,p.z);bounds.maximum.z=std::max(bounds.maximum.z,p.z);
+            }
+        }
+        scratch.owner=&package;
+    }
+    scratch.order.clear();scratch.pending.clear();
+    for(std::size_t b=0;b<batches.size();++b)
+        scratch.projected[b]=project_world_order_bounds(scratch.bounds[b],matrix,extent,depth_bits);
+    const auto flush=[&](bool blocked) {
+        if(blocked) scratch.blocked+=scratch.pending.size();
+        for(const auto b:scratch.pending) {
+            if(scratch.order.size()>b) ++scratch.moved;
+            scratch.order.push_back(b);
+        }
+        scratch.pending.clear();
+    };
+    for(std::size_t b=0;b<batches.size();++b) {
+        const auto& material=materials[batches[b].render_material_index];
+        const bool opaque=material.base_texture_alpha_mode==assets::WorldTextureAlphaMode::opaque;
+        if(opaque && material.sky_surface) {scratch.pending.push_back(b);continue;}
+        bool safe=opaque && !material.special_surface;
+        for(const auto sky:scratch.pending) {
+            const auto& a=scratch.projected[sky];const auto& c=scratch.projected[b];
+            safe=safe && a.valid && c.valid &&
+                (a.right<c.left || c.right<a.left || a.top<c.bottom || c.top<a.bottom ||
+                 a.far_depth<c.near_depth || c.far_depth<a.near_depth);
+            if(!safe) break;
+        }
+        if(!safe) flush(true);
+        scratch.order.push_back(b);
+    }
+    flush(false);
+    return scratch.order;
+}
+
+struct PreparedWorldBatchRanges {
+    std::size_t first_range{},range_count{};
+    std::uint64_t index_count{};
 };
 
 struct GpuSceneResources {
@@ -1359,6 +1524,103 @@ struct GpuSceneResources {
     GpuWorldResources world;
     std::optional<GpuWorldResources> brushes;
     std::vector<GlObject> brush_alternate_textures;
+    PreparedWorldVisibility prepared_visibility;
+    // Reused CPU command scratch, prepared once with the immutable map.
+    std::vector<std::size_t> ordered_surfaces;
+    std::vector<std::size_t> batch_surface_offsets;
+    std::vector<GLsizei> selected_counts;
+    std::vector<const void*> selected_offsets;
+    std::vector<PreparedWorldBatchRanges> selected_batches;
+    std::vector<std::uint8_t> command_selection;
+    std::uint64_t command_pvs_context{},command_surface_count{};
+    bool command_cache_valid{};
+    // A compact index stream is rebuilt only with the PVS context. Vertex
+    // storage and the original full EBO remain immutable and available to B6.
+    std::vector<std::uint32_t> pvs_indices;
+    std::vector<std::uint32_t> pvs_surface_first;
+    GlObject pvs_index_buffer;
+    std::uint64_t uploaded_pvs_context{};
+    bool prepared_submission_valid{};
+    bool prepared_selection_attempted{};
+    std::uint64_t submission_storage_allocations{};
+};
+
+void prepare_world_selection(GpuSceneResources& resources,
+    const world_scene_render::WorldSceneRenderPackage& scene) noexcept
+{
+    resources.prepared_submission_valid=false;
+    resources.prepared_selection_attempted=true;
+    resources.submission_storage_allocations=0U;
+    resources.uploaded_pvs_context=0U;
+    resources.command_cache_valid=false;
+    try {
+    if (!resources.prepared_visibility.prepare(scene)) return;
+    const auto& world=*scene.world_package();
+    const auto surfaces=world.surface_ranges();
+    const auto batches=world.draw_batches();
+    if (surfaces.size()>static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) return;
+    const auto order_capacity=resources.ordered_surfaces.capacity();
+    resources.ordered_surfaces.resize(surfaces.size());
+    resources.submission_storage_allocations+=resources.ordered_surfaces.capacity()!=order_capacity;
+    std::iota(resources.ordered_surfaces.begin(),resources.ordered_surfaces.end(),0U);
+    std::ranges::sort(resources.ordered_surfaces,{},[&](std::size_t i) {
+        return surfaces[i].first_index;
+    });
+    const auto batch_capacity=resources.batch_surface_offsets.capacity();
+    resources.batch_surface_offsets.assign(batches.size()+1U,0U);
+    resources.submission_storage_allocations+=resources.batch_surface_offsets.capacity()!=batch_capacity;
+    std::size_t cursor{};
+    for (std::size_t b=0;b<batches.size();++b) {
+        const auto& batch=batches[b];
+        if (batch.index_count>static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) return;
+        resources.batch_surface_offsets[b]=cursor;
+        std::uint64_t next=batch.first_index;
+        const std::uint64_t end=next+batch.index_count;
+        while (cursor<surfaces.size() && surfaces[resources.ordered_surfaces[cursor]].first_index<end) {
+            const auto& surface=surfaces[resources.ordered_surfaces[cursor]];
+            if (surface.first_index!=next || surface.source_batch_index!=b ||
+                surface.render_material_index!=batch.render_material_index ||
+                surface.index_count==0U || surface.index_count%3U!=0U ||
+                surface.index_count>static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) return;
+            next+=surface.index_count;
+            ++cursor;
+        }
+        if (next!=end) return;
+    }
+    if (cursor!=surfaces.size()) return;
+    resources.batch_surface_offsets.back()=cursor;
+    const auto count_capacity=resources.selected_counts.capacity();
+    const auto offset_capacity=resources.selected_offsets.capacity();
+    resources.selected_counts.reserve(surfaces.size());
+    resources.selected_offsets.reserve(surfaces.size());
+    resources.submission_storage_allocations+=resources.selected_counts.capacity()!=count_capacity;
+    resources.submission_storage_allocations+=resources.selected_offsets.capacity()!=offset_capacity;
+    const auto selected_batch_capacity=resources.selected_batches.capacity();
+    const auto selection_capacity=resources.command_selection.capacity();
+    resources.selected_batches.resize(batches.size());
+    resources.command_selection.resize(surfaces.size());
+    resources.submission_storage_allocations+=resources.selected_batches.capacity()!=selected_batch_capacity;
+    resources.submission_storage_allocations+=resources.command_selection.capacity()!=selection_capacity;
+    const auto indices_capacity=resources.pvs_indices.capacity();
+    const auto first_capacity=resources.pvs_surface_first.capacity();
+    resources.pvs_indices.reserve(world.indices().size());
+    resources.pvs_surface_first.resize(surfaces.size());
+    resources.submission_storage_allocations+=resources.pvs_indices.capacity()!=indices_capacity;
+    resources.submission_storage_allocations+=resources.pvs_surface_first.capacity()!=first_capacity;
+    resources.prepared_submission_valid=glMultiDrawElements!=nullptr;
+    } catch (const std::bad_alloc&) {
+        // An optional CPU selector must not turn a valid old renderer into a
+        // failed connection. Existing material batches remain the fallback.
+        resources.prepared_submission_valid=false;
+    } catch (const std::length_error&) {
+        resources.prepared_submission_valid=false;
+    }
+}
+
+struct PreparedWorldMultiDraw {
+    std::span<const GLsizei> counts;
+    std::span<const void* const> offsets;
+    std::uint64_t index_count{};
 };
 
 [[nodiscard]] GpuWorldResources build_gpu_resources(
@@ -1418,6 +1680,7 @@ struct FrameDrawCounters {
     std::uint64_t draw_calls{0U};
     std::uint64_t brush_draw_calls{0U};
     std::uint64_t triangles{0U};
+    std::uint64_t sky_triangles{0U};
     std::uint64_t base_texture_binds{0U};
     std::uint64_t lightmap_binds{0U};
     std::uint64_t material_uniform_uploads{0U};
@@ -1522,16 +1785,17 @@ void draw_package_range(
     const bool brush,
     FrameDrawCounters& counters,
     FrameDrawState& state,
-    const GLuint alternate_texture = 0U)
+    const GLuint alternate_texture = 0U,
+    const PreparedWorldMultiDraw* prepared_draw = nullptr)
 {
     const auto materials = package.materials();
     const auto indices = package.indices();
     const std::size_t first = first_index;
     const std::size_t count = index_count;
-    if (index_count == 0U || index_count % 3U != 0U ||
+    if (!prepared_draw && (index_count == 0U || index_count % 3U != 0U ||
         first > indices.size() || count > indices.size() - first ||
         material_index >= materials.size() ||
-        !renderer::is_finite(model_view_projection) || !renderer::is_finite(model_transform)) {
+        !renderer::is_finite(model_view_projection) || !renderer::is_finite(model_transform))) {
         fail(OpenGlRendererErrorCode::draw_range_invalid,
             "Visible draw command has an invalid package range");
     }
@@ -1659,8 +1923,18 @@ void draw_package_range(
         state.masked_alpha=masked_alpha;
     }
 
-    const auto byte_offset = checked_index_byte_offset(first_index);
-    glDrawElements(
+    if (prepared_draw) {
+        // Only the owned, prevalidated map selector creates these spans. Their
+        // order is the original index order; no index data is uploaded here.
+        if (prepared_draw->counts.size()==1U)
+            glDrawElements(GL_TRIANGLES,prepared_draw->counts.front(),GL_UNSIGNED_INT,
+                prepared_draw->offsets.front());
+        else
+            glMultiDrawElements(GL_TRIANGLES,prepared_draw->counts.data(),GL_UNSIGNED_INT,
+                prepared_draw->offsets.data(),static_cast<GLsizei>(prepared_draw->counts.size()));
+    } else {
+      const auto byte_offset = checked_index_byte_offset(first_index);
+      glDrawElements(
         GL_TRIANGLES,
         to_gl_size(
             count,
@@ -1668,11 +1942,16 @@ void draw_package_range(
             "Visible draw command exceeds GLsizei"),
         GL_UNSIGNED_INT,
         reinterpret_cast<const void*>(byte_offset));
+    }
     ++counters.draw_calls;
     if (brush) {
         ++counters.brush_draw_calls;
     }
-    counters.triangles += static_cast<std::uint64_t>(index_count / 3U);
+    counters.triangles += prepared_draw ? prepared_draw->index_count/3U :
+        static_cast<std::uint64_t>(index_count / 3U);
+    if(!brush && material.sky_surface)
+        counters.sky_triangles+=prepared_draw ? prepared_draw->index_count/3U :
+            static_cast<std::uint64_t>(index_count/3U);
 }
 
 } // namespace
@@ -3514,7 +3793,8 @@ public:
 
     [[nodiscard]] GpuSceneResources& ensure_scene_resources(
         const std::shared_ptr<
-            const world_scene_render::WorldSceneRenderPackage>& scene)
+            const world_scene_render::WorldSceneRenderPackage>& scene,
+        const bool prepare_bsp)
     {
         const auto identity = scene->resource_identity();
         if (scene_resources_ && scene_resources_->identity == identity) {
@@ -3522,6 +3802,19 @@ public:
             // Refresh the retained owners so an equivalent republished package
             // does not keep an otherwise-dead CPU package alive or trigger a
             // visibility-only GPU upload.
+            if (scene_resources_->scene_instance!=scene) {
+                scene_resources_->prepared_selection_attempted=false;
+                scene_resources_->prepared_submission_valid=false;
+                scene_resources_->prepared_visibility.reset();
+                scene_resources_->uploaded_pvs_context=0U;
+                scene_resources_->command_cache_valid=false;
+            }
+            if (prepare_bsp && !scene_resources_->prepared_selection_attempted) {
+                prepare_world_selection(*scene_resources_,*scene);
+                ++statistics_.bsp_preparation_count;
+                statistics_.bsp_storage_allocation_count+=scene_resources_->submission_storage_allocations+
+                    scene_resources_->prepared_visibility.statistics().storage_allocation_count;
+            }
             scene_resources_->scene_instance = scene;
             scene_resources_->world.package_instance =
                 scene->world_package();
@@ -3547,6 +3840,12 @@ public:
             candidate.identity = identity;
             candidate.world = build_gpu_resources(*world_package, true);
             candidate.world.package_instance = world_package;
+            if (prepare_bsp) {
+                prepare_world_selection(candidate,*scene);
+                ++statistics_.bsp_preparation_count;
+                statistics_.bsp_storage_allocation_count+=candidate.submission_storage_allocations+
+                    candidate.prepared_visibility.statistics().storage_allocation_count;
+            }
 
             const auto& brush_package =
                 scene->brush_library().render_package();
@@ -4153,9 +4452,53 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         std::ranges::all_of(effect_lights, [](const auto& light) {
             return valid_render_point_light(light) && light.intensity > 0.0F;
         });
+    unsigned order_depth_bits{};
+    using WorldOrderClock=std::chrono::steady_clock;
+    WorldOrderClock::duration order_target_duration{};
+    if(static_world_order_policy_==OpenGlStaticWorldOrderPolicy::defer_safe_sky &&
+        !scene.static_world->visible_draw_list) {
+        const auto query_begin=static_world_receipt_frame_ ?
+            WorldOrderClock::now() : WorldOrderClock::time_point{};
+        // Owned MSAA storage is DEPTH24_STENCIL8. Caller-owned/default targets
+        // can change attachments under the same FBO name, so do not cache their
+        // precision by GL name. These are state queries, never pixel readbacks.
+        if(implementation_->scene_target.statistics().actual_samples>0U) {
+            order_depth_bits=24U;
+        } else {
+            GLint framebuffer{},object_type{},bits{};
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&framebuffer);
+            const GLenum attachment=framebuffer ? GL_DEPTH_ATTACHMENT : GL_DEPTH;
+            glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                attachment,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,&object_type);
+            // A color-only caller-owned framebuffer is legal. DEPTH_SIZE on
+            // an unattached point is not: it raises GL_INVALID_OPERATION.
+            if(object_type!=GL_NONE)
+                glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                    attachment,GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE,&bits);
+            if(bits>0 && bits<=32) order_depth_bits=static_cast<unsigned>(bits);
+        }
+        // render() deliberately does not change caller depth-range/offset
+        // state. A collapsed range or polygon offset can turn separated
+        // geometric depths into LEQUAL ties, so only screen-disjoint crossing
+        // is eligible when these ordinary depth assumptions are unavailable.
+        std::array<GLdouble,2> depth_range{};
+        glGetDoublev(GL_DEPTH_RANGE,depth_range.data());
+        if(depth_range[0]!=0.0 || depth_range[1]!=1.0 ||
+            glIsEnabled(GL_POLYGON_OFFSET_FILL))
+            order_depth_bits=0U;
+        if(static_world_receipt_frame_)
+            order_target_duration=WorldOrderClock::now()-query_begin;
+    }
+    const bool use_prepared_bsp=
+        static_world_selection_policy_==OpenGlStaticWorldSelectionPolicy::prepared_bsp ||
+        static_world_selection_policy_==OpenGlStaticWorldSelectionPolicy::prepared_bsp_sky_frustum;
     if (scene.static_world->scene_package) {
+        const auto bsp_builds_before=statistics.bsp_preparation_count;
+        const auto bsp_allocations_before=statistics.bsp_storage_allocation_count;
         auto& resources = implementation_->ensure_scene_resources(
-            scene.static_world->scene_package);
+            scene.static_world->scene_package,
+            use_prepared_bsp &&
+                !scene.static_world->visible_draw_list);
         if (scene.static_world->visible_draw_list) {
             implementation_->note_visibility(
                 scene.static_world->visible_draw_list->scene_identity(),
@@ -4174,6 +4517,31 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         const auto static_draws_before=frame.draw_calls;
         const auto static_brush_draws_before=frame.brush_draw_calls;
         const auto static_triangles_before=frame.triangles;
+        using BspClock=std::chrono::steady_clock;
+        const auto order_begin=static_receipt ? BspClock::now() : BspClock::time_point{};
+        const auto batch_order=prepare_world_order(resources.world,world_package,
+            *matrix.matrix,RenderExtent{width,height},order_depth_bits,
+            scene.static_world->visible_draw_list ? OpenGlStaticWorldOrderPolicy::original :
+                static_world_order_policy_);
+        if(static_receipt) {
+            static_receipt->sky_order_moved_batches=resources.world.order_scratch.moved;
+            static_receipt->sky_order_blocked_batches=resources.world.order_scratch.blocked;
+            static_receipt->sky_order_preparation_ms=std::chrono::duration<double,std::milli>(
+                BspClock::now()-order_begin+order_target_duration).count();
+        }
+        const auto bsp_selection_start=static_receipt ? BspClock::now() : BspClock::time_point{};
+        const auto pvs_rebuilds_before=resources.prepared_visibility.statistics().pvs_rebuilds;
+        const auto pvs_hits_before=resources.prepared_visibility.statistics().cache_hits;
+        bool bsp_selected=false;
+        if (!scene.static_world->visible_draw_list &&
+            use_prepared_bsp &&
+            resources.prepared_submission_valid) {
+            const auto frustum=world_visibility::WorldViewFrustum::from_view_projection(*matrix.matrix);
+            bsp_selected=frustum && resources.prepared_visibility.select(
+                view_camera,*frustum.frustum,scene.static_world->cull_mode==RenderCullMode::back,true,
+                static_world_selection_policy_==OpenGlStaticWorldSelectionPolicy::prepared_bsp_sky_frustum);
+        }
+        const auto bsp_selection_end=static_receipt ? BspClock::now() : BspClock::time_point{};
         if (scene.static_world->visible_draw_list) {
             if (static_receipt)
                 static_receipt->path=OpenGlStaticWorldPath::visible_commands;
@@ -4242,6 +4610,142 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             }
             statistics.rendered_command_count +=
                 static_cast<std::uint64_t>(commands.size());
+        } else if (bsp_selected) {
+            const auto& selected=resources.prepared_visibility;
+            const auto& counters=selected.statistics();
+            const auto bits=selected.selected_surfaces();
+            const auto surfaces=world_package.surface_ranges();
+            const auto batches=world_package.draw_batches();
+            BspClock::duration submit_duration{};
+            const auto commands_begin=static_receipt ? BspClock::now() : BspClock::time_point{};
+            std::uint64_t pvs_index_bytes{};
+            if (resources.uploaded_pvs_context!=counters.pvs_rebuilds) {
+                resources.pvs_indices.clear();
+                const auto pvs=selected.pvs_surfaces();
+                const auto indices=world_package.indices();
+                for (const auto i:resources.ordered_surfaces) {
+                    resources.pvs_surface_first[i]=static_cast<std::uint32_t>(resources.pvs_indices.size());
+                    if (!pvs[i]) continue;
+                    const auto& surface=surfaces[i];
+                    resources.pvs_indices.insert(resources.pvs_indices.end(),
+                        indices.begin()+surface.first_index,
+                        indices.begin()+surface.first_index+surface.index_count);
+                }
+                const auto upload_begin=static_receipt ? BspClock::now() : BspClock::time_point{};
+                if (!resources.pvs_index_buffer.name()) resources.pvs_index_buffer=create_buffer();
+                glBindBuffer(GL_COPY_WRITE_BUFFER,resources.pvs_index_buffer.name());
+                // Orphan instead of overwriting storage still consumed by an
+                // earlier frame. No wait, fence polling or vertex re-upload.
+                glBufferData(GL_COPY_WRITE_BUFFER,to_gl_buffer_size(
+                    world_package.indices().size()*sizeof(std::uint32_t),"PVS index capacity"),
+                    nullptr,GL_STREAM_DRAW);
+                pvs_index_bytes=resources.pvs_indices.size()*sizeof(std::uint32_t);
+                if (pvs_index_bytes)
+                    glBufferSubData(GL_COPY_WRITE_BUFFER,0,to_gl_buffer_size(
+                        static_cast<std::size_t>(pvs_index_bytes),"PVS index stream"),resources.pvs_indices.data());
+                glBindBuffer(GL_COPY_WRITE_BUFFER,0);
+                require_no_gl_error(OpenGlRendererErrorCode::buffer_upload_failed,"PVS index stream");
+                if (static_receipt) submit_duration+=BspClock::now()-upload_begin;
+                resources.uploaded_pvs_context=counters.pvs_rebuilds;
+            }
+            const auto bind_begin=static_receipt ? BspClock::now() : BspClock::time_point{};
+            glBindVertexArray(resources.world.geometry.vertex_array.name());
+            ++frame.vertex_array_binds;
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,resources.pvs_index_buffer.name());
+            if (static_receipt) submit_duration+=BspClock::now()-bind_begin;
+            // Visibility still runs for the final camera every frame. Reuse
+            // only the exact resulting selection and compact-index context;
+            // a leaf-only key would retain stale frustum/backface ranges.
+            const bool command_cache_hit=resources.command_cache_valid &&
+                resources.command_pvs_context==resources.uploaded_pvs_context &&
+                std::equal(bits.begin(),bits.end(),resources.command_selection.begin(),
+                    resources.command_selection.end());
+            if (!command_cache_hit) {
+                resources.command_cache_valid=false;
+                auto& counts=resources.selected_counts;
+                auto& offsets=resources.selected_offsets;
+                counts.clear();offsets.clear();
+                resources.command_surface_count=0U;
+                for (std::size_t b=0;b<batches.size();++b) {
+                    auto& batch_ranges=resources.selected_batches[b];
+                    batch_ranges={counts.size(),0U,0U};
+                    std::uint32_t previous_end{};
+                    for (auto i=resources.batch_surface_offsets[b];i<resources.batch_surface_offsets[b+1U];++i) {
+                        const auto surface_index=resources.ordered_surfaces[i];
+                        if (!bits[surface_index]) continue;
+                        const auto& surface=surfaces[surface_index];
+                        ++resources.command_surface_count;
+                        batch_ranges.index_count+=surface.index_count;
+                        const auto first=resources.pvs_surface_first[surface_index];
+                        // Never merge across the original material boundary.
+                        if (counts.size()>batch_ranges.first_range && previous_end==first) {
+                            counts.back()+=static_cast<GLsizei>(surface.index_count);
+                        } else {
+                            counts.push_back(static_cast<GLsizei>(surface.index_count));
+                            offsets.push_back(reinterpret_cast<const void*>(
+                                static_cast<std::uintptr_t>(first)*sizeof(std::uint32_t)));
+                        }
+                        previous_end=first+surface.index_count;
+                    }
+                    batch_ranges.range_count=counts.size()-batch_ranges.first_range;
+                }
+                std::copy(bits.begin(),bits.end(),resources.command_selection.begin());
+                resources.command_pvs_context=resources.uploaded_pvs_context;
+                resources.command_cache_valid=true;
+            }
+            for (std::size_t ordinal=0;ordinal<batches.size();++ordinal) {
+                const auto b=batch_order.empty() ? ordinal : batch_order[ordinal];
+                const auto& batch_ranges=resources.selected_batches[b];
+                if (!batch_ranges.range_count) continue;
+                const PreparedWorldMultiDraw command{
+                    std::span<const GLsizei>{resources.selected_counts}.subspan(
+                        batch_ranges.first_range,batch_ranges.range_count),
+                    std::span<const void* const>{resources.selected_offsets}.subspan(
+                        batch_ranges.first_range,batch_ranges.range_count),
+                    batch_ranges.index_count};
+                const auto submit_begin=static_receipt ? BspClock::now() : BspClock::time_point{};
+                draw_package_range(resources.world,world_package,0U,0U,batches[b].render_material_index,
+                    *matrix.matrix,RenderMatrix4{},false,frame,draw_state,0U,&command);
+                if (static_receipt) submit_duration+=BspClock::now()-submit_begin;
+            }
+            const auto restore_begin=static_receipt ? BspClock::now() : BspClock::time_point{};
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,resources.world.geometry.index_buffer.name());
+            if (static_receipt) submit_duration+=BspClock::now()-restore_begin;
+            if (static_receipt) {
+                static_receipt->path=OpenGlStaticWorldPath::prepared_bsp;
+                static_receipt->pvs_fallback_code=static_cast<std::uint64_t>(counters.fallback);
+                if (counters.fallback!=PreparedWorldPvsFallback::none)
+                    static_receipt->fallback=OpenGlStaticWorldFallback::pvs_conservative;
+                static_receipt->considered_surfaces=counters.considered_surfaces;
+                static_receipt->selected_surfaces=counters.selected_surfaces;
+                static_receipt->submitted_surfaces=resources.command_surface_count;
+                static_receipt->submitted_ranges=resources.selected_counts.size();
+                static_receipt->command_cache_hits=command_cache_hit ? 1U : 0U;
+                static_receipt->command_rebuilds=command_cache_hit ? 0U : 1U;
+                static_receipt->tested_bounds=counters.tested_bounds;
+                static_receipt->bsp_visited_nodes=counters.visited_nodes;
+                static_receipt->bsp_pvs_rejected_nodes=counters.pvs_rejected_nodes;
+                static_receipt->bsp_frustum_rejected_nodes=counters.frustum_rejected_nodes;
+                static_receipt->pvs_rebuilds=counters.pvs_rebuilds-pvs_rebuilds_before;
+                static_receipt->pvs_index_upload_bytes=pvs_index_bytes;
+                static_receipt->pvs_cache_hits=counters.cache_hits-pvs_hits_before;
+                static_receipt->prepared_rebuilds=statistics.bsp_preparation_count-bsp_builds_before;
+                static_receipt->prepared_bytes=counters.prepared_bytes+
+                    resources.ordered_surfaces.capacity()*sizeof(std::size_t)+
+                    resources.batch_surface_offsets.capacity()*sizeof(std::size_t)+
+                    resources.selected_counts.capacity()*sizeof(GLsizei)+
+                    resources.selected_offsets.capacity()*sizeof(const void*)+
+                    resources.selected_batches.capacity()*sizeof(PreparedWorldBatchRanges)+
+                    resources.command_selection.capacity()*sizeof(std::uint8_t)+
+                    resources.pvs_indices.capacity()*sizeof(std::uint32_t)+
+                    resources.pvs_surface_first.capacity()*sizeof(std::uint32_t);
+                static_receipt->prepared_allocations=statistics.bsp_storage_allocation_count-bsp_allocations_before;
+                static_receipt->selection_preparation_ms=std::chrono::duration<double,std::milli>(
+                    bsp_selection_end-bsp_selection_start).count();
+                static_receipt->command_preparation_ms=std::chrono::duration<double,std::milli>(
+                    BspClock::now()-commands_begin-submit_duration).count();
+                static_receipt->submission_ms=std::chrono::duration<double,std::milli>(submit_duration).count();
+            }
         } else {
             const auto batches = world_package.draw_batches();
             const auto prepared_batches =
@@ -4312,8 +4816,8 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 }
             }
             constexpr std::size_t maximum_runs_per_batch = 4U;
-            for (std::size_t batch_index = 0U; batch_index < batches.size();
-                 ++batch_index) {
+            for (std::size_t ordinal=0U;ordinal<batches.size();++ordinal) {
+                const auto batch_index=batch_order.empty() ? ordinal : batch_order[ordinal];
                 const auto& batch = batches[batch_index];
                 const auto draw_range = [&](const std::uint32_t first,
                                             const std::uint32_t count) {
@@ -4445,9 +4949,18 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 static_receipt->selection_preparation_ms=
                     std::chrono::duration<double,std::milli>(
                         selection_duration).count();
+                // Already measured above: expose the legacy draw-call scope
+                // for matched offline attribution. Its selection timer also
+                // includes range construction; do not invent a separate zero
+                // command-preparation cost for this interleaved path.
+                static_receipt->submission_ms=
+                    std::chrono::duration<double,std::milli>(draw_duration).count();
+                if (use_prepared_bsp)
+                    static_receipt->fallback=OpenGlStaticWorldFallback::bsp_unavailable;
             }
         }
         if (static_receipt) {
+            static_receipt->sky_submitted_triangles=frame.sky_triangles;
             static_receipt->api_draws=frame.draw_calls-static_draws_before-
                 (frame.brush_draw_calls-static_brush_draws_before);
             if (static_receipt->path!=OpenGlStaticWorldPath::visible_commands)
@@ -4515,7 +5028,11 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         auto& resources = implementation_->ensure_resources(
             scene.static_world->package);
         const auto& package = *scene.static_world->package;
-        for (const auto& batch : package.draw_batches()) {
+        const auto batch_order=prepare_world_order(resources,package,*matrix.matrix,
+            RenderExtent{width,height},order_depth_bits,static_world_order_policy_);
+        const auto batches=package.draw_batches();
+        for(std::size_t ordinal=0;ordinal<batches.size();++ordinal) {
+            const auto& batch=batches[batch_order.empty() ? ordinal : batch_order[ordinal]];
             draw_package_range(
                 resources,
                 package,

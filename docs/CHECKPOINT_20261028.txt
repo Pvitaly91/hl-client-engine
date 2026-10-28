@@ -1,0 +1,49 @@
+CHECKPOINT ВИХІДНОГО СТАНУ — 28.10.2026
+
+Цей коміт зберігає накопичений поточний development working tree, а не
+проголошує всі експериментальні зміни новою стабільною ігровою збіркою.
+Попередня accepted B6 Git-база:97fd41e0f9d709255dc71723f035d88400c4d2e2.
+Збережено launcher GPU/original-HL controls, native sky checkbox/process-env
+glue, rendering/visibility experiments, тести, offline workflow scripts і
+історичні підсумки попередніх оптимізацій. Історичні поля commit/push=none
+в evidence описують момент відповідних вимірів, а не цей поточний commit.
+
+Root renderer/client не є точними source inputs окремого sky EXE9f4616bd.
+Його вихідна реалізація збережена окремим НЕАКТИВНИМ source patch у
+experiments/background-sky-20261028/ проти accepted бази. Patch перевірено
+на новій scratch копії: всі 6 Git source blobs збігаються з frozen inputs.
+Неприйняті BSP/visibility та sky зміни не перенесені у доставлений B6.
+
+Активна робоча доставка під час checkpoint не замінюється:
+client24a55d8e041d0cce0a651d09d064c73611c8b7b9f648b2560e7347de616e5ace;
+launcherfd0cb49ca76e5130a5b9eab291f8f1ab5226c744d4afb5fbab0879d8965007a1;
+canonicalZIPe6aae5d6c46a3e93de46e5e8f5470d1f945715d762c7accae00d53bfccf5c9f5.
+Шляхи:build/bin/Release, shared HLClient-Win10-Test, dist/HLClientEngine.
+Окремі test-sky і shared HLClient-Sky-Real-Test-20261028-9f4616bd містять
+client9f4616bd/native launcher727cb99d; байти локально/shared звірені.
+Це дотримується прямої умови тестового етапу НЕ замінювати production.
+
+Останній native launcher: один EXE, прапорець «Новий режим неба»:
+знято=original, встановлено=depth. Вибір per-PC, child-only environment,
+глобальні змінні не змінюються. Original-HL кнопка не використовує sky policy.
+193 процесні assertions та offline UI перевірка PASS; реальні UNC запуски
+через native Connect з обома policies: gameplay=true, exit0. Це не Win10/HD4600
+acceptance. Перевірено з ПК розробника build26300.
+
+Останні два користувацькі тести локального test-sky:
+43b963ccfd234a2c4622bb0acbd77a62(original) та
+ce5336973883afaa12191b0ee181a844(depth).
+Однакові client/launcher/config, GPU LUID (RTX4060),1920x1080/MSAA4,
+VSync off/cap0, game+system diagnostics on, штатне закриття exit0.
+Controlled-alive mean frame4.684106→3.956475мс, FPS-equivalent213.49→252.75,
+p95 histogram upper bound8мс в обох; max20.9167→26.1574мс;
+>20мс:1→2; >33.3мс:0→0. Це описові unmatched gameplay записи,
+не causal speedup: новий late path0 кадрів, gl_state fallback15108.
+Системне CPU навантаження39.45%→32.03%, різні сценічні/Studio workloads.
+Не оголошувати цей результат прийняттям оптимізації неба.
+
+Git hygiene: build/dist/manual-artifacts/test-sky, сирі журнали, EXE/DLL/ZIP,
+особисті settings/auth і ресурси Valve не включаються. .gitignore доповнено
+лише /test-sky/. Перевірка diff whitespace та scoped credential patterns PASS.
+Цей запит commit/push не запускає нові gameplay/performance/build suites,
+не замінює дві інсталяції, не змінює сервер/Windows/GPU settings.

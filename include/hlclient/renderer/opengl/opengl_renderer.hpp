@@ -87,11 +87,21 @@ private:
 
 enum class OpenGlStaticWorldPath : std::uint8_t {
     none, visible_commands, original_batches, prepared_bypass,
-    prepared_selected
+    prepared_selected, prepared_bsp
 };
 enum class OpenGlStaticWorldFallback : std::uint8_t {
     none, prepared_unavailable, insufficient_probe_rejections,
-    invalid_prepared_batch, fragmented_batch
+    invalid_prepared_batch, fragmented_batch, bsp_unavailable, pvs_conservative
+};
+// The retained B6 selector is an explicit correctness/performance control,
+// not a server-specific policy or a hidden graphics-quality setting.
+enum class OpenGlStaticWorldSelectionPolicy : std::uint8_t {
+    prepared_bsp, legacy_prepared_frustum, prepared_bsp_sky_frustum
+};
+// Independent opt-in experiment: visibility, finite sky geometry and depth
+// semantics remain unchanged. Uncertain ordering retains the original order.
+enum class OpenGlStaticWorldOrderPolicy : std::uint8_t {
+    original, defer_safe_sky
 };
 // One completed renderer frame, not cumulative and not a count of visible
 // pixels. Optional CPU timing is collected only for diagnostic-timed frames.
@@ -109,6 +119,17 @@ struct OpenGlStaticWorldFrameReceipt final {
     // Immutable owner creation occurs before render(); this renderer cannot
     // infer its cost or rebuild count from a GPU resource upload.
     std::optional<std::uint64_t> prepared_rebuilds;
+    std::optional<std::uint64_t> bsp_visited_nodes,bsp_pvs_rejected_nodes,
+        bsp_frustum_rejected_nodes,pvs_rebuilds,pvs_cache_hits,prepared_bytes,
+        prepared_allocations,submitted_surfaces,submitted_ranges;
+    std::optional<std::uint64_t> pvs_fallback_code;
+    std::optional<std::uint64_t> pvs_index_upload_bytes;
+    // Exact final-selection command reuse; unknown on legacy paths.
+    std::optional<std::uint64_t> command_cache_hits,command_rebuilds;
+    std::optional<double> command_preparation_ms,submission_ms;
+    std::optional<std::uint64_t> sky_submitted_triangles,
+        sky_order_moved_batches,sky_order_blocked_batches;
+    std::optional<double> sky_order_preparation_ms;
 };
 
 struct OpenGlWorldRendererStatistics {
@@ -129,6 +150,8 @@ struct OpenGlWorldRendererStatistics {
     std::uint64_t prepared_world_full_batch_fallback_count{0U};
     std::uint64_t prepared_world_probed_block_count{0U};
     std::uint64_t prepared_world_all_batch_bypass_frame_count{0U};
+    std::uint64_t bsp_preparation_count{0U};
+    std::uint64_t bsp_storage_allocation_count{0U};
     std::optional<OpenGlStaticWorldFrameReceipt> last_static_world_frame;
     std::uint64_t rendered_command_count{0U};
     std::uint64_t triangle_count{0U};
@@ -288,6 +311,12 @@ public:
     // Release per-session resources/statistics without destroying the window,
     // context or the persistent screen UI and its owned background texture.
     void reset_session_resources();
+    void set_static_world_selection_policy(OpenGlStaticWorldSelectionPolicy policy) noexcept {
+        static_world_selection_policy_=policy;
+    }
+    void set_static_world_order_policy(OpenGlStaticWorldOrderPolicy policy) noexcept {
+        static_world_order_policy_=policy;
+    }
     void render(const RenderScene& scene, RenderExtent extent) override;
     // Optional nonblocking GPU observation. Ordinary render() allocates no
     // queries. Results retain the original frame identity, not the poll frame.
@@ -318,6 +347,12 @@ private:
     std::unique_ptr<Implementation> implementation_;
     bool loader_initialized_{false};
     std::optional<std::uint64_t> static_world_receipt_frame_;
+    OpenGlStaticWorldSelectionPolicy static_world_selection_policy_{
+        // Candidate is retained for explicit offline tests. It passed exact
+        // rendering but not the predeclared all-scene performance gate.
+        OpenGlStaticWorldSelectionPolicy::legacy_prepared_frustum};
+    OpenGlStaticWorldOrderPolicy static_world_order_policy_{
+        OpenGlStaticWorldOrderPolicy::original};
 };
 
 } // namespace hlclient::renderer::opengl

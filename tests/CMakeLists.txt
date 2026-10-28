@@ -350,6 +350,7 @@ add_executable(hlclient_tests
     test_viewmodel_clipping.cpp
     test_world_view_frustum.cpp
     test_world_visibility_resolver.cpp
+    test_prepared_world_visibility.cpp
     test_world_visible_draw_list.cpp
     test_world_scene_render_package.cpp
     test_world_preview_scene.cpp
@@ -731,6 +732,7 @@ set_tests_properties(hlclient_studio_submission_0c29_offline PROPERTIES
 
 add_executable(hlclient_gauss_71b97_tests test_gauss_frame_cost_71b97.cpp
     gauss_world_visibility_control.cpp
+    test_prepared_world_visibility.cpp
     test_runtime_world_visibility.cpp
     test_video_image_e31.cpp test_external_diagnostics_e31.cpp
     test_opengl_world_renderer.cpp test_runtime_replay_local_assets.cpp)

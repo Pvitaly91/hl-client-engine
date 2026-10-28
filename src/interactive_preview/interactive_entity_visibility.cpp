@@ -154,6 +154,9 @@ InteractiveEntityVisibilityRefilter::refilter(
         InteractiveEntityVisibilityRefilterStatistics statistics;
         statistics.source_candidate_count =
             source_frame.statistics().candidate_count;
+        // A final-camera-only Studio omission carries no pose. Resetting the
+        // status does not restore one: the builder rechecks both omission
+        // bounds against this camera and rejects any attempted reveal.
         reset_camera_culls(build_input.studio_instances, statistics);
         reset_camera_culls(build_input.sprite_instances, statistics);
         reset_camera_culls(build_input.unsupported_instances, statistics);

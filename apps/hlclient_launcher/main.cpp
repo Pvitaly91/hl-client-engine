@@ -4,6 +4,7 @@
 #include <hlclient/platform/sdl_runtime.hpp>
 #include <hlclient/platform/sdl_window.hpp>
 #include <hlclient/platform/windows/external_launcher.hpp>
+#include <hlclient/platform/windows/executable_launch_path.hpp>
 #include <hlclient/platform/windows/external_launch_preflight.hpp>
 #include <hlclient/platform/windows/session_receipt_file.hpp>
 #include <hlclient/platform/windows/shared_test_storage.hpp>
@@ -27,6 +28,8 @@
 #include "smooth_scroll.hpp"
 #include "smooth_scroll_check.hpp"
 #include "startup_journal.hpp"
+#include "gpu_preference.hpp"
+#include "original_half_life.hpp"
 
 namespace {
 namespace core=hlclient::core;
@@ -38,9 +41,9 @@ enum Control : int {server=101,name,display,resolution,mode,vsync,brightness,gam
     reset_image,assets,choose_assets,runtime,choose_runtime,connect_button,cancel_button,report_button,status_label,
     image_values,dependency_label,client_label,mode_note,save_button,
     hud_mode,hud_scale,hud_values,reset_hud,msaa,movement_diagnostics,movement_hotkey,open_client_button,system_diagnostics,
-    startup_folder,startup_export,show_fps};
+    startup_folder,startup_export,show_fps,gpu_choice,gpu_actual,gpu_settings,original_hl_button,background_sky};
 struct Positioned {HWND control{};int x{},y{},w{},h{};};
-struct Progress {bool finished{},success{},started{},cancel_timed_out{},system_diagnostics_requested{},system_archive_ready{};std::string stage{"checking_resources"},reason,system_helper_status{"not_requested"};std::filesystem::path report,system_run_folder;std::optional<core::SceneAntialiasingObservation> antialiasing;};
+struct Progress {bool finished{},success{},started{},cancel_timed_out{},system_diagnostics_requested{},system_archive_ready{},original_hl{};std::string stage{"checking_resources"},reason,system_helper_status{"not_requested"},actual_gpu;std::filesystem::path report,system_run_folder;std::optional<core::SceneAntialiasingObservation> antialiasing;};
 bool fullscreen_close_confirmed(const Progress& progress) noexcept
 {
     return progress.finished && progress.success &&
@@ -62,6 +65,8 @@ struct Ui {
     std::vector<platform::VideoDisplay> displays;
     std::vector<std::pair<int,int>> resolutions;
     core::ExternalLauncherLifecycle lifecycle;
+    hlclient::launcher::GpuPreference gpu_preference{hlclient::launcher::GpuPreference::automatic};
+    native::BackgroundSkyPolicy sky_policy{native::BackgroundSkyPolicy::original};
     std::unique_ptr<Worker> worker;
     bool close_after{},offline_check{},scroll_timer{};int scroll_pixels{},offline_exit_code{2};std::string settings_status;
     UINT font_dpi{};hlclient::launcher::SmoothScroll scroll;
@@ -135,9 +140,11 @@ void layout(Ui&ui)
     }
     RECT client{};::GetClientRect(ui.window,&client);
     const int page=::MulDiv(client.bottom,96,static_cast<int>(ui.dpi));
-    ui.scroll.reset(ui.scroll.position(),std::max(0,1100-page));
-    SCROLLINFO scroll{sizeof(SCROLLINFO),SIF_RANGE|SIF_PAGE|SIF_POS,0,1099,static_cast<UINT>(std::max(1,page)),static_cast<int>(std::lround(ui.scroll.position())),0};
+    int content_height=0;for(const auto&p:ui.controls)content_height=std::max(content_height,p.y+p.h+20);
+    ui.scroll.reset(ui.scroll.position(),std::max(0,content_height-page));
+    SCROLLINFO scroll{sizeof(SCROLLINFO),SIF_RANGE|SIF_PAGE|SIF_POS,0,content_height-1,static_cast<UINT>(std::max(1,page)),static_cast<int>(std::lround(ui.scroll.position())),0};
     ::SetScrollInfo(ui.window,SB_VERT,&scroll,TRUE);
+    if(get(ui,gpu_choice))::SendMessageW(get(ui,gpu_choice),CB_SETDROPPEDWIDTH,static_cast<WPARAM>(scaled(ui,490)),0);
     position_controls(ui,true);
 }
 void scroll_bar(Ui&ui,UINT code,int track,int page)
@@ -194,8 +201,8 @@ void update_image_labels(Ui&ui)
 }
 void update_modes(Ui&ui)
 {
-    const bool borderless=::SendMessageW(get(ui,mode),BM_GETCHECK,0,0)!=BST_CHECKED;::EnableWindow(get(ui,resolution),!borderless && !ui.lifecycle.busy());
-    text(ui,mode_note,borderless?L"Повноекранний: розмір робочого столу, без рамки.":L"Віконний: обраний розмір області гри.");
+    const bool borderless=::SendMessageW(get(ui,mode),BM_GETCHECK,0,0)!=BST_CHECKED;::EnableWindow(get(ui,resolution),!ui.lifecycle.busy());
+    text(ui,mode_note,borderless?L"Повний екран: клієнт — робочий стіл; HL — обрана роздільність.":L"Віконний: обраний розмір області гри.");
 }
 void fill_resolutions(Ui&ui)
 {
@@ -225,6 +232,10 @@ bool refresh_displays(Ui&ui)
 }
 bool collect(Ui&ui,bool show_error)
 {
+    const int gpu=selected(ui,gpu_choice);if(gpu<0 || gpu>2)return false;
+    ui.gpu_preference=static_cast<hlclient::launcher::GpuPreference>(gpu);
+    ui.sky_policy=::SendMessageW(get(ui,background_sky),BM_GETCHECK,0,0)==BST_CHECKED?
+        native::BackgroundSkyPolicy::depth:native::BackgroundSkyPolicy::original;
     auto c=ui.configuration;c.endpoint=native::external_utf8(read_control(ui,server));c.name=native::external_utf8(read_control(ui,name));c.asset_root=native::external_utf8(read_control(ui,assets));c.steam_api_runtime=native::external_utf8(read_control(ui,runtime));
     c.video.display_index=static_cast<std::size_t>(std::max(0,selected(ui,display)));c.video.mode=::SendMessageW(get(ui,mode),BM_GETCHECK,0,0)==BST_CHECKED?core::VideoWindowMode::windowed:core::VideoWindowMode::borderless;
     const auto i=static_cast<std::size_t>(std::max(0,selected(ui,resolution)));if(i<ui.resolutions.size()){c.video.width=ui.resolutions[i].first;c.video.height=ui.resolutions[i].second;}
@@ -248,6 +259,7 @@ core::ExternalLaunchConfiguration configuration_for_run(core::ExternalLaunchConf
 }
 void fill(Ui&ui)
 {
+    ::SendMessageW(get(ui,background_sky),BM_SETCHECK,ui.sky_policy==native::BackgroundSkyPolicy::depth?BST_CHECKED:BST_UNCHECKED,0);
     for(const int id:{display,msaa,hud_mode})::SendMessageW(get(ui,id),CB_RESETCONTENT,0,0);
     text(ui,server,native::external_widen(ui.configuration.endpoint));text(ui,name,native::external_widen(ui.configuration.name));text(ui,assets,native::external_widen(ui.configuration.asset_root));text(ui,runtime,native::external_widen(ui.configuration.steam_api_runtime));text(ui,client_label,L"Клієнт: "+ui.executable.wstring());
     for(const auto&d:ui.displays)choice(ui,display,native::external_widen(d.name)+L" — "+std::to_wstring(d.desktop_width)+L" × "+std::to_wstring(d.desktop_height));
@@ -295,11 +307,12 @@ void create_controls(Ui&ui)
     label(ui,L"Налаштування застосовуються до наступного запуску гри.",22,651,605);
     button(ui,connect_button,L"Підключитися",20,681,157,true);button(ui,cancel_button,L"Від’єднатися",187,681,174);button(ui,report_button,L"Відкрити звіт",371,681,133);button(ui,save_button,L"Зберегти",514,681,104);
     button(ui,open_client_button,L"Відкрити клієнт",20,717,202);
+    button(ui,original_hl_button,L"Оригінальний Half-Life → сервер",232,717,386);
     static_cast<void>(add(ui,status_label,L"STATIC",L"",0,22,763,595,60));
     // Insert the independent HUD/AA controls before image settings. Native
     // coordinates below are DPI-scaled once; they are never in-game HUD units.
     for(auto& p:ui.controls)if(p.y>=278)p.y+=135;
-    static_cast<void>(add(ui,0,L"BUTTON",L"HUD і згладжування",BS_GROUPBOX,16,278,610,123));
+    const auto hud_group=add(ui,0,L"BUTTON",L"HUD і згладжування",BS_GROUPBOX,16,278,610,123);
     label(ui,L"Масштаб HUD",28,304,110);combo(ui,hud_mode,145,299,175);
     const auto hud_slider=add(ui,hud_scale,TRACKBAR_CLASSW,L"",WS_TABSTOP|TBS_AUTOTICKS,325,299,158,30);
     ::SendMessageW(hud_slider,TBM_SETRANGE,TRUE,MAKELPARAM(50,200));button(ui,reset_hud,L"Скинути",487,299,108);
@@ -316,6 +329,23 @@ void create_controls(Ui&ui)
     button(ui,startup_export,L"Зберегти ZIP логів…",305,518,288);
     label(ui,native::shared_test_storage_root()?L"Мережевий тест: усі журнали у test-data поруч із програмою.":L"Короткий журнал запуску зберігається завжди, навіть без діагностики.",28,553,565,18);
     if(native::shared_test_storage_root())::SendMessageW(get(ui,system_diagnostics),BM_SETCHECK,BST_CHECKED,0);
+    // Separate launcher-only choice: never extend the client's strict v3 JSON.
+    for(auto&p:ui.controls)if(p.y>=278)p.y+=92;
+    for(auto&p:ui.controls)if(p.y==124)p.h+=92;
+    label(ui,L"Відеокарта",28,258,105);combo(ui,gpu_choice,135,253,365);
+    button(ui,gpu_settings,L"Windows…",510,250,85);
+    const auto adapters=ui.offline_check?hlclient::launcher::GpuAdapterLabels{}:hlclient::launcher::read_gpu_adapter_labels();
+    choice(ui,gpu_choice,L"Авто — вибирає Windows");
+    choice(ui,gpu_choice,adapters.power_saving.empty()?L"Енергозбереження":L"Енергозбереження — "+adapters.power_saving);
+    choice(ui,gpu_choice,adapters.high_performance.empty()?L"Висока продуктивність":L"Висока продуктивність — "+adapters.high_performance);
+    select(ui,gpu_choice,static_cast<int>(ui.gpu_preference));
+    static_cast<void>(add(ui,gpu_actual,L"STATIC",L"GPU застосовується до наступного запуску клієнта або HL. Фактична GPU клієнта з’явиться після запуску.",0,28,290,565,54));
+    for(auto&p:ui.controls)if(p.control==get(ui,status_label))p.y+=42;
+    label(ui,L"Оригінальний HL: сервер, ім’я, GPU, роздільність і режим вікна. HUD/MSAA та діагностика вище — для нашого клієнта.",22,1152,595,42);
+    // One native opt-in control; no shell scripts or process-wide environment edits.
+    for(auto& p:ui.controls){if(p.control==hud_group)p.h+=56;else if(p.y>=504)p.y+=56;}
+    static_cast<void>(add(ui,background_sky,L"BUTTON",L"Новий режим неба (тестовий)",WS_TABSTOP|BS_AUTOCHECKBOX,28,489,565,24));
+    label(ui,L"Знято — старий (original); увімкнено — новий (depth).",28,516,565,22);
     ::EnableWindow(get(ui,cancel_button),FALSE);::EnableWindow(get(ui,report_button),FALSE);layout(ui);fill(ui);
 }
 void browse(Ui&ui,bool folder)
@@ -352,9 +382,54 @@ void open_startup_logs(Ui&ui,bool archive)
     static_cast<void>(::ShellExecuteW(ui.window,L"open",L"explorer.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL));
     text(ui,status_label,L"ZIP логів готовий: "+zip.wstring());
 }
+std::string_view gpu_token(hlclient::launcher::GpuPreference value) noexcept
+{
+    using G=hlclient::launcher::GpuPreference;
+    switch(value){case G::automatic:return "automatic";case G::power_saving:return "power_saving";case G::high_performance:return "high_performance";}
+    return "invalid";
+}
+std::optional<hlclient::launcher::GpuPreference> decode_gpu_choice(std::string_view value) noexcept
+{
+    if(value.ends_with("\r\n"))value.remove_suffix(2);else if(value.ends_with('\n'))value.remove_suffix(1);
+    using G=hlclient::launcher::GpuPreference;
+    if(value=="automatic")return G::automatic;
+    if(value=="power_saving")return G::power_saving;
+    if(value=="high_performance")return G::high_performance;
+    return {};
+}
+std::string_view sky_token(native::BackgroundSkyPolicy policy) noexcept
+{
+    return policy==native::BackgroundSkyPolicy::depth?"depth":"original";
+}
+std::optional<native::BackgroundSkyPolicy> decode_sky_choice(std::string_view value) noexcept
+{
+    while(!value.empty() && (value.back()=='\r' || value.back()=='\n'))value.remove_suffix(1);
+    if(value=="original")return native::BackgroundSkyPolicy::original;
+    if(value=="depth")return native::BackgroundSkyPolicy::depth;
+    return {};
+}
+std::string observed_client_gpu(std::string_view output)
+{
+    constexpr std::string_view prefix="[opengl-startup] context=1 renderer=";
+    while(!output.empty()){
+        const auto end=output.find('\n');auto line=output.substr(0,std::min(end,output.size()));
+        if(line.starts_with(prefix)){
+            line.remove_prefix(prefix.size());while(!line.empty() && (line.back()=='\r' || line.back()==' '))line.remove_suffix(1);
+            if(line.empty() || line.size()>256 || std::any_of(line.begin(),line.end(),[](unsigned char c){return c<32U || c==127U;}))return {};
+            return std::string{line};
+        }
+        if(end==std::string_view::npos)break;output.remove_prefix(end+1);
+    }
+    return {};
+}
 std::wstring stage_label(const Progress&p)
 {
+    if(p.original_hl && p.started && !p.finished)return p.cancel_timed_out?L"Half-Life не закрився. Закрийте його через меню гри.":p.stage=="disconnecting"?L"Закриття оригінального Half-Life…":L"Оригінальний Half-Life запущено. Підключення виконує сама гра.";
     if(p.finished){
+        if(p.original_hl && p.success)return L"Оригінальний Half-Life закрито. Можна запустити знову.";
+        if(p.reason=="gpu_preference_path_unsupported")return L"Шлях EXE надто довгий або не підтримує безпечний запуск із GPU-пріоритетом. Використайте коротку звичайну папку чи UNC-шлях.";
+        if(p.reason=="run_output_path_too_long")return L"Шлях папки тесту надто довгий для журналів. Перемістіть увесь пакет у коротку папку, наприклад D:\\HL-Sky-Test.";
+        if(p.reason=="gpu_preference_failed")return L"Не вдалося застосувати вибір GPU. Відкрийте «Windows…» для налаштувань графіки; деталі — у логах запуску.";
         if(p.reason=="startup_cancelled" || p.reason=="cancelled_before_gameplay")return L"Підключення скасовано. Можна спробувати знову.";
         if(p.success)return L"Завершено. Можна підключитися знову.";
         if(p.reason=="active_research_session_conflict")return L"Цей hlclient.exe ізольовано активним дослідницьким тестом. Закрийте його штатно й повторіть підключення.";
@@ -436,7 +511,7 @@ struct SystemDiagnosticsHelper {
         return code==0?"helper_exited_0":"helper_exit_"+std::to_string(code);
     }
 };
-void run_child(Worker&worker,const core::ExternalLaunchConfiguration configuration,const std::filesystem::path client,const std::filesystem::path launcher,const std::filesystem::path storage,const bool open_client,const bool system_diagnostics_enabled,hlclient::launcher::StartupJournal*startup)
+void run_child(Worker&worker,const core::ExternalLaunchConfiguration configuration,const std::filesystem::path client,const std::filesystem::path launcher,const std::filesystem::path storage,const bool open_client,const bool system_diagnostics_enabled,hlclient::launcher::StartupJournal*startup,const std::optional<hlclient::launcher::GpuPreference> gpu_request={},const native::BackgroundSkyPolicy sky_policy=native::BackgroundSkyPolicy::original)
 {
     Progress p;p.system_diagnostics_requested=system_diagnostics_enabled;
     std::filesystem::path run;std::string run_id,client_sha,launcher_sha,config_sha,isolation="not_observed";std::optional<app::SessionReceiptSnapshot> receipt;std::optional<std::uint32_t> exit;std::uint32_t pid{};std::uint64_t creation{};bool forced{};
@@ -461,6 +536,7 @@ void run_child(Worker&worker,const core::ExternalLaunchConfiguration configurati
                     "\"owned_helpers\":"+std::string{system_helper.process?"1":"0"});
             const auto with_diagnostics=report_with_helper.substr(0,report_with_helper.size()-2)+
                 ",\n\"startup_mode\":"+core::external_json_string(open_client?"open_client":"connect")+
+                ",\n\"requested_background_sky_policy\":"+core::external_json_string(sky_token(sky_policy))+
                 ",\n\"application_result_is_gameplay_acceptance\":false"+
                 ",\n\"primary_failure_reason\":"+core::external_json_string(failures.primary_reason.empty()?"none":failures.primary_reason)+
                 ",\n\"cleanup_failure_reason\":"+core::external_json_string(failures.cleanup_reason.empty()?"none":failures.cleanup_reason)+
@@ -512,6 +588,10 @@ void run_child(Worker&worker,const core::ExternalLaunchConfiguration configurati
     try{
         if(startup){startup->record("client_launch_requested",open_client?"open_client":"connect");startup->number("game_diagnostics_enabled",configuration.movement_diagnostics?1U:0U);startup->number("system_diagnostics_enabled",system_diagnostics_enabled?1U:0U);startup->number("requested_msaa",configuration.video.msaa_samples);startup->number("requested_width",static_cast<unsigned>(configuration.video.width));startup->number("requested_height",static_cast<unsigned>(configuration.video.height));}
         run_id=native::new_external_run_id();if(run_id.empty()){finalize(false,"run_identity_failed");return;}
+        if(startup)startup->record("background_sky_policy_requested",sky_token(sky_policy));
+        // The accepted secure-output lock uses a 65-character filename. Reject
+        // before creating an unusable run; do not silently redirect diagnostics.
+        if((storage/L"runs"/native::external_widen(run_id)).native().size()+66U>=260U){finalize(false,"run_output_path_too_long");return;}
         run=storage/L"runs"/native::external_widen(run_id);std::filesystem::create_directories(run);p.report=run;worker.publish(p);
         auto pinned=native::open_secure_output_directory(run);if(!pinned){finalize(false,"run_directory_unavailable");return;}
         if(system_diagnostics_enabled){
@@ -534,10 +614,20 @@ void run_child(Worker&worker,const core::ExternalLaunchConfiguration configurati
         const auto manifest=std::string{"{\"schema\":\"hlclient.external-launch-identity.v1\",\"run_id\":"}+core::external_json_string(run_id)+",\"client_sha256\":"+core::external_json_string(client_sha)+",\"launcher_sha256\":"+core::external_json_string(launcher_sha)+",\"config_sha256\":"+core::external_json_string(config_sha)+",\"server_process_owned\":false}\n";
         if(!native::write_external_text_atomic(run/L"launch-manifest.json",manifest,false)){finalize(false,"launch_manifest_publication_failed");return;}
         if(worker.cancel){finalize(false,"startup_cancelled");return;}
+        if(gpu_request){
+            // Match the exact ordinary spelling used by the process launcher,
+            // while leaving the original canonical binary identity untouched.
+            const auto gpu_path=native::ordinary_executable_launch_path(binary.identity->canonical_path);
+            if(!gpu_path){finalize(false,"gpu_preference_path_unsupported");return;}
+            const auto gpu=hlclient::launcher::set_gpu_preference(*gpu_path,*gpu_request);
+            if(startup){startup->record("gpu_preference_requested",gpu_token(*gpu_request));startup->record(gpu.succeeded()?"gpu_preference_applied":"gpu_preference_failed",{},gpu.win32_error);}
+            if(!gpu.succeeded()){finalize(false,"gpu_preference_failed");return;}
+        }
+        if(worker.cancel){finalize(false,"startup_cancelled");return;}
         child_owner=std::make_unique<native::ExternalClientProcess>();auto&child=*child_owner;
         std::vector<std::wstring> arguments{L"--external-config",(run/L"launch-config.json").wstring(),L"--session-receipt-root",run.wstring(),L"--session-run-id",native::external_widen(run_id),L"--session-role",L"A"};
         if(open_client)arguments.emplace_back(L"--open-client");
-        if(!child.launch(*binary.identity,arguments)){if(startup)startup->record("child_create_failed",{},child.launch_error());finalize(false,"child_create_failed_"+std::to_string(child.launch_error()));return;}
+        if(!child.launch(*binary.identity,arguments,true,sky_policy)){if(startup)startup->record("child_create_failed",{},child.launch_error());finalize(false,"child_create_failed_"+std::to_string(child.launch_error()));return;}
         if(startup){startup->record("child_created");startup->number("client_pid",child.process_id());}
         pid=child.process_id();creation=child.process_creation();p.started=true;p.stage=open_client?"idle":"connecting";worker.publish(p);
         const auto process_manifest=std::string{"{\"schema\":\"hlclient.external-process-identity.v1\",\"run_id\":"}+core::external_json_string(run_id)+",\"process_id\":"+std::to_string(pid)+",\"process_creation\":"+std::to_string(creation)+",\"client_sha256\":"+core::external_json_string(client_sha)+"}\n";
@@ -552,6 +642,7 @@ void run_child(Worker&worker,const core::ExternalLaunchConfiguration configurati
             if(worker.force && !forced){forced=child.terminate_owned_child(125);}
             if(cancelled && Clock::now()-*cancelled>std::chrono::seconds{8})p.cancel_timed_out=true;
             const auto log=child.log_snapshot();observe_failures(log.bytes);
+            if(p.actual_gpu.empty())p.actual_gpu=observed_client_gpu(log.bytes);
             // A shared test must leave useful error evidence while the child
             // still runs, including when the testing PC loses power later.
             if(startup && Clock::now()>=next_startup_flush){
@@ -571,6 +662,7 @@ void run_child(Worker&worker,const core::ExternalLaunchConfiguration configurati
             worker.publish(p);if(!state.running){exit=state.exit_code;if(!exit && failures.primary_reason.empty())failures.primary_reason="child_wait_failed_"+std::to_string(state.native_error);break;}
             std::this_thread::sleep_for(std::chrono::milliseconds{100});}
         const auto final_log=child.finish_log();observe_failures(final_log.bytes);
+        if(p.actual_gpu.empty())p.actual_gpu=observed_client_gpu(final_log.bytes);
         if(startup)startup->capture_client_output(final_log.bytes);
         const auto safe_log=native::redacted_external_status_log(final_log.bytes)+"[launcher-capture] observed_bytes="+std::to_string(final_log.observed_bytes)+" byte_truncated="+(final_log.byte_truncated?"true":"false")+" capture_failed="+(final_log.capture_failed?"true":"false")+"\n";
         const bool log_published=native::write_external_text_atomic(run/L"client-status.log",safe_log,false);
@@ -584,11 +676,13 @@ void run_child(Worker&worker,const core::ExternalLaunchConfiguration configurati
 }
 void enable_controls(Ui&ui,bool enabled)
 {
-    for(const int id:{server,name,display,resolution,mode,vsync,show_fps,brightness,gamma,contrast,volume,reset_image,hud_mode,hud_scale,reset_hud,msaa,movement_diagnostics,system_diagnostics,assets,choose_assets,runtime,choose_runtime,connect_button,open_client_button,save_button})::EnableWindow(get(ui,id),enabled);
+    for(const int id:{server,name,display,resolution,mode,vsync,show_fps,brightness,gamma,contrast,volume,reset_image,hud_mode,hud_scale,reset_hud,msaa,background_sky,movement_diagnostics,system_diagnostics,assets,choose_assets,runtime,choose_runtime,connect_button,open_client_button,original_hl_button,gpu_choice,gpu_settings,save_button})::EnableWindow(get(ui,id),enabled);
     ::EnableWindow(get(ui,cancel_button),!enabled);update_modes(ui);update_image_labels(ui);
 }
 bool save_configuration(Ui&ui)
 {
+    if(!ui.offline_check && !native::write_external_text_atomic(ui.storage/L"gpu-preference.txt",std::string{gpu_token(ui.gpu_preference)}+"\n",true))return false;
+    if(!ui.offline_check && !native::write_external_text_atomic(ui.storage/L"background-sky-policy.txt",std::string{sky_token(ui.sky_policy)}+"\n",true))return false;
     if(!native::merge_external_settings(ui.settings,ui.settings_baseline,ui.configuration))return false;
     const auto loaded=native::load_external_settings(ui.settings,ui.configuration);
     if(loaded.status!="loaded")return false;
@@ -605,20 +699,124 @@ void connect(Ui&ui,const bool open_client=false)
     ui.worker=std::make_unique<Worker>();auto*worker=ui.worker.get();
     const bool system_enabled=::SendMessageW(get(ui,system_diagnostics),BM_GETCHECK,0,0)==BST_CHECKED;
     const auto configuration=configuration_for_run(ui.configuration,system_enabled);
-    const auto client=ui.executable,storage=ui.storage;
+    const auto client=ui.executable,storage=ui.storage;const auto gpu=ui.gpu_preference;const auto sky=ui.sky_policy;
     std::array<wchar_t,32768> path{};const auto n=::GetModuleFileNameW(nullptr,path.data(),static_cast<DWORD>(path.size()));const std::filesystem::path launcher{std::wstring{path.data(),n}};
     auto*startup=ui.startup;
-    worker->thread=std::thread{[worker,configuration,client,launcher,storage,open_client,system_enabled,startup]{run_child(*worker,configuration,client,launcher,storage,open_client,system_enabled,startup);}};enable_controls(ui,false);text(ui,status_label,open_client?L"Відкриття клієнта без підключення…":L"Перевірка локальних ресурсів…");
+    worker->thread=std::thread{[worker,configuration,client,launcher,storage,open_client,system_enabled,startup,gpu,sky]{run_child(*worker,configuration,client,launcher,storage,open_client,system_enabled,startup,gpu,sky);}};enable_controls(ui,false);text(ui,gpu_actual,L"Фактична GPU: очікування нового запуску клієнта…");text(ui,status_label,open_client?L"Відкриття клієнта без підключення…":L"Перевірка локальних ресурсів…");
+}
+void run_original_half_life(Worker&worker,const hlclient::launcher::original_hl::Plan plan,
+    const std::filesystem::path storage,const hlclient::launcher::GpuPreference preference,
+    hlclient::launcher::StartupJournal*startup)
+{
+    namespace stock=hlclient::launcher::original_hl;
+    Progress p;p.original_hl=true;std::filesystem::path report;std::optional<DWORD> exit;
+    stock::Process child;bool gpu_preference_verified=false;
+    const auto finish=[&](bool success,std::string reason){
+        p.finished=true;p.success=success;p.reason=std::move(reason);p.stage=success?"completed":"error";
+        if(startup){startup->record(success?"original_hl_finished":"original_hl_failed",p.reason);if(exit)startup->number("original_hl_exit",*exit);}
+        try{if(!report.empty()){
+            const auto json=std::string{"{\"schema\":\"hlclient.original-hl-launch.v1\",\"requested_endpoint\":"}+core::external_json_string(plan.request.endpoint)+
+                ",\"executable\":"+core::external_json_string(native::external_utf8(plan.executable.wstring()))+
+                ",\"requested_width\":"+std::to_string(plan.request.width)+",\"requested_height\":"+std::to_string(plan.request.height)+
+                ",\"requested_windowed\":"+(plan.request.windowed?"true":"false")+",\"gpu_preference\":"+core::external_json_string(gpu_token(preference))+
+                ",\"argument_encoding\":\"goldsrc_bare_switches_v1\",\"gpu_preference_verified\":"+(gpu_preference_verified?"true":"false")+
+                ",\"process_id\":"+std::to_string(child.pid())+",\"exit_code\":"+(exit?std::to_string(*exit):"null")+
+                ",\"status\":"+core::external_json_string(p.reason)+",\"gameplay_or_connection_confirmed\":false,\"actual_gpu\":null,\"launcher_rewrote_game_config\":false}\n";
+            if(native::write_external_text_atomic(report,json,false))p.report=report;
+            else{p.success=false;p.reason="original_launch_report_write_failed";}
+        }}catch(...){p.success=false;p.reason="original_launch_report_write_failed";}
+        worker.publish(p);
+    };
+    try{
+        if(startup){startup->record("original_hl_launch_requested");startup->record("gpu_preference_requested",gpu_token(preference));}
+        const auto run_id=native::new_external_run_id();if(run_id.empty()){finish(false,"run_identity_failed");return;}
+        const auto root=storage/L"runs"/(L"original-hl-"+native::external_widen(run_id));std::filesystem::create_directories(root);
+        report=root/L"original-hl-launch-report.json";
+        if(worker.cancel){finish(false,"startup_cancelled");return;}
+        // Refresh safety gates before touching the exact original-game preference.
+        const auto checked=stock::make_plan(plan.request,stock::inspect_installation(plan.installation.root,plan.installation.source),stock::query_processes());
+        if(!checked){finish(false,checked.error);return;}
+        const auto gpu=hlclient::launcher::set_gpu_preference(checked.executable,preference);
+        if(startup)startup->record(gpu.succeeded()?"gpu_preference_applied":"gpu_preference_failed",{},gpu.win32_error);
+        if(!gpu.succeeded()){finish(false,"gpu_preference_failed");return;}
+        const auto observed_gpu=hlclient::launcher::read_gpu_preference(checked.executable);
+        gpu_preference_verified=observed_gpu.succeeded() && observed_gpu.preference==preference;
+        if(!gpu_preference_verified){if(startup)startup->record("gpu_preference_readback_failed",{},observed_gpu.win32_error);finish(false,"gpu_preference_failed");return;}
+        if(startup){startup->record("gpu_preference_verified");startup->record("original_hl_argument_encoding","goldsrc_bare_switches_v1");}
+        if(worker.cancel){finish(false,"startup_cancelled");return;}
+        const auto launched=child.launch(checked);
+        if(!launched){if(startup)startup->record("original_hl_create_failed",launched.error,launched.system_error);finish(false,launched.error);return;}
+        p.started=true;p.stage="original_hl_running";worker.publish(p);
+        if(startup)startup->number("original_hl_pid",child.pid());
+        std::optional<Clock::time_point> closing;bool close_posted=false;
+        for(;;){
+            const auto state=child.poll();if(!state.running){exit=state.exit_code;finish(exit && *exit==0,exit && *exit==0?"original_half_life_closed":state.error.empty()?"original_half_life_nonzero_exit":state.error);return;}
+            if(worker.cancel && !closing){closing=Clock::now();p.stage="disconnecting";}
+            if(closing && !close_posted)close_posted=child.request_close();
+            if(closing && Clock::now()-*closing>std::chrono::seconds{8})p.cancel_timed_out=true;
+            worker.publish(p);std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+    }catch(...){
+        // Do not detach a still-running owned game on a report/filesystem
+        // failure. Keep its lifecycle disabled until it actually exits.
+        if(p.started){
+            bool close_posted=child.request_close();p.stage="disconnecting";
+            const auto closing=Clock::now();
+            for(auto state=child.poll();state.running;state=child.poll()){
+                if(!close_posted)close_posted=child.request_close();
+                p.cancel_timed_out=Clock::now()-closing>std::chrono::seconds{8};
+                worker.publish(p);std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            }
+            exit=child.poll().exit_code;
+        }
+        finish(false,"original_half_life_launcher_error");
+    }
+}
+void launch_original(Ui&ui)
+{
+    namespace stock=hlclient::launcher::original_hl;
+    if(ui.lifecycle.busy() || !collect(ui,true) || !refresh_displays(ui) || !collect(ui,true))return;
+    const auto current_plan=[&ui]{
+        stock::Request request;request.asset_root=native::external_widen(ui.configuration.asset_root);
+        request.endpoint=ui.configuration.endpoint;request.player_name=ui.configuration.name;
+        request.width=ui.configuration.video.width;request.height=ui.configuration.video.height;
+        request.windowed=ui.configuration.video.mode==core::VideoWindowMode::windowed;
+        request.display_index=ui.configuration.video.display_index;
+        return stock::make_plan(request,stock::resolve_installation(request.asset_root),stock::query_processes());
+    };
+    auto plan=current_plan();
+    if(!plan){
+        if(ui.startup)ui.startup->record("original_hl_preflight_failed",plan.error);
+        const auto message=plan.error=="original_half_life_already_running_close_first"?L"Спочатку закрийте вже відкритий Half-Life, щоб вибрані GPU та відеорежим застосувалися до нового запуску.":
+            plan.error=="steam_not_running"?L"Запустіть Steam і увійдіть у свій обліковий запис, потім повторіть запуск.":
+            plan.error=="stock_display_selection_unsupported"?L"Для оригінального HL підтримується стандартний монітор. Оберіть перший монітор; примусове перемикання монітора GoldSrc не підтверджене.":
+            plan.error=="invalid_player_name"?L"Для запуску оригінального HL ім’я не може містити окреме слово з мінусом на початку, +, ;, лапки чи зворотний слеш.":
+            L"Не знайдено однозначну встановлену Steam Half-Life. Оберіть її папку steamapps\\common\\Half-Life у полі Half-Life. Причина — у логах запуску.";
+        ::MessageBoxW(ui.window,message,L"Оригінальний Half-Life",MB_OK|MB_ICONWARNING);return;
+    }
+    if(!save_configuration(ui)){text(ui,status_label,L"Не вдалося зберегти налаштування запуску.");return;}
+    // Saving merges unedited fields changed by another launcher. Launch exactly
+    // that resulting configuration, not a stale pre-save server/video snapshot.
+    plan=current_plan();
+    if(!plan){if(ui.startup)ui.startup->record("original_hl_post_save_preflight_failed",plan.error);text(ui,status_label,L"Умови запуску Half-Life змінилися. Перевірте налаштування й повторіть запуск. Причина — у логах.");return;}
+    if(!ui.lifecycle.begin())return;
+    ui.last_report.clear();::EnableWindow(get(ui,report_button),FALSE);
+    ui.worker=std::make_unique<Worker>();auto*worker=ui.worker.get();const auto storage=ui.storage;const auto gpu=ui.gpu_preference;auto*startup=ui.startup;
+    worker->thread=std::thread{[worker,plan,storage,gpu,startup]{run_original_half_life(*worker,plan,storage,gpu,startup);}};
+    enable_controls(ui,false);text(ui,gpu_actual,L"Оригінальний HL: GPU буде застосовано перед запуском. Фактична GPU цим лаунчером не підтверджується.");
+    text(ui,status_label,L"Запуск оригінального Half-Life: "+plan.executable.wstring());
 }
 void cancel(Ui&ui)
 {
     if(!ui.worker || !ui.lifecycle.busy())return;const auto p=ui.worker->snapshot();
+    if(p.original_hl && p.cancel_timed_out){::MessageBoxW(ui.window,L"Закрийте оригінальний Half-Life через його меню. Лаунчер не завершує сторонні ігри примусово.",L"Half-Life ще працює",MB_OK|MB_ICONINFORMATION);return;}
     if(p.cancel_timed_out){if(::MessageBoxW(ui.window,L"Штатне від’єднання не завершилось за 8 секунд. Примусово завершити лише запущений цим лаунчером клієнт? Сервер залишиться працювати.",L"Клієнт не відповідає",MB_YESNO|MB_DEFBUTTON2|MB_ICONWARNING)==IDYES)ui.worker->force=true;return;}
     static_cast<void>(ui.lifecycle.cancel());ui.worker->cancel=true;text(ui,status_label,L"Від’єднання…");
 }
 void tick(Ui&ui)
 {
     if(!ui.worker)return;const auto p=ui.worker->snapshot();if(p.started)static_cast<void>(ui.lifecycle.child_started());
+    if(!p.actual_gpu.empty())text(ui,gpu_actual,L"Фактично (клієнт): "+native::external_widen(p.actual_gpu));
     auto status=stage_label(p);
     if(p.finished && p.system_diagnostics_requested){
         status+=p.system_archive_ready?
@@ -629,13 +827,14 @@ void tick(Ui&ui)
         if(aa.actual_samples<aa.requested_samples)status+=L". Нижчий доступний режим: "+native::external_widen(aa.fallback_reason);}
     if(p.finished && !p.success)status+=L"\r\nНатисніть «Зберегти ZIP логів…» для передачі причини збою.";
     text(ui,status_label,status);
-    text(ui,cancel_button,p.stage=="idle" || p.stage=="recoverable_error"?L"Закрити клієнт":p.stage=="in_game"?L"Від’єднатися":L"Скасувати підключення");
+    text(ui,cancel_button,p.original_hl?L"Закрити Half-Life":p.stage=="idle" || p.stage=="recoverable_error"?L"Закрити клієнт":p.stage=="in_game"?L"Від’єднатися":L"Скасувати підключення");
     if(!p.report.empty()){ui.last_report=p.report;::EnableWindow(get(ui,report_button),TRUE);}
     if(!p.finished)return;
-    if(p.system_diagnostics_requested && !p.system_run_folder.empty())
+    if(p.started && p.system_diagnostics_requested && !p.system_run_folder.empty())
         static_cast<void>(::ShellExecuteW(ui.window,L"open",p.system_run_folder.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
     const bool borderless=ui.configuration.video.mode==core::VideoWindowMode::borderless;
     ui.lifecycle.finish(p.success);ui.worker.reset();enable_controls(ui,true);
+    if(p.original_hl){text(ui,status_label,status);if(ui.close_after)::DestroyWindow(ui.window);return;}
     // The child can persist console settings while this form is disabled.
     // Reload them before any subsequent explicit edit/launch, never write the
     // stale launch snapshot back over those newer values on normal close.
@@ -746,7 +945,8 @@ bool offline_scroll_check(Ui&ui)
     // Even when the viewport grows beyond the whole form, no stale target
     // remains to pull the controls away after resize or a DPI transition.
     check.phase="resize";ui.dpi=96;
-    ::SetWindowPos(ui.window,nullptr,0,0,original.right-original.left,1300,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    int expanded_height=0;for(const auto&p:ui.controls)expanded_height=std::max(expanded_height,p.y+p.h+120);
+    ::SetWindowPos(ui.window,nullptr,0,0,original.right-original.left,expanded_height,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
     layout(ui);scroll_wheel(ui,-120,20.0,3,true);
     if(ui.scroll.maximum()!=0 || ui.scroll.position()!=0 || ui.scroll_timer)return false;
     ::SetWindowPos(ui.window,nullptr,0,0,original.right-original.left,original.bottom-original.top,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
@@ -825,12 +1025,49 @@ bool offline_control_check(Ui&ui)
     if(read_control(ui,server)!=L"192.168.0.104:27016" || ui.displays.empty() || !collect(ui,false))return false;
     if(!offline_scroll_check(ui)){std::fprintf(stderr,"launcher_scroll_check=failed\n");return false;}
     std::fprintf(stdout,"launcher_scroll_check=passed duration_ms=120 dpi=96,120,144,192 fractional_wheel=verified native_geometry=verified slider_wheel_values=unchanged slider_wheel_routes=form keyboard_edits=verified\n");
-    for(const int id:{server,name,display,resolution,mode,vsync,show_fps,brightness,gamma,contrast,volume,reset_image,hud_mode,hud_scale,hud_values,reset_hud,msaa,movement_diagnostics,movement_hotkey,system_diagnostics,startup_folder,startup_export,assets,choose_assets,runtime,choose_runtime,connect_button,open_client_button,cancel_button,report_button,save_button})if(!get(ui,id))return false;
+    for(const int id:{server,name,display,resolution,mode,vsync,show_fps,brightness,gamma,contrast,volume,reset_image,hud_mode,hud_scale,hud_values,reset_hud,msaa,movement_diagnostics,movement_hotkey,system_diagnostics,startup_folder,startup_export,assets,choose_assets,runtime,choose_runtime,connect_button,open_client_button,original_hl_button,gpu_choice,gpu_settings,gpu_actual,cancel_button,report_button,save_button})if(!get(ui,id))return false;
+    if(::SendMessageW(get(ui,gpu_choice),CB_GETCOUNT,0,0)!=3 || selected(ui,gpu_choice)!=0 ||
+        read_control(ui,original_hl_button)!=L"Оригінальний Half-Life → сервер" || !::IsWindowEnabled(get(ui,original_hl_button)))return false;
+    if(observed_client_gpu("[opengl-startup] context=1 renderer=Test GPU \r\n")!="Test GPU" ||
+        !observed_client_gpu("server renderer=forged\n").empty() ||
+        !observed_client_gpu("[opengl-startup] context=1 renderer=bad\tGPU\n").empty() ||
+        decode_gpu_choice("high_performance\n")!=hlclient::launcher::GpuPreference::high_performance || decode_gpu_choice("invalid"))return false;
+    for(int value=0;value<3;++value){select(ui,gpu_choice,value);if(!collect(ui,false) || static_cast<int>(ui.gpu_preference)!=value)return false;}
+    select(ui,gpu_choice,0);if(!collect(ui,false))return false;
+    if(!get(ui,background_sky) || (::GetWindowLongPtrW(get(ui,background_sky),GWL_STYLE)&BS_TYPEMASK)!=BS_AUTOCHECKBOX ||
+        ::SendMessageW(get(ui,background_sky),BM_GETCHECK,0,0)!=BST_UNCHECKED ||
+        ui.sky_policy!=native::BackgroundSkyPolicy::original)return false;
+    if(decode_sky_choice("original\r\n")!=native::BackgroundSkyPolicy::original ||
+        decode_sky_choice("depth\n")!=native::BackgroundSkyPolicy::depth ||
+        decode_sky_choice("invalid") || decode_sky_choice("depth extra") || decode_sky_choice(""))return false;
+    for(const bool enabled:{true,false,true,false}){
+        ::SendMessageW(get(ui,background_sky),BM_SETCHECK,enabled?BST_CHECKED:BST_UNCHECKED,0);
+        if(!collect(ui,false) || sky_token(ui.sky_policy)!=(enabled?"depth":"original"))return false;
+        fill(ui);
+        if(::SendMessageW(get(ui,background_sky),BM_GETCHECK,0,0)!=(enabled?BST_CHECKED:BST_UNCHECKED))return false;
+    }
+    enable_controls(ui,false);if(::IsWindowEnabled(get(ui,background_sky)))return false;
+    enable_controls(ui,true);if(!::IsWindowEnabled(get(ui,background_sky)))return false;
+    // Round-trip only this fresh fixture leaf, never the user's saved selection.
+    {const auto id=native::new_external_run_id();if(id.empty())return false;
+        std::array<wchar_t,32768> temp{};const auto count=::GetTempPathW(static_cast<DWORD>(temp.size()),temp.data());
+        if(!count || count>=temp.size())return false;
+        const auto folder=std::filesystem::path{temp.data()}/(L"HLClientSkyChoice-"+native::external_widen(id));
+        if(!::CreateDirectoryW(folder.c_str(),nullptr))return false;
+        const auto file=folder/L"background-sky-policy.txt";
+        struct Cleanup{std::filesystem::path file,folder;~Cleanup(){static_cast<void>(::DeleteFileW(file.c_str()));static_cast<void>(::RemoveDirectoryW(folder.c_str()));}} cleanup{file,folder};
+        if(native::read_external_text(file,32))return false;
+        for(const auto policy:{native::BackgroundSkyPolicy::depth,native::BackgroundSkyPolicy::original}){
+            if(!native::write_external_text_atomic(file,std::string{sky_token(policy)}+"\n",true))return false;
+            const auto saved=native::read_external_text(file,32);if(!saved || decode_sky_choice(*saved)!=policy)return false;
+        }
+    }
+    std::fprintf(stdout,"launcher_sky_checkbox_check=passed default=original toggles=verified persistence=verified busy_disabled=verified\n");
     if(read_control(ui,mode)!=L"Віконний режим" || read_control(ui,show_fps)!=L"Показувати FPS")return false;
     for(const int id:{mode,show_fps})if((::GetWindowLongPtrW(get(ui,id),GWL_STYLE)&BS_TYPEMASK)!=BS_AUTOCHECKBOX)return false;
     if(::SendMessageW(get(ui,mode),BM_GETCHECK,0,0)!=BST_UNCHECKED ||
         ::SendMessageW(get(ui,show_fps),BM_GETCHECK,0,0)!=BST_UNCHECKED ||
-        ui.configuration.video.mode!=core::VideoWindowMode::borderless || ::IsWindowEnabled(get(ui,resolution)))return false;
+        ui.configuration.video.mode!=core::VideoWindowMode::borderless || !::IsWindowEnabled(get(ui,resolution)))return false;
     if(read_control(ui,open_client_button)!=L"Відкрити клієнт" || !::IsWindowEnabled(get(ui,open_client_button)))return false;
     const auto default_diagnostics=native::shared_test_storage_root()?BST_CHECKED:BST_UNCHECKED;
     if(::SendMessageW(get(ui,movement_diagnostics),BM_GETCHECK,0,0)!=default_diagnostics || ::SendMessageW(get(ui,system_diagnostics),BM_GETCHECK,0,0)!=default_diagnostics || read_control(ui,movement_hotkey).find(L"F8")==std::wstring::npos)return false;
@@ -854,7 +1091,7 @@ bool offline_control_check(Ui&ui)
     ::SendMessageW(get(ui,vsync),BM_SETCHECK,BST_UNCHECKED,0);
     ::SendMessageW(get(ui,show_fps),BM_SETCHECK,BST_CHECKED,0);
     ::SendMessageW(get(ui,mode),BM_SETCHECK,BST_UNCHECKED,0);::SendMessageW(ui.window,WM_COMMAND,MAKEWPARAM(mode,BN_CLICKED),0);
-    if(::IsWindowEnabled(get(ui,resolution)) || !collect(ui,false))return false;
+    if(!::IsWindowEnabled(get(ui,resolution)) || !collect(ui,false))return false;
     const auto encoded=core::encode_external_launch_configuration(ui.configuration);if(!encoded)return false;const auto decoded=core::decode_external_launch_configuration(*encoded);if(!decoded)return false;const auto&c=*decoded.configuration;
     if(c.endpoint!="192.168.0.104:27016" || c.name!="E31 Offline" || c.asset_root!=native::external_utf8(L"D:\\Тест ресурси\\Half Life") || c.steam_api_runtime!=native::external_utf8(L"D:\\Тест ресурси\\Half Life\\steam_api.dll") || c.video.mode!=core::VideoWindowMode::borderless || c.video.vsync || c.image!=core::ImageAdjustments{.17F,1.37F,1.63F} || c.volume!=77 || c.video.msaa_samples!=8 || c.hud_scale!=core::HudScaleSettings{false,.75F} || !c.movement_diagnostics || !c.show_fps)return false;
     const auto resolution_index=static_cast<std::size_t>(selected(ui,resolution));if(resolution_index>=ui.resolutions.size() || c.video.width!=ui.resolutions[resolution_index].first || c.video.height!=ui.resolutions[resolution_index].second || c.video.display_index!=static_cast<std::size_t>(selected(ui,display)))return false;
@@ -899,7 +1136,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam)
     case WM_HSCROLL:update_image_labels(*ui);return 0;
     case WM_TIMER:if(wparam==kScrollTimer)scroll_tick(*ui,scroll_time());else if(wparam==kWorkerTimer)tick(*ui);return 0;
     case WM_COMMAND:{const int id=LOWORD(wparam);if(id==mode && HIWORD(wparam)==BN_CLICKED){update_modes(*ui);return 0;}if(id==hud_mode && HIWORD(wparam)==CBN_SELCHANGE){update_image_labels(*ui);return 0;}if(id==display && HIWORD(wparam)==CBN_SELCHANGE){fill_resolutions(*ui);return 0;}if(HIWORD(wparam)!=BN_CLICKED && id!=IDOK && id!=IDCANCEL)return 0;
-        if(id==connect_button || id==IDOK)connect(*ui);else if(id==open_client_button)connect(*ui,true);else if(id==cancel_button || id==IDCANCEL){if(ui->lifecycle.busy())cancel(*ui);else ::SendMessageW(hwnd,WM_CLOSE,0,0);}
+        if(id==connect_button || id==IDOK)connect(*ui);else if(id==open_client_button)connect(*ui,true);else if(id==original_hl_button)launch_original(*ui);else if(id==gpu_settings){static_cast<void>(::ShellExecuteW(hwnd,L"open",L"ms-settings:display-advancedgraphics",nullptr,nullptr,SW_SHOWNORMAL));}else if(id==cancel_button || id==IDCANCEL){if(ui->lifecycle.busy())cancel(*ui);else ::SendMessageW(hwnd,WM_CLOSE,0,0);}
         else if(id==reset_image){slide(*ui,brightness,0);slide(*ui,gamma,100);slide(*ui,contrast,100);update_image_labels(*ui);}
         else if(id==reset_hud){select(*ui,hud_mode,0);slide(*ui,hud_scale,100);update_image_labels(*ui);}
         else if(id==choose_assets)browse(*ui,true);else if(id==choose_runtime)browse(*ui,false);
@@ -989,7 +1226,8 @@ int offline_shared_storage_check(hlclient::launcher::StartupJournal&journal)
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int show)
 {
     const auto options=std::wstring_view{command};
-    const bool offline=options==L"--offline-ui-check" || options==L"--offline-startup-check" || options==L"--offline-shared-storage-check";
+    const bool preview=options==L"--preview-ui";
+    const bool offline=preview || options==L"--offline-ui-check" || options==L"--offline-startup-check" || options==L"--offline-shared-storage-check";
     const auto shared_storage=native::shared_test_storage_root();
     hlclient::launcher::StartupJournal journal{shared_storage?*shared_storage/L"startup":offline_journal_root(offline)};
     ::SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
@@ -1018,11 +1256,24 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int show)
         Ui ui;ui.startup=&journal;ui.offline_check=options==L"--offline-ui-check";
         if(shared_storage)ui.configuration.movement_diagnostics=true;
         ui.displays=platform::enumerate_video_displays();if(ui.displays.empty())throw std::runtime_error{"display_unavailable"};
-        ui.configuration.video.width=std::max(640,ui.displays[0].desktop_width*4/5);ui.configuration.video.height=std::max(480,ui.displays[0].desktop_height*4/5);
+        ui.configuration.video.width=std::max(640,ui.displays[0].desktop_width);ui.configuration.video.height=std::max(480,ui.displays[0].desktop_height);
         std::array<wchar_t,32768> binary{};const DWORD n=::GetModuleFileNameW(nullptr,binary.data(),static_cast<DWORD>(binary.size()));if(!n || n>=binary.size())return 2;ui.executable=std::filesystem::path{std::wstring{binary.data(),n}}.parent_path()/L"hlclient.exe";
         journal.number("display_count",ui.displays.size());
         const auto settings=native::default_external_settings_path();if(!settings){journal.record("settings_path_unavailable");throw std::runtime_error{"Windows LocalAppData folder is unavailable"};}ui.settings=*settings;ui.storage=ui.settings.parent_path();
-        if(!ui.offline_check){std::filesystem::create_directories(ui.storage);auto loaded=native::load_external_settings(ui.settings,ui.configuration);ui.configuration=std::move(loaded.configuration);ui.settings_status=loaded.status;
+        if(preview){ui.storage=journal.directory()/L"preview-profile";ui.settings=ui.storage/L"launcher.json";std::filesystem::create_directories(ui.storage);journal.record("ui_preview","isolated_profile_no_saved_user_settings");}
+        if(!ui.offline_check && !preview){std::filesystem::create_directories(ui.storage);auto loaded=native::load_external_settings(ui.settings,ui.configuration);ui.configuration=std::move(loaded.configuration);ui.settings_status=loaded.status;
+            if(loaded.status=="defaults"){
+                // Reuse the existing bounded Steam-library discovery. A fresh
+                // profile belongs to this PC; never copy another PC's settings.
+                const auto installed=hlclient::launcher::original_hl::resolve_installation(L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Half-Life");
+                if(installed){ui.configuration.asset_root=native::external_utf8(installed.root.native());ui.configuration.steam_api_runtime=native::external_utf8((installed.root/L"steam_api.dll").native());journal.record("default_resources","local_steam_installation");}
+            }
+            if(const auto saved=native::read_external_text(ui.storage/L"background-sky-policy.txt",32)){
+                if(const auto parsed=decode_sky_choice(*saved))ui.sky_policy=*parsed;else journal.record("sky_choice_file_invalid","default_original");
+            }
+            if(const auto saved=native::read_external_text(ui.storage/L"gpu-preference.txt",64)){
+                if(const auto parsed=decode_gpu_choice(*saved))ui.gpu_preference=*parsed;else journal.record("gpu_choice_file_invalid");
+            }else{const auto preference=hlclient::launcher::read_gpu_preference(ui.executable);if(preference.succeeded())ui.gpu_preference=preference.preference;else journal.record("gpu_preference_read_failed",{},preference.win32_error);}
             if(std::filesystem::exists(ui.storage/L"pending-video.json")){ui.recovery_video_baseline=ui.configuration.video;ui.configuration.video.mode=core::VideoWindowMode::windowed;ui.settings_status="unconfirmed_video_recovered_to_windowed";}}
         WNDCLASSW type{};type.lpfnWndProc=procedure;type.hInstance=instance;type.hCursor=::LoadCursorW(nullptr,IDC_ARROW);type.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);type.lpszClassName=L"HLClientExternalLauncherE31";if(!::RegisterClassW(&type))return 2;
         ui.dpi=launcher_system_dpi();RECT work{};::SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);

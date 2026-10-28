@@ -731,8 +731,13 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
              index < input.studio_instances.size();
              ++index) {
             auto& instance = input.studio_instances[index];
+            const bool omitted = instance.preparation_status ==
+                StudioRenderPreparationStatus::frustum_rejected_before_pose;
             if (!finite_entity_render_transform(instance.transform) ||
                 !finite_entity_render_bounds(instance.interpolated_bounds) ||
+                instance.preparation_status >
+                    StudioRenderPreparationStatus::frustum_rejected_before_pose ||
+                (!omitted && instance.early_frustum_bounds.has_value()) ||
                 instance.blend_mode > StudioBlendMode::additive ||
                 !std::isfinite(instance.opacity) || instance.opacity < 0.0F || instance.opacity > 1.0F ||
                 !std::ranges::all_of(instance.tint, [](const float value) {
@@ -746,12 +751,51 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             }
             if (static_cast<std::size_t>(instance.studio_asset_index) >=
                 scene_package.studio_assets().size()) {
+                if (omitted) {
+                    return frame_fail(EntityRenderFrameErrorCode::invalid_asset_reference,
+                        instance.entity_number,
+                        "Omitted Studio instance requires an exact available render asset");
+                }
                 instance.visibility_status =
                     RuntimeEntityVisibilityStatus::asset_unavailable;
                 continue;
             }
             const auto& asset =
                 *scene_package.studio_assets()[instance.studio_asset_index];
+            if (omitted) {
+                if (instance.pose_index != std::numeric_limits<std::uint32_t>::max() ||
+                    !instance.early_frustum_bounds ||
+                    !finite_entity_render_bounds(*instance.early_frustum_bounds) ||
+                    input.view_frustum == nullptr ||
+                    input.camera_cull_exempt_entity_number == instance.entity_number ||
+                    (instance.visibility_status != RuntimeEntityVisibilityStatus::visible &&
+                     instance.visibility_status != RuntimeEntityVisibilityStatus::culled_by_pvs &&
+                     instance.visibility_status != RuntimeEntityVisibilityStatus::culled_by_frustum)) {
+                    return frame_fail(EntityRenderFrameErrorCode::invalid_pose_reference,
+                        instance.entity_number,
+                        "Omitted Studio instance requires an absent pose and final-camera rejection evidence");
+                }
+                const auto early = input.view_frustum->classify(*instance.early_frustum_bounds);
+                const auto late = input.view_frustum->classify(instance.interpolated_bounds);
+                if (!early || !late ||
+                    *early.classification != world_visibility::WorldBoundsClassification::outside ||
+                    *late.classification != world_visibility::WorldBoundsClassification::outside) {
+                    return frame_fail(EntityRenderFrameErrorCode::invalid_pose_reference,
+                        instance.entity_number,
+                        "Omitted Studio instance cannot be revealed without rematerializing its pose");
+                }
+                const auto material_support = resolve_studio_material_support(
+                    asset, instance.body_value, instance.skin_family_index);
+                if (!material_support || *material_support ==
+                        StudioEntityMaterialSupportStatus::unsupported_material) {
+                    return frame_fail(EntityRenderFrameErrorCode::invalid_asset_reference,
+                        instance.entity_number,
+                        "Omitted Studio body, skin, mesh, or material selection is invalid");
+                }
+                instance.material_support_status = *material_support;
+                instance.visibility_status = RuntimeEntityVisibilityStatus::culled_by_frustum;
+                continue;
+            }
             if (static_cast<std::size_t>(instance.pose_index) >=
                 input.studio_poses.size()) {
                 return frame_fail(
@@ -1009,6 +1053,11 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             }
             signature.add(instance.studio_asset_index);
             signature.add(instance.pose_index);
+            if (instance.preparation_status != StudioRenderPreparationStatus::complete) {
+                signature.add(std::uint32_t{0x45525046U});
+                signature.add(static_cast<std::uint32_t>(instance.preparation_status));
+                hash_bounds(signature, *instance.early_frustum_bounds);
+            }
             hash_transform(signature, instance.transform);
             signature.add(instance.body_value);
             signature.add(instance.skin_family_index);

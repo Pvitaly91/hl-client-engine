@@ -64,6 +64,8 @@ struct ExternalChildStatus final {
     std::optional<std::uint32_t> exit_code;
     std::uint32_t native_error{};
 };
+// Explicit per-launch override, never a process-wide or persisted environment edit.
+enum class BackgroundSkyPolicy { original, depth };
 // Owns exactly one native child, its private cancel event and bounded log reader.
 // Destructor closes handles only: normal launcher close is an explicit UI
 // decision, never an implicit kill-on-job-close side effect.
@@ -72,7 +74,10 @@ public:
     ExternalClientProcess(); ~ExternalClientProcess();
     ExternalClientProcess(const ExternalClientProcess&)=delete;
     ExternalClientProcess& operator=(const ExternalClientProcess&)=delete;
-    [[nodiscard]] bool launch(const WindowsBinaryIdentity&, const std::vector<std::wstring>& arguments, bool add_cancel_argument=true);
+    [[nodiscard]] bool launch(const WindowsBinaryIdentity&, const std::vector<std::wstring>& arguments,
+        bool add_cancel_argument=true);
+    [[nodiscard]] bool launch(const WindowsBinaryIdentity&, const std::vector<std::wstring>& arguments,
+        bool add_cancel_argument, std::optional<BackgroundSkyPolicy> background_sky_policy);
     void request_cancel() noexcept;
     [[nodiscard]] bool terminate_owned_child(std::uint32_t exit_code) noexcept;
     [[nodiscard]] ExternalChildStatus poll() noexcept;

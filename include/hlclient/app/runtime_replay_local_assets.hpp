@@ -190,6 +190,11 @@ struct ReplayLocalVisualSummary {
   // Last materialization only; ordinary poses share exact immutable inputs
   // within that call, never across frames, generations, or player composition.
   std::size_t ordinary_pose_evaluations{}, ordinary_pose_reuses{};
+  // Explicit opt-in early-frustum path, last materialization only. Requests
+  // are not evaluations: an omitted ordinary request may otherwise be a hit
+  // in the existing per-frame exact pose cache.
+  std::size_t early_studio_tested{}, early_studio_culled{};
+  std::size_t early_studio_pose_requests_skipped{}, early_studio_consumer_retained{};
   std::size_t prepared_brush_models{};
   std::size_t missing_texture_placeholder_bindings{};
   std::size_t brush_candidates{};
@@ -219,6 +224,12 @@ struct ReplayLocalAssetsCreateResult {
 // environment and approved source capabilities; renderer inputs stay neutral.
 class RuntimeReplayLocalAssets final : public game_api::IStaticEffectTrace {
 public:
+  // Experimental render-only selection; normal/default behavior is unchanged.
+  // The sampled final camera and an exact conservative static-sequence class
+  // are required. This never selects entities through a new PVS policy.
+  void set_early_studio_frustum_selection(bool enabled) noexcept {
+    early_studio_frustum_selection_ = enabled;
+  }
   // Borrowed session-thread observer only. A zero map generation is unknown;
   // the owning committed observation supplies the network generation.
   void set_diagnostic_sink(core::MultiplayerDiagnosticSink*,
@@ -471,6 +482,7 @@ private:
   goldsrc::RuntimeOrdinarySnapshotPresentation ordinary_presentation_;
   goldsrc::RuntimePlayerSnapshotPresentation player_presentation_;
   goldsrc::studio::StudioEntityAnimationPresentation ordinary_animation_;
+  bool early_studio_frustum_selection_{};
   core::MultiplayerDiagnosticSink* diagnostic_sink_{};
   std::uint64_t diagnostic_map_generation_{}, ordinary_diagnostic_serial_{};
   struct OrdinaryDiagnosticSample {

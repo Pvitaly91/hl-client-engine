@@ -292,6 +292,106 @@ TEST_CASE("Static-world frame receipts preserve typed path, per-frame counts and
     CHECK_FALSE(recorder.recent_frame(3)->static_world);
     CHECK(recorder.statistics().invalid_values==2U);
 }
+TEST_CASE("Prepared BSP receipts preserve new counters and distinguish ranges, draws and unknowns",
+    "[static-world-receipt][bsp-pvs-receipt][movement-diagnostics][core][app]") {
+    // Existing diagnostic enum values are stable; new values are appended.
+    static_assert(static_cast<std::uint8_t>(app::MovementStaticWorldPath::visible_commands)==4U);
+    static_assert(static_cast<std::uint8_t>(app::MovementStaticWorldFallbackReason::fragmented_batch)==4U);
+    Recorder recorder{true};auto value=frame(1,1'000'000);
+    value.static_world=app::MovementStaticWorldFrameRecord{};
+    auto& world=*value.static_world;
+    world.path=app::MovementStaticWorldPath::prepared_bsp;
+    world.resource_id=81U;world.resource_revision=9U;
+    world.considered_surfaces=200U;world.selected_surfaces=80U;
+    world.submitted_surfaces=80U;world.submitted_ranges=32U;world.submitted_draws=4U;
+    world.bsp_visited_nodes=100U;world.bsp_pvs_rejected_nodes=30U;
+    world.bsp_frustum_rejected_nodes=20U;
+    world.pvs_rebuilds=0U;world.pvs_cache_hits=1U;world.pvs_fallback_code=0U;
+    world.pvs_index_upload_bytes=0U;
+    world.prepared_bytes=65536U;world.prepared_allocations=0U;
+    world.selection_preparation_ms=.125;world.command_preparation_ms=.0625;world.submission_ms=.25;
+    REQUIRE(recorder.observe(value));
+    world.prepared_bytes=1U;world.command_preparation_ms=99.0;
+    const auto* retained=recorder.recent_frame(0);REQUIRE(retained);REQUIRE(retained->static_world);
+    CHECK(retained->static_world->prepared_bytes==65536U);
+    CHECK(retained->static_world->command_preparation_ms==.0625);
+    const auto output=recorder.encode(identity);REQUIRE(output);
+    for(const auto fragment:{"\"path\":\"prepared_bsp\"","\"bsp_visited_nodes\":100",
+        "\"bsp_pvs_rejected_nodes\":30","\"bsp_frustum_rejected_nodes\":20",
+        "\"pvs_rebuilds\":0","\"pvs_cache_hits\":1","\"pvs_fallback_code\":0","\"pvs_index_upload_bytes\":0","\"prepared_bytes\":65536",
+        "\"prepared_allocations\":0","\"submitted_surfaces\":80","\"submitted_ranges\":32",
+        "\"submitted_draws\":4","\"command_preparation_ms\":0.0625","\"submission_ms\":0.25"})
+        CHECK(output->find(fragment)!=output->npos);
+    CHECK(output->find("retained_prepared_resource_bytes_gauge_not_delta")!=output->npos);
+    CHECK(output->find("per_frame_prepared_vector_storage_events_not_all_runtime_allocations")!=output->npos);
+    CHECK(output->find("cpu_static_world_gl_submission_not_gpu_time")!=output->npos);
+    CHECK(output->size()<=Recorder::maximum_encoded_bytes);
+    CHECK(recorder.statistics().allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
+
+    Recorder unknowns{true};auto unknown=frame(1,1'000'000);
+    unknown.static_world=app::MovementStaticWorldFrameRecord{};
+    unknown.static_world->path=app::MovementStaticWorldPath::original_batches;
+    unknown.static_world->fallback_reason=app::MovementStaticWorldFallbackReason::bsp_unavailable;
+    REQUIRE(unknowns.observe(unknown));
+    const auto unknownText=unknowns.encode(identity);REQUIRE(unknownText);
+    CHECK(unknownText->find("\"fallback_reason\":\"bsp_unavailable\"")!=unknownText->npos);
+    for(const auto fragment:{"\"bsp_visited_nodes\":null","\"pvs_rebuilds\":null","\"pvs_fallback_code\":null","\"pvs_index_upload_bytes\":null",
+        "\"prepared_bytes\":null","\"prepared_allocations\":null","\"submitted_surfaces\":null",
+        "\"submitted_ranges\":null","\"command_preparation_ms\":null","\"submission_ms\":null"})
+        CHECK(unknownText->find(fragment)!=unknownText->npos);
+    unknown.frame_number=2U;unknown.monotonic_us+=10'000U;
+    unknown.static_world->path=app::MovementStaticWorldPath::prepared_bsp;
+    unknown.static_world->fallback_reason=app::MovementStaticWorldFallbackReason::pvs_conservative;
+    unknown.static_world->pvs_fallback_code=5U;
+    unknown.static_world->pvs_index_upload_bytes=std::uint64_t{1U}<<30U;
+    REQUIRE(unknowns.observe(unknown));
+    const auto conservative=unknowns.encode(identity);REQUIRE(conservative);
+    CHECK(conservative->find("\"fallback_reason\":\"pvs_conservative\"")!=conservative->npos);
+    CHECK(conservative->find("\"pvs_fallback_code\":5")!=conservative->npos);
+    CHECK(conservative->find("\"pvs_index_upload_bytes\":1073741824")!=conservative->npos);
+    CHECK(unknowns.statistics().invalid_values==0U);
+}
+TEST_CASE("Prepared BSP receipt invalid timings and no-path counters are rejected atomically",
+    "[static-world-receipt][bsp-pvs-receipt][movement-diagnostics][core][app]") {
+    using World=app::MovementStaticWorldFrameRecord;
+    Recorder recorder{true};std::uint64_t sequence=1U;
+    const auto reject=[&](const World& world) {
+        auto value=frame(sequence,1'000'000U+sequence*10'000U);value.static_world=world;
+        REQUIRE(recorder.observe(value));
+        const auto* retained=recorder.recent_frame(static_cast<std::size_t>(sequence-1U));
+        REQUIRE(retained);CHECK_FALSE(retained->static_world);++sequence;
+    };
+    for(const auto member:{&World::selection_preparation_ms,&World::command_preparation_ms,&World::submission_ms}) {
+        for(const auto duration:{std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),-1.0,1'000'000'001.0}) {
+            World world;world.path=app::MovementStaticWorldPath::prepared_bsp;
+            world.*member=duration;reject(world);
+        }
+    }
+    // Even a known zero counter must not appear under a none/not-rendered path.
+    for(const auto member:{&World::bsp_visited_nodes,&World::bsp_pvs_rejected_nodes,
+        &World::bsp_frustum_rejected_nodes,&World::pvs_rebuilds,&World::pvs_cache_hits,&World::pvs_fallback_code,&World::pvs_index_upload_bytes,
+        &World::prepared_bytes,&World::prepared_allocations,&World::submitted_surfaces,&World::submitted_ranges}) {
+        World world;world.*member=0U;reject(world);
+    }
+    for(const auto member:{&World::command_preparation_ms,&World::submission_ms}) {
+        World world;world.*member=0.0;reject(world);
+    }
+    World invalidPath;invalidPath.path=static_cast<app::MovementStaticWorldPath>(255U);reject(invalidPath);
+    World invalidReason;invalidReason.path=app::MovementStaticWorldPath::prepared_bsp;
+    invalidReason.fallback_reason=static_cast<app::MovementStaticWorldFallbackReason>(255U);reject(invalidReason);
+    for(const auto code:{6U,255U}) {
+        World invalidCode;invalidCode.path=app::MovementStaticWorldPath::prepared_bsp;
+        invalidCode.pvs_fallback_code=code;reject(invalidCode);
+    }
+    for(const auto bytes:{(std::uint64_t{1U}<<30U)+1U,std::numeric_limits<std::uint64_t>::max()}) {
+        World invalidUpload;invalidUpload.path=app::MovementStaticWorldPath::prepared_bsp;
+        invalidUpload.pvs_index_upload_bytes=bytes;reject(invalidUpload);
+    }
+    CHECK(recorder.statistics().invalid_values==sequence-1U);
+    CHECK(recorder.statistics().allocated_capacity_bytes<=Recorder::maximum_capacity_bytes);
+    const auto text=recorder.encode(identity);REQUIRE(text);CHECK(text->size()<=Recorder::maximum_encoded_bytes);
+}
 TEST_CASE("E32 normal recorder publishes bounded whole-session evidence alongside detailed windows",
     "[e32-session][movement-diagnostics][core][app]") {
     Recorder recorder{true};

@@ -877,4 +877,83 @@ TEST_CASE("Frame signature preserves scalar bits errors and delayed immutable re
     CHECK(accepted>0);CHECK(rejected>0);
 }
 
+TEST_CASE("Early Studio omission is an explicit absent pose with two outside bounds",
+    "[studio-early-selection][entity-render][frame]")
+{
+    auto scene=fixture::scene_package(fixture::render_assets());REQUIRE(scene);
+    auto made_frustum=visibility::WorldViewFrustum::from_view_projection(renderer::RenderMatrix4{identity_matrix()});
+    REQUIRE(made_frustum);REQUIRE(made_frustum.frustum);
+    auto input=mixed_frame_input(*scene.package);
+    input.sprite_instances.clear();input.unsupported_instances.clear();input.studio_poses.clear();
+    auto& instance=input.studio_instances[0];
+    instance.pose_index=std::numeric_limits<std::uint32_t>::max();
+    instance.preparation_status=render::StudioRenderPreparationStatus::frustum_rejected_before_pose;
+    instance.interpolated_bounds={{4.F,-.1F,-.1F},{5.F,.1F,.1F}};
+    instance.early_frustum_bounds=instance.interpolated_bounds;
+    input.view_frustum=&*made_frustum.frustum;
+    bool accepted_case=false;
+
+    SECTION("accepted omission retains identity but publishes no fabricated palette or draw") {
+        const auto built=render::EntityRenderFrameBuilder{}.build(*scene.package,input);
+        INFO((built.error?built.error->context:std::string{}));REQUIRE(built);REQUIRE(built.frame);
+        REQUIRE(built.frame->studio_instances().size()==1U);
+        CHECK(built.frame->studio_instances()[0].entity_number==2U);
+        CHECK(built.frame->studio_instances()[0].pose_index==std::numeric_limits<std::uint32_t>::max());
+        CHECK(built.frame->studio_instances()[0].visibility_status==render::RuntimeEntityVisibilityStatus::culled_by_frustum);
+        CHECK(built.frame->studio_poses().empty());CHECK(built.frame->draw_commands().empty());
+        CHECK(built.frame->statistics().total_bone_matrix_count==0U);
+        const render::EntityRenderResourceIdentity package_identity{
+            scene.package->resource_id(),scene.package->resource_revision()};
+        CHECK(built.frame->scene_package_identity()==package_identity);
+        const auto signature=built.frame->frame_signature();
+        input.studio_instances[0].early_frustum_bounds->maximum.x=6.F;
+        const auto changed=render::EntityRenderFrameBuilder{}.build(*scene.package,input);REQUIRE(changed);
+        CHECK(changed.frame->frame_signature()!=signature);
+        accepted_case=true;
+    }
+    SECTION("absent early envelope") {instance.early_frustum_bounds.reset();}
+    SECTION("absent current final frustum") {input.view_frustum=nullptr;}
+    SECTION("early envelope intersects while late bounds are outside") {
+        instance.early_frustum_bounds=assets::WorldBounds{{.5F,-.1F,-.1F},{2.F,.1F,.1F}};
+    }
+    SECTION("early envelope is inside while late bounds are outside") {
+        instance.early_frustum_bounds=assets::WorldBounds{{-.1F,-.1F,-.1F},{.1F,.1F,.1F}};
+    }
+    SECTION("late bounds inside cannot be hidden by different early envelope") {
+        instance.interpolated_bounds={{-.1F,-.1F,-.1F},{.1F,.1F,.1F}};
+    }
+    SECTION("invalid early envelope") {instance.early_frustum_bounds->minimum.x=std::numeric_limits<float>::quiet_NaN();}
+    SECTION("omission must not reference any palette") {instance.pose_index=0U;}
+    SECTION("camera-exempt model cannot omit pose") {input.camera_cull_exempt_entity_number=2U;}
+    SECTION("asset identity is still validated") {instance.studio_asset_index=999U;}
+    SECTION("skin selection is still validated") {instance.skin_family_index=999U;}
+    SECTION("invalid preparation enum") {instance.preparation_status=static_cast<render::StudioRenderPreparationStatus>(255U);}
+    SECTION("complete path still rejects absent pose") {
+        instance.preparation_status=render::StudioRenderPreparationStatus::complete;instance.early_frustum_bounds.reset();
+    }
+    SECTION("output resource identity must remain valid") {input.resource_revision=0U;}
+    // Discover every sibling SECTION before leaving the accepted branch.
+    if(accepted_case)return;
+    const auto rejected=render::EntityRenderFrameBuilder{}.build(*scene.package,input);
+    REQUIRE_FALSE(rejected);REQUIRE(rejected.error);
+}
+
+TEST_CASE("Complete Studio preparation preserves established signature and palette validation",
+    "[studio-early-selection][entity-render][frame][frame-hash-padding]")
+{
+    auto scene=fixture::scene_package(fixture::render_assets());REQUIRE(scene);
+    auto input=mixed_frame_input(*scene.package);
+    const auto original=render::EntityRenderFrameBuilder{}.build(*scene.package,input);REQUIRE(original);
+    input.studio_instances[0].preparation_status=render::StudioRenderPreparationStatus::complete;
+    const auto explicit_complete=render::EntityRenderFrameBuilder{}.build(*scene.package,input);REQUIRE(explicit_complete);
+    CHECK(explicit_complete.frame->frame_signature()==original.frame->frame_signature());
+    CHECK(explicit_complete.frame->studio_poses()[0].bone_matrices==original.frame->studio_poses()[0].bone_matrices);
+    SECTION("complete instances cannot smuggle unhashed early bounds") {
+        input.studio_instances[0].early_frustum_bounds=input.studio_instances[0].interpolated_bounds;
+    }
+    SECTION("complete pose keeps resource revision check") {++input.studio_poses[0].model_resource_identity.revision;}
+    const auto rejected=render::EntityRenderFrameBuilder{}.build(*scene.package,input);
+    REQUIRE_FALSE(rejected);REQUIRE(rejected.error);
+}
+
 } // namespace

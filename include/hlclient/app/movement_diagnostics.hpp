@@ -42,11 +42,11 @@ struct MovementGpuPassRecord final {
 // A completed renderer frame's static-world work, not a visibility oracle or
 // a live FPS estimate. Optional values are unavailable rather than zero.
 enum class MovementStaticWorldPath : std::uint8_t {
-    none,original_batches,prepared_bypass,prepared_selected,visible_commands
+    none,original_batches,prepared_bypass,prepared_selected,visible_commands,prepared_bsp
 };
 enum class MovementStaticWorldFallbackReason : std::uint8_t {
     none,prepared_unavailable,insufficient_probe_rejections,
-    invalid_prepared_batch,fragmented_batch
+    invalid_prepared_batch,fragmented_batch,bsp_unavailable,pvs_conservative
 };
 struct MovementStaticWorldFrameRecord final {
     MovementStaticWorldPath path{MovementStaticWorldPath::none};
@@ -56,9 +56,21 @@ struct MovementStaticWorldFrameRecord final {
     std::optional<std::uint64_t> considered_blocks,tested_bounds,selected_blocks;
     std::optional<std::uint64_t> considered_surfaces,selected_surfaces;
     std::optional<std::uint64_t> submitted_draws,submitted_triangles,prepared_rebuilds;
+    std::optional<std::uint64_t> bsp_visited_nodes,bsp_pvs_rejected_nodes,bsp_frustum_rejected_nodes;
+    // Fallback: 0 none, 1 policy disabled, 2 invalid/absent PVS,
+    // 3 row unavailable, 4 solid/special leaf, 5 liquid/content boundary.
+    // null means the producer did not observe the PVS selector.
+    std::optional<std::uint64_t> pvs_rebuilds,pvs_cache_hits,pvs_fallback_code;
+    // Bytes uploaded to the compact PVS index stream in this frame (0 when reused).
+    std::optional<std::uint64_t> pvs_index_upload_bytes;
+    // Retained map/scratch bytes are a gauge. Allocation counts are observed
+    // prepared-vector storage events in this frame, not all runtime allocations.
+    std::optional<std::uint64_t> prepared_bytes,prepared_allocations;
+    std::optional<std::uint64_t> submitted_surfaces,submitted_ranges;
     // Frustum/probe/range decisions only. Immutable map-load owner build and
     // GL submission are outside this per-frame duration.
     std::optional<double> selection_preparation_ms;
+    std::optional<double> command_preparation_ms,submission_ms;
 };
 // Exact adapter output which was accepted by command history, not sampled
 // keys reconstructed after a shot. Sample time uses the receipt clock in us.

@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -475,6 +476,56 @@ TEST_CASE("Interactive entity visibility boundary is renderer and IO neutral",
     CHECK(preview::to_string(static_cast<preview::
         InteractiveEntityVisibilityRefilterErrorCode>(0xFF)) ==
         std::string_view{"unknown"});
+}
+
+TEST_CASE("Refilter never reveals an early-omitted Studio instance without rematerialization",
+    "[studio-early-selection][interactive-preview][entity-visibility]")
+{
+    const auto package=make_scene_package();
+    const auto camera=camera_along_x(1.F);
+    auto frustum=visibility::WorldViewFrustum::from_camera(camera,{320,200});REQUIRE(frustum);REQUIRE(frustum.frustum);
+    entity::EntityRenderFrameBuildInput input;
+    input.resource_id=0x8200U;input.resource_revision=1U;
+    input.interpolation={0.,0.,0.,0.F,1U,1U,
+        entity::EntityRenderInterpolationProfile::synthetic_seconds_v1};
+    input.view_frustum=&*frustum.frustum;
+    entity::StudioEntityRenderInstance instance;
+    instance.entity_number=1U;instance.studio_asset_index=0U;
+    instance.pose_index=std::numeric_limits<std::uint32_t>::max();
+    instance.preparation_status=entity::StudioRenderPreparationStatus::frustum_rejected_before_pose;
+    instance.transform.origin={-3.F,0,0};
+    instance.interpolated_bounds={{-3.5F,-.25F,-.25F},{-2.5F,.25F,.25F}};
+    instance.early_frustum_bounds=instance.interpolated_bounds;
+    input.studio_instances.push_back(instance);
+    const auto source=entity::EntityRenderFrameBuilder{}.build(*package,input);REQUIRE(source);REQUIRE(source.frame);
+    CHECK(source.frame->studio_poses().empty());
+    preview::InteractiveEntityVisibilityRefilterInput refilter;
+    refilter.camera=camera;refilter.extent={320,200};refilter.output_frame_revision=2U;
+    bool result_already_checked=false;
+    SECTION("same camera retains explicit omission") {
+        const auto result=preview::InteractiveEntityVisibilityRefilter{}.refilter(*package,*source.frame,refilter);
+        REQUIRE(result);REQUIRE(result.frame);CHECK(result.frame->studio_poses().empty());
+        CHECK(result.frame->draw_commands().empty());
+        CHECK(result.frame->studio_instances()[0].visibility_status==entity::RuntimeEntityVisibilityStatus::culled_by_frustum);
+        result_already_checked=true;
+    }
+    SECTION("different camera cannot reveal absent palette") {refilter.camera=camera_along_x(-1.F);}
+    SECTION("camera exemption cannot reveal absent palette") {refilter.retained_entity_number=1U;}
+    SECTION("resource replacement cannot borrow omitted instance") {
+        const auto replaced=make_scene_package(0x7200U);
+        const auto result=preview::InteractiveEntityVisibilityRefilter{}.refilter(*replaced,*source.frame,refilter);
+        REQUIRE_FALSE(result);REQUIRE(result.error);
+        CHECK(result.error->code==preview::InteractiveEntityVisibilityRefilterErrorCode::scene_package_mismatch);
+        result_already_checked=true;
+    }
+    // Keep discovery of different-camera/exemption/resource sibling cases.
+    if(result_already_checked)return;
+    const auto rejected=preview::InteractiveEntityVisibilityRefilter{}.refilter(*package,*source.frame,refilter);
+    REQUIRE_FALSE(rejected);REQUIRE(rejected.error);
+    CHECK(rejected.error->code==preview::InteractiveEntityVisibilityRefilterErrorCode::frame_rebuild_failed);
+    CHECK(rejected.error->frame_builder_error==entity::EntityRenderFrameErrorCode::invalid_pose_reference);
+    CHECK(source.frame->studio_poses().empty());
+    CHECK(source.frame->studio_instances()[0].visibility_status==entity::RuntimeEntityVisibilityStatus::culled_by_frustum);
 }
 
 } // namespace
