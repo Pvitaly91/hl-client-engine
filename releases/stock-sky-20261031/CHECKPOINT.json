@@ -1,0 +1,975 @@
+{
+  "schema": "hlc.stock-sky.delivered-release-checkpoint.v1",
+  "created_utc": "2026-10-31T00:17:00.3599949Z",
+  "purpose": "Archive exact delivered binary package and actual compiled task overlays, not an empty commit or main-source integration",
+  "historical_checkout_head_context": "5e8ebaac53167d76e02fc9597ded423013f93332",
+  "clean_HEAD_reproduction_claimed": false,
+  "canonical_root_sources_integrated": false,
+  "source_authority": "exact36 frozen B6 base plus hash-bound task Client/Launcher overlays",
+  "configuration": "Release",
+  "platform": "Win32",
+  "toolset": "14.34.31933",
+  "runtime_text_default": "off",
+  "base_client_sha256": "36c5168f209f963e20f24cadc342c4369dfd569971e642a4a803743bcb7880eb",
+  "client_sha256": "3d6ec5e8d04e263bad400e3545889253f00214d5e44f6a2be7dab7d592ca13e4",
+  "launcher_sha256": "fce964546404f31c744596af4b7be2331a9bb9296469751ea30f377b4cc8bfe4",
+  "build_records": {
+    "launcher": {
+      "bytes": 33680,
+      "sha256": "2419b09f439d45c4d13c2f5beddd4df6c38a8772aef93d5a32e318214ef63a74"
+    },
+    "client": {
+      "bytes": 72165,
+      "sha256": "1180d86771f426a166b171790ed5707c6b3cc4c016c57fe54530eb659e311d72"
+    }
+  },
+  "original_input_manifests": {
+    "launcher": {
+      "bytes": 8135,
+      "sha256": "6dca2b7fd85c8302c1a1b8762adff8449e04a5935046be80fad77cfabd1dd325"
+    },
+    "client": {
+      "bytes": 13339,
+      "sha256": "d55362f872507bd68e1d7fd8c604f8141870fb0492f1b8cb50863b2e43cdba31"
+    }
+  },
+  "snapshot_input_counts": {
+    "launcher": 11,
+    "client": 21
+  },
+  "snapshot_inputs": [
+    {
+      "path": "client-source/src/renderer/opengl/opengl_renderer.cpp",
+      "bytes": 283613,
+      "sha256": "9a8b6df05b2176267f8fe9830456a33cebde073ac88f9d15834bbdabed18e410"
+    },
+    {
+      "path": "client-source/src/renderer/opengl/opengl_entity_renderer.cpp",
+      "bytes": 62965,
+      "sha256": "a78c66ae53104c8acc6502608039557bb3ab2e0556c689e9f124aaf65cef77d9"
+    },
+    {
+      "path": "client-source/src/renderer/opengl/opengl_scene_target.hpp",
+      "bytes": 15768,
+      "sha256": "de22ec4855b422696594ca83e8b2e8e51c2762cfc695386f9778f42047f28d7a"
+    },
+    {
+      "path": "client-source/sky_candidate_api.hpp",
+      "bytes": 5919,
+      "sha256": "7701ce55f228bb4ab268731ff7396422560dc942c5842f6c836d71faf6903c4b"
+    },
+    {
+      "path": "client-source/background_sky_policy.hpp",
+      "bytes": 2290,
+      "sha256": "c9eff9dc30c61fb7ab82f4e39b0c44a0e4af879b7b152c7dea2bf1e5d926f04d"
+    },
+    {
+      "path": "client-source/sky_depth_guard.hpp",
+      "bytes": 3480,
+      "sha256": "c89921e33af17bba58d2a62e299e118bc3fc68b7c044f4d5912e324505f1b714"
+    },
+    {
+      "path": "client-source/sky_diagnostic_json.hpp",
+      "bytes": 6610,
+      "sha256": "ee2de7aef40daa8f17b2b69eefe9a589b2e3a0890461618fef957c28b3b79a28"
+    },
+    {
+      "path": "client-source/sky_disable_json.hpp",
+      "bytes": 3237,
+      "sha256": "90cb00ddf379578af55e6d743e9a1a8c765004303afa196ddb846a8b81b9cc2e"
+    },
+    {
+      "path": "client-source/sky_gameplay_capture.hpp",
+      "bytes": 7225,
+      "sha256": "6f7dee99e2da4dc9c362d9d2b53ff0273d1cbd3ef145b51c24d5f26d29857760"
+    },
+    {
+      "path": "client-source/sky_session_stats.hpp",
+      "bytes": 8788,
+      "sha256": "e2abf4bfc4c378454c0c39351b6c5f1c4312484885256d4b2e8434594f774628"
+    },
+    {
+      "path": "client-source/sky_stock_case_capture.hpp",
+      "bytes": 6604,
+      "sha256": "6a42652c14f804746d96bd4a3d4bec20a28477da5037f6a05791858310151c9b"
+    },
+    {
+      "path": "client-source/main.cpp",
+      "bytes": 601806,
+      "sha256": "a3c05d028a33155e2f57160cd641d7c2a696efa50444d2b74961bcaa8a98a466"
+    },
+    {
+      "path": "client-source/sky_diagnostic_entry.cpp",
+      "bytes": 250,
+      "sha256": "0c82482c0c51927530f898440b39ecc094df2e33bbbffc205e2351caee89de6c"
+    },
+    {
+      "path": "client-source/tests/sky_advanced_scenes.hpp",
+      "bytes": 12039,
+      "sha256": "2167937f319c71ea7d1c6f74d1af753f386dc4b168fae31ecfa982522d89735f"
+    },
+    {
+      "path": "client-source/tests/sky_candidate_fixture.cpp",
+      "bytes": 58668,
+      "sha256": "60001f12f7c9d89aca889bf66a8ed5162aac2a530ac664dcc21a6b454c62b68b"
+    },
+    {
+      "path": "client-source/tests/sky_crossfire_control.hpp",
+      "bytes": 22591,
+      "sha256": "670c460ed48ac71dbde777672ccb661f1af55db8d835c87e8685574a62d6a036"
+    },
+    {
+      "path": "client-source/tests/sky_disable_diagnostic_correctness.hpp",
+      "bytes": 24893,
+      "sha256": "37b63f8214d27e605a29f16ee756fe296fa235c26030e9953d71684c4187a9f1"
+    },
+    {
+      "path": "client-source/tests/sky_eligibility_regressions.hpp",
+      "bytes": 19467,
+      "sha256": "00ead8131c294816e464bf83ecc54e433009da3a5451ff6c7e1793ae00859c77"
+    },
+    {
+      "path": "client-source/tests/sky_gl_call_counts.hpp",
+      "bytes": 4665,
+      "sha256": "4d33f792fd4dbec275a4ac6f7a3e9a6ca93480244316fdf3fd4e2bc2fe2cbca3"
+    },
+    {
+      "path": "client-source/tests/sky_gpu_queries.hpp",
+      "bytes": 14794,
+      "sha256": "f52d8a7182d8907de36af05a3ea0e39ac1ac9bf2e19b8e0388438c6e10797c5a"
+    },
+    {
+      "path": "client-source/tests/sky_stock_correction_correctness.hpp",
+      "bytes": 24080,
+      "sha256": "f983bed038381df6cec863652cd94733b486607ac2babb000f8b1487e823365b"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/main.cpp",
+      "bytes": 120211,
+      "sha256": "cbd8fe13021caa9c1356dc2bf2924e285e1b7d9146f8612135057e2d50ed71b6"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/gpu_preference.hpp",
+      "bytes": 18933,
+      "sha256": "9c8da88373a30285138ca12b642cb9ccec17f16d5de9f046b22c8e427f09e21e"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/original_half_life.hpp",
+      "bytes": 23558,
+      "sha256": "a91b53dd943372547e97810ae5075c2d86ce3c9fdc21437d047d752bf3aeb9ce"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/smooth_scroll_check.hpp",
+      "bytes": 5490,
+      "sha256": "be7cf0b0a857f4ece26df57ceea42e2dd36da4f92f7220d2106f8aedd730c65d"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/smooth_scroll.hpp",
+      "bytes": 3080,
+      "sha256": "349919df85743c68fc463155e5377f2c40908239d20b31a67d4b445247ba1ead"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/startup_journal.hpp",
+      "bytes": 21983,
+      "sha256": "3a95b3986cd4e5aa93ab09ea49626e75ffbfab50eb002ec0988fc757ae5c8311"
+    },
+    {
+      "path": "launcher-source/src/platform/windows/external_launcher.cpp",
+      "bytes": 22352,
+      "sha256": "b3bca454a5fea27930b036f8d6f8a4f51a8457623a5287155f49c3150a307e57"
+    },
+    {
+      "path": "launcher-source/include/hlclient/platform/windows/external_launcher.hpp",
+      "bytes": 7100,
+      "sha256": "2b00d7f58fcf821843598e3e83d4f0d71a8f0a50ba3d93227afe6c6263c9897f"
+    },
+    {
+      "path": "launcher-source/include/hlclient/platform/windows/executable_launch_path.hpp",
+      "bytes": 3899,
+      "sha256": "67d2847b7e42077a7e9ff9a18b04562220091458d3f9ced41f9039d0159702a7"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_external_process_fixture/main.cpp",
+      "bytes": 2807,
+      "sha256": "4c8566d85846dd469c089f5c7ea451d23c589848dffacf390ae8ce9d12a49473"
+    },
+    {
+      "path": "launcher-source/tests/test_launcher_gpu_path_standalone.cpp",
+      "bytes": 16533,
+      "sha256": "cd3db80e48661d0faf7cefaccd1245ac0ed941d533467008535ecff13c0f9492"
+    }
+  ],
+  "required_frozen_dependencies": {
+    "pinned_SDL_GLAD_headers_required": true,
+    "client_unique_archives": [
+      {
+        "name": "hlclient_goldsrc_world_textures.lib",
+        "bytes": 202084,
+        "sha256": "5d46a63a2ebf618cbc4a9781133a1e7429798cbb5d38d932ae0cf972d9c95908"
+      },
+      {
+        "name": "hlclient_filesystem.lib",
+        "bytes": 266394,
+        "sha256": "90a39e47738b9bfd7d3295d5c2fd8ea96823c1df5e17e1e412e61a32b256d012"
+      },
+      {
+        "name": "hlclient_resource_consistency_api.lib",
+        "bytes": 41510,
+        "sha256": "0a65bffc163f29742f1c93cd46b7c8ebb80e73aae3d77549fe9ab803b1ddd823"
+      },
+      {
+        "name": "hlclient_application_runtime_replay.lib",
+        "bytes": 2299200,
+        "sha256": "fcd9d0c74b1c73251c8fa95b89967bc300dc8790cfd9aa467c9f951910c767a0"
+      },
+      {
+        "name": "hlclient_goldsrc_lightmaps.lib",
+        "bytes": 88210,
+        "sha256": "e8e993131b3fa658ca3c60752fd0bb28ae7d4d34acae7f232ed51e239e54483e"
+      },
+      {
+        "name": "hlclient_external_launcher.lib",
+        "bytes": 196976,
+        "sha256": "7cecd6ee08bc45d1473a83ea30f3473ade5820fdc4ca30c768df848cbe70974a"
+      },
+      {
+        "name": "hlclient_goldsrc_sound_assets.lib",
+        "bytes": 168324,
+        "sha256": "d094cfa1d2b75b3bfb93d6e3be0562e6699a1f3478510a4acdaefeed0c16b7c7"
+      },
+      {
+        "name": "hlclient_goldsrc_bsp_collision.lib",
+        "bytes": 114048,
+        "sha256": "7c33cf4afaf8561e37526b5930027b8608fbf8f0ef7f79fb4e94b59bf64beead"
+      },
+      {
+        "name": "hlclient_renderer_api.lib",
+        "bytes": 62444,
+        "sha256": "67da94b77db82fd830d5d187fe65962878a1e889579aa43272208a2650fc42e1"
+      },
+      {
+        "name": "hlclient_goldsrc_local_movement.lib",
+        "bytes": 279328,
+        "sha256": "776cd0309325ac064e768d68b3a36067ab9f7a1a49aa002f372a24396c26ecc0"
+      },
+      {
+        "name": "hlclient_stock_runtime_reconnect.lib",
+        "bytes": 61914,
+        "sha256": "2fcdb1c6cdc40df9c124b70fbf0c26805362c218d3a60bc7f09ced28432bec66"
+      },
+      {
+        "name": "hlclient_goldsrc_asset_dispatch.lib",
+        "bytes": 375654,
+        "sha256": "dac1610019cc3c3b2f9d774b7f981c3e06328d091ab0b14a3a137a47854fc5d6"
+      },
+      {
+        "name": "hlclient_platform_sdl_input.lib",
+        "bytes": 8828,
+        "sha256": "fa7cfe22a3c61d97a9cdf16eb23d3c7bcb7f98f785f708e54fa0e4399894c9af"
+      },
+      {
+        "name": "hlclient_audio_sdl.lib",
+        "bytes": 44524,
+        "sha256": "2895972d3bb1f66e52cb52a2a831eb0ab745dd8cdda577e7882d78292206b975"
+      },
+      {
+        "name": "hlclient_tga_image.lib",
+        "bytes": 17778,
+        "sha256": "4aad7f33da56830bbf53218d10852048aecfa8e37d5f41a6d4c205085633a4eb"
+      },
+      {
+        "name": "hlclient_game_policy.lib",
+        "bytes": 4386,
+        "sha256": "e2a0b39b796b53ec0d471d8c74012b9064a11b8c3dc389a0ec585662ecbba1ba"
+      },
+      {
+        "name": "hlclient_hash_md5.lib",
+        "bytes": 7622,
+        "sha256": "6cdcdda0bf6e5df6caf4a11d1c4959d0673cd6ca1b71d84f49cbafbc1996d717"
+      },
+      {
+        "name": "hlclient_platform.lib",
+        "bytes": 147132,
+        "sha256": "d3617b46f8b02d0ef8fc60deb4d9b5705a36dc9bcf7bd16b04f97ac99f213b13"
+      },
+      {
+        "name": "hlclient_goldsrc_wad3.lib",
+        "bytes": 115082,
+        "sha256": "7466dac2ca7621231ca5d16fb384cc705abebfd45f5ac342f3f4ca7a5046a003"
+      },
+      {
+        "name": "hlclient_game_halflife.lib",
+        "bytes": 2069302,
+        "sha256": "e720f11b281b474614ebee166b99bc5260e632be93daa41623eb6c707802feb8"
+      },
+      {
+        "name": "hlclient_goldsrc_builtin_importers.lib",
+        "bytes": 91646,
+        "sha256": "ec5aded79230bf778569bf8a79045ad39c507e08e3ca5f6b6293de88905fdad6"
+      },
+      {
+        "name": "hlclient_gameplay_camera_render_adapter.lib",
+        "bytes": 4196,
+        "sha256": "13d49d29dd5dfba40df8da7dfbd621c66958b10915e609691acc790f9db0dcc2"
+      },
+      {
+        "name": "hlclient_goldsrc_post_resource_signon.lib",
+        "bytes": 388122,
+        "sha256": "776b873a91079bad034b5e01591ae12f137ef912bce385b79c7b1f40ab48bbc7"
+      },
+      {
+        "name": "hlclient_entity_visual_assets.lib",
+        "bytes": 336742,
+        "sha256": "67113e66fa311966154fd4ddb3cebb01a0f11e28bc335b8a60369d63db790adc"
+      },
+      {
+        "name": "hlclient_goldsrc_entity_baseline_decoder.lib",
+        "bytes": 60756,
+        "sha256": "09169ffa7d277b263758f9ab6ba0d05e72c8bfa5f81088908960ed4a77ec55d5"
+      },
+      {
+        "name": "hlclient_local_prediction.lib",
+        "bytes": 162196,
+        "sha256": "499648222d591b3057222c190660606e2aeded5a9ec8f3c8095b861f525f1982"
+      },
+      {
+        "name": "hlclient_bzip2.lib",
+        "bytes": 61030,
+        "sha256": "509261facb49e3fe9f1e04aaef93a7d13b58ac6d1c825cd35c06fd8129e48060"
+      },
+      {
+        "name": "hlclient_stock_runtime_transport_replay.lib",
+        "bytes": 347474,
+        "sha256": "90ea33ceed0fd65396b7f668fc4582527cb4be71af467334e2f91232e8e4773f"
+      },
+      {
+        "name": "hlclient_goldsrc_usercmd_codec.lib",
+        "bytes": 237718,
+        "sha256": "ae4f86171b02b94bc4245f0f66fc039a0152ac978dbcff22e397b9f6a1a3a3a3"
+      },
+      {
+        "name": "hlclient_goldsrc_stock_runtime_capture.lib",
+        "bytes": 139550,
+        "sha256": "2db7ad828c83f1246e034020410115da6763e94efd29a6c41a94244c49b7487b"
+      },
+      {
+        "name": "hlclient_local_asset_source.lib",
+        "bytes": 131178,
+        "sha256": "1df19d66cb2d836ba20ae99e6e6951017453950fcce87f50029cad048b778f8f"
+      },
+      {
+        "name": "hlclient_windows_secure_output.lib",
+        "bytes": 165966,
+        "sha256": "8cf62bda2abf64b3b9b05f7f1a8ee6128051b62813e69513c72e7cc550aaa409"
+      },
+      {
+        "name": "hlclient_collision_api.lib",
+        "bytes": 91040,
+        "sha256": "3850f98016fe6130f551dfeda66ee12126dbd2bb66f811db18bf5ba515892657"
+      },
+      {
+        "name": "hlclient_goldsrc_spatial.lib",
+        "bytes": 156200,
+        "sha256": "32155d0f3dbaff19f7a167cec9196e6ec1acf12f1036dbf996578ff3caf7a2d5"
+      },
+      {
+        "name": "hlclient_console.lib",
+        "bytes": 689850,
+        "sha256": "8ff83f5002b2dc8f2fdc8850268b0706d900830417840cfd156f994c89a2faae"
+      },
+      {
+        "name": "hlclient_input_api.lib",
+        "bytes": 86090,
+        "sha256": "32d5b4d5b28c0751561671bb0ba2270261d29953a88f451e4134467689edfdfb"
+      },
+      {
+        "name": "hlclient_world_render_package.lib",
+        "bytes": 173126,
+        "sha256": "82bad0a2cc8e6780e7fddcdd25eb5d7cdf02e2c2741688ac3da216f1fa08896b"
+      },
+      {
+        "name": "hlclient_entity_visual_projection.lib",
+        "bytes": 60532,
+        "sha256": "381223a11beafd30d6c3f62fbc9c0859e5a45b1aeadf22eb3c19770402472abe"
+      },
+      {
+        "name": "hlclient_goldsrc_sky_assets.lib",
+        "bytes": 62962,
+        "sha256": "a22b81c8adf5cc381e868e1eecdc07f24f8e5f0bf411c4eaf028f6fc12e15b86"
+      },
+      {
+        "name": "hlclient_live_visual_control.lib",
+        "bytes": 28060,
+        "sha256": "c30cfacc6ce99cf01cdb063f5d8fa0b70415c18ec51d19953991dd8404622b1f"
+      },
+      {
+        "name": "hlclient_goldsrc_stock_runtime.lib",
+        "bytes": 780056,
+        "sha256": "a2534b3801846efe8856fc686b820546173e71a1d5909e16b86b12c1c9b1b385"
+      },
+      {
+        "name": "hlclient_game_client_host.lib",
+        "bytes": 235886,
+        "sha256": "a4a7e492ddf5e3eba75f96981396cc3db52e59e3eba0cf6c268ec265de83ee3b"
+      },
+      {
+        "name": "hlclient_network.lib",
+        "bytes": 126032,
+        "sha256": "833b0c667a005a0b076cadf97004517791b87f0bf5da6a9f7f648975e63bcefe"
+      },
+      {
+        "name": "hlclient_goldsrc_bsp.lib",
+        "bytes": 704922,
+        "sha256": "66123fd60bb3a768c89a659465f818b9bf466fac3d9a9dacbbb17fefdc52267c"
+      },
+      {
+        "name": "hlclient_prediction_visual.lib",
+        "bytes": 29456,
+        "sha256": "f12152047ea8c9a6c33090a6c07e0116b99fa81354128dffff69680c1f72cb0f"
+      },
+      {
+        "name": "hlclient_goldsrc_local_resources.lib",
+        "bytes": 88500,
+        "sha256": "4152466306c8b6b124a1ec8eff4f55fa3f50e30514f3e12a3f04a3f625b87eeb"
+      },
+      {
+        "name": "hlclient_world_scene_renderer.lib",
+        "bytes": 122354,
+        "sha256": "60499a7356975be7f31fc21017d19af0f80b2d0a1f91b3c7bf2bd59540bacb3b"
+      },
+      {
+        "name": "hlclient_goldsrc_indexed_texture.lib",
+        "bytes": 78012,
+        "sha256": "b9d452dffb700b51de6955596db9890d53cb02611a16acf373a907d876841d36"
+      },
+      {
+        "name": "hlclient_goldsrc_file_consistency.lib",
+        "bytes": 86748,
+        "sha256": "c6c1aa8083bed62c87e68ce9dd9c58102d428d773aea760d590dc34a24e728b5"
+      },
+      {
+        "name": "hlclient_entity_render_api.lib",
+        "bytes": 214540,
+        "sha256": "3c9c419b095e347cdd8b60b1d3fb77c3f7343364e28afc3e20ebc873021c2fe4"
+      },
+      {
+        "name": "hlclient_goldsrc_client.lib",
+        "bytes": 660592,
+        "sha256": "146b982e92e5ed14d1301b51fbe690e63fa6a2ef421cdaa833e63b413c94f391"
+      },
+      {
+        "name": "hlclient_renderer_null.lib",
+        "bytes": 42960,
+        "sha256": "076f857df122689c95dba91108e66d99d0ab2d230ab28b8a0af013c47caf97c5"
+      },
+      {
+        "name": "hlclient_world_preview.lib",
+        "bytes": 124356,
+        "sha256": "a28fab0ea0ab60f115150cb26a8480927e1f32b4f831d5101d7f0cc5d1c50258"
+      },
+      {
+        "name": "hlclient_prediction_api.lib",
+        "bytes": 146122,
+        "sha256": "fbe22f60bb13c748305a81031f694cf1cda8db312d640bcbc078013aa8f9e29e"
+      },
+      {
+        "name": "hlclient_world_visibility.lib",
+        "bytes": 277186,
+        "sha256": "63e70c287b4fe25f3ba6053ee90caa4bb129a32247848e83cacd285587bc2ae8"
+      },
+      {
+        "name": "hlclient_app_support.lib",
+        "bytes": 295428,
+        "sha256": "2a0001f6d6a97df491287a76dedbcfe84cd0773ffdf73c4fdb3ec3127cdf82f0"
+      },
+      {
+        "name": "hlclient_asset_api.lib",
+        "bytes": 207722,
+        "sha256": "8f1dfe60aa1e67f08d51f4cd77a46ca379403eb8071f714c1a73616ca024652a"
+      },
+      {
+        "name": "hlclient_local_resources.lib",
+        "bytes": 369228,
+        "sha256": "f4db97455b71ff30aa2f47648b7f5e66c2545729a891e61e6863279fe60a64cc"
+      },
+      {
+        "name": "hlclient_goldsrc_brush_transform.lib",
+        "bytes": 16894,
+        "sha256": "a7dc362480e95302dc93a1bd8d66d63241bb06909af92e77ece472efe13d293e"
+      },
+      {
+        "name": "hlclient_goldsrc_brush_models.lib",
+        "bytes": 366322,
+        "sha256": "332795f066fd09e7479de04550536652be0f0ee8deb0cb0b3f0b35665a9d8daa"
+      },
+      {
+        "name": "hlclient_gameplay_camera.lib",
+        "bytes": 83944,
+        "sha256": "fb2701ad8236e129c04e4811ae66e5913eae44f36d931e4643db6986a1df7458"
+      },
+      {
+        "name": "hlclient_auth.lib",
+        "bytes": 24732,
+        "sha256": "a0ce2f770875bb98abc1b1c8277ce2835d4b4b56ca51db8815767d5830ee849c"
+      },
+      {
+        "name": "hlclient_goldsrc_collision_scene.lib",
+        "bytes": 170532,
+        "sha256": "eee0a1cb0cd1434fc079af5e0419cdfae17e5ffdb3266a00810db200eac96273"
+      },
+      {
+        "name": "hlclient_goldsrc_usercmd_api.lib",
+        "bytes": 48244,
+        "sha256": "8747d3cf0746dc417be18d5704b7f582c00dfab12576bb058ce5782e5b0ed82d"
+      },
+      {
+        "name": "hlclient_movement_api.lib",
+        "bytes": 46982,
+        "sha256": "5eb3b27d59ad9b32efbaacb7f1c10b60ec7d7de01b2c3e89e07aa309de44e4c0"
+      },
+      {
+        "name": "hlclient_goldsrc_client_data_decoder.lib",
+        "bytes": 196774,
+        "sha256": "2e498ff7e62a3185cf4351e6adde7bd070bcf4a75914048a0179aa13d3194850"
+      },
+      {
+        "name": "hlclient_console_assets.lib",
+        "bytes": 66230,
+        "sha256": "9b9774de27a84f7610d94583bc6a9c239e468801022dc4cc6677a64ca2c0dd1f"
+      },
+      {
+        "name": "hlclient_entity_frame_composition.lib",
+        "bytes": 117216,
+        "sha256": "8fa18c3e6cfd82f2d99e9fbf1cf532aaf2971ae5dde82e4f8e42b697c24f2612"
+      },
+      {
+        "name": "hlclient_goldsrc_byte_io.lib",
+        "bytes": 24832,
+        "sha256": "7584afb8da2c552d01047e1e349c3294ce79fc2d50b0da74d53879c9eaae6b72"
+      },
+      {
+        "name": "hlclient_goldsrc_client_message.lib",
+        "bytes": 54410,
+        "sha256": "76c80dfb29e4b6f4fbd74b2f9b16059f327e83b532c00e0c68ecb5d87f80d258"
+      },
+      {
+        "name": "hlclient_renderer_opengl.lib",
+        "bytes": 899898,
+        "sha256": "17a8ae478a6fdd471362b0facea84bf13eec99147477581b2d3b84d35b6c35eb"
+      },
+      {
+        "name": "hlclient_goldsrc_signon.lib",
+        "bytes": 2257012,
+        "sha256": "c7829be639d3adea5dee1b7cb40e6f782e68c4b41ea59a8c032b415694c468f2"
+      },
+      {
+        "name": "hlclient_studio_pose.lib",
+        "bytes": 293180,
+        "sha256": "90f0ba82013539b37b2c629313fae6b8b2ffddb4b4ecbcb6f13011eb036113ce"
+      },
+      {
+        "name": "hlclient_interactive_preview.lib",
+        "bytes": 109522,
+        "sha256": "b70ff46d6fe33aba9923875547fcdf66bb3018284023d254d949ae195da3bd55"
+      },
+      {
+        "name": "hlclient_goldsrc_hud_assets.lib",
+        "bytes": 359984,
+        "sha256": "7d706cedce0ffc94c90a0293ca043d7198e76672faaccda53baf494397a5f780"
+      },
+      {
+        "name": "hlclient_entity_interpolation.lib",
+        "bytes": 287628,
+        "sha256": "7704bbf0d7c02243401e06f67aa80ac8709de10b1f5247f13bf1f910c03cb646"
+      },
+      {
+        "name": "hlclient_client.lib",
+        "bytes": 45782,
+        "sha256": "f1531a4bf5a27acf3fa9e5a612d58e551385f3ef9f4695c3187f7eb5303dc01e"
+      },
+      {
+        "name": "hlclient_application_console.lib",
+        "bytes": 763296,
+        "sha256": "e7f97aff7f9c073da8276c1723f599d98e1aff92d3a4bfdbdb72863e11301538"
+      },
+      {
+        "name": "hlclient_session_receipts.lib",
+        "bytes": 1133236,
+        "sha256": "013d3f2924e926fafc39a6cbd514f2a3f8f71f56435b0011f76963668fb5c162"
+      },
+      {
+        "name": "hlclient_resource_consistency_local.lib",
+        "bytes": 105122,
+        "sha256": "3377b71bc2b95423b1a30a9e1a369da43e15cb602345664b6ed44823e3a13968"
+      },
+      {
+        "name": "hlclient_glad.lib",
+        "bytes": 135284,
+        "sha256": "aaf4f94709da70a5d9e2e687e3a5cdeb1b1efcd305f884092cce078d51767f75"
+      },
+      {
+        "name": "hlclient_goldsrc_entity_snapshots.lib",
+        "bytes": 228120,
+        "sha256": "a7e61c2262960568aac1cc4536ecb25b681b11e87699f8b507f718ae10761586"
+      },
+      {
+        "name": "hlclient_goldsrc_audio.lib",
+        "bytes": 60040,
+        "sha256": "87719646d0f0a589295a86a815aaab4b1096aaebbf7d1f0304fa6bb0fbf112d2"
+      },
+      {
+        "name": "hlclient_entity_scene_render.lib",
+        "bytes": 135192,
+        "sha256": "90b989c94d601afed0f3e20b3e7cb167cfee596943f243bd60e5c2039212c96b"
+      },
+      {
+        "name": "hlclient_goldsrc_delta_values.lib",
+        "bytes": 137466,
+        "sha256": "36c5493006e1cb8d652aa2b2571919753a32abebb53b62c479be2872b31a5638"
+      },
+      {
+        "name": "hlclient_gameplay_input.lib",
+        "bytes": 66576,
+        "sha256": "441b7aa9e4df34ac4b0d3eac5c714e9ec7a6aaca55dab95624a71f3e613ea41a"
+      },
+      {
+        "name": "SDL3.lib",
+        "bytes": 289978,
+        "sha256": "349bd731e236a4d97530b964c775ba64503fd887b37b1f53b6f49555f92d9257"
+      },
+      {
+        "name": "hlclient_windows_process_orchestrator.lib",
+        "bytes": 240994,
+        "sha256": "8fe29b709d783569cd3af0fabc11b7decaaa5f9f331037a76aaf91b5cb9f36c2"
+      },
+      {
+        "name": "hlclient_audio.lib",
+        "bytes": 89148,
+        "sha256": "693d135b1261bb439ead84fe06d2952e5e94a873f8830ab0a3103899baf75728"
+      },
+      {
+        "name": "hlclient_goldsrc_sprite.lib",
+        "bytes": 240042,
+        "sha256": "559896c904640d8d6ea21710e2e53b92fe88b11dbd987b2476b1386f34ccd7cc"
+      },
+      {
+        "name": "hlclient_core.lib",
+        "bytes": 449788,
+        "sha256": "7a1c1052703bc74c4afa6a45ef7946d4d280d751fa799dd550fda084fb2bc4f0"
+      },
+      {
+        "name": "hlclient_goldsrc_move_vars_api.lib",
+        "bytes": 97468,
+        "sha256": "6919efe3609d09d64fc13b16568cb7f3d5daded7dcb63b3f783a5db0fa93a929"
+      },
+      {
+        "name": "hlclient_goldsrc_delta_schema.lib",
+        "bytes": 115864,
+        "sha256": "4e6ae2d858b325e61c05f1a5243a6f018c4c3367a84b0bd1df4174633c7a8a5a"
+      },
+      {
+        "name": "hlclient_goldsrc_usercmd_sampling.lib",
+        "bytes": 56488,
+        "sha256": "159f261f8192b66108aaa0afdd462eda1138f81eef41bab8c19c94f5d3d8b3a2"
+      },
+      {
+        "name": "hlclient_hash_sha256.lib",
+        "bytes": 18996,
+        "sha256": "2afd60bd024d284e905621c3e1c591a5baebf7bb1439b7aab4710135295ae660"
+      },
+      {
+        "name": "hlclient_goldsrc_runtime_capture_replay.lib",
+        "bytes": 134786,
+        "sha256": "e22567976ce901418b978c9fcd84765a84f5a080b70ea0420cf261f46442bcce"
+      },
+      {
+        "name": "hlclient_goldsrc_visual_asset_bundle.lib",
+        "bytes": 609566,
+        "sha256": "6e0616833047965e94f428e554431c7f6e5b168b1868ff5e044b11d1928ffee2"
+      },
+      {
+        "name": "hlclient_goldsrc_decal_assets.lib",
+        "bytes": 61890,
+        "sha256": "c216b5a5c2f3cc697262bf4138333812773de3c12e937d8a9115e20786e3ae11"
+      },
+      {
+        "name": "hlclient_stock_runtime_transport_journal.lib",
+        "bytes": 138154,
+        "sha256": "0b6304ae6fef21ff5d454a6606d4d2b324ca033b4ca6366c9cff048781929075"
+      },
+      {
+        "name": "hlclient_windows_binary_identity.lib",
+        "bytes": 134844,
+        "sha256": "900e659f9d475df406d804cf3917c86fe0f41800ca40d8525779742baf8210ee"
+      },
+      {
+        "name": "hlclient_stock_runtime_corpus.lib",
+        "bytes": 662238,
+        "sha256": "f74cf40c492cdcff94479a72e8d3661cb84d2b220531c40204dde7c4fc1a9cc9"
+      },
+      {
+        "name": "hlclient_goldsrc.lib",
+        "bytes": 282388,
+        "sha256": "a032bab5c88cb3dc37473a402f812e6ee46912e8b7484449f39598faec01fa10"
+      },
+      {
+        "name": "hlclient_goldsrc_runtime_replay.lib",
+        "bytes": 714704,
+        "sha256": "65909a847712e6394d576fe2d7a3cfdded4fc44a90ff4356fa9d057d55a0f774"
+      },
+      {
+        "name": "hlclient_goldsrc_usercmd_session.lib",
+        "bytes": 569220,
+        "sha256": "61f9d516585cc3f696dde07913b974f3b2f61c712826ed3a9f63e086fa6e3cfd"
+      },
+      {
+        "name": "hlclient_goldsrc_world_render.lib",
+        "bytes": 221952,
+        "sha256": "65651e6668636238190920a151a52e36413f4b5e9b0bd73b309e7640bb853090"
+      },
+      {
+        "name": "hlclient_asset_manager.lib",
+        "bytes": 261466,
+        "sha256": "1e5b471d000c6ccaa907a3814e7774b3bf6c49063af77c2e0cc1d55d8a440c44"
+      },
+      {
+        "name": "hlclient_entity_scene_package_build.lib",
+        "bytes": 128994,
+        "sha256": "965e400db3e6205979495ae1fb08c084dadfd29853e5e04b0280c15bca5bdc6a"
+      },
+      {
+        "name": "hlclient_scene_api.lib",
+        "bytes": 15812,
+        "sha256": "a66f6b633c150bbb8aba706b16971ae31ba3f49745593e49816d036494a758cd"
+      },
+      {
+        "name": "hlclient_asset_dispatch.lib",
+        "bytes": 281496,
+        "sha256": "b46b3a18ef1f04dcb7b2a3ddd8afe617ea6dbed0a3d25e56796c2bf5db280aee"
+      },
+      {
+        "name": "hlclient_goldsrc_studio_model.lib",
+        "bytes": 626226,
+        "sha256": "74fd22e9431a9a44502c93d0a1968dee95b38de6a038706e88d7b01fd4241946"
+      },
+      {
+        "name": "hlclient_goldsrc_packet_entity_decoder.lib",
+        "bytes": 405892,
+        "sha256": "18a60a3c62ac7aefe46c3d7e8f75e76028b5a7ff1340b570955532718ceb9b2b"
+      },
+      {
+        "name": "hlclient_goldsrc_live_runtime.lib",
+        "bytes": 1014418,
+        "sha256": "f27f2e7ab2cd407c0f97d9f2c479c0fed4afd3afce4b3a0d20bd0e4a5b152ac3"
+      },
+      {
+        "name": "hlclient_goldsrc_netchan.lib",
+        "bytes": 583312,
+        "sha256": "0fe7db70add98a91153f9158c28f79d0c5813c0b7e2f92b1b3062d142544ee54"
+      },
+      {
+        "name": "hlclient_goldsrc_world_texture_import.lib",
+        "bytes": 165366,
+        "sha256": "b75ca792d7a3760a93bcdfaf2d57cb2e62e1ace15c36f15a7dc625fc1f0f4c1c"
+      },
+      {
+        "name": "hlclient_world_spatial.lib",
+        "bytes": 51652,
+        "sha256": "373ff5a6eabfa2779e5ad7f082918953c947069138d98b7d50e94b119d714117"
+      },
+      {
+        "name": "hlclient_world_render_api.lib",
+        "bytes": 25458,
+        "sha256": "6412bcd2a2d6f156786e8331b68d57ae2aec7e88a259b08b4b5aaa5d5e0020a6"
+      },
+      {
+        "name": "hlclient_goldsrc_resource_readiness.lib",
+        "bytes": 406928,
+        "sha256": "94157b3739f95ad5a0bd6d01e9c0c3aaaf946ce158f179c312c57dfe3bca0b03"
+      }
+    ],
+    "client_ordered_archive_count": 136,
+    "client_unchanged_frozen_archive_count": 116,
+    "MSVC_Windows_SDK_required": true,
+    "historical_scripts_have_hardcoded_local_paths": true,
+    "not_vendored_here": true,
+    "standalone_clean_checkout_build_claimed": false,
+    "launcher_ordered_archives": [
+      {
+        "name": "hlclient_external_launcher.lib",
+        "bytes": 220016,
+        "sha256": "fd50c3ea1da0feb393581bdae25b75102924f75e0e9ce866faf517f3278ad5ea"
+      },
+      {
+        "name": "hlclient_platform.lib",
+        "bytes": 147132,
+        "sha256": "d3617b46f8b02d0ef8fc60deb4d9b5705a36dc9bcf7bd16b04f97ac99f213b13"
+      },
+      {
+        "name": "hlclient_windows_network_isolation.lib",
+        "bytes": 116102,
+        "sha256": "637fc9836ffaa82cffa2ddcbfc756448e6011d664664df7086e29b6c0900b83c"
+      },
+      {
+        "name": "hlclient_hash_sha256.lib",
+        "bytes": 18996,
+        "sha256": "2afd60bd024d284e905621c3e1c591a5baebf7bb1439b7aab4710135295ae660"
+      },
+      {
+        "name": "hlclient_session_receipts.lib",
+        "bytes": 1133236,
+        "sha256": "013d3f2924e926fafc39a6cbd514f2a3f8f71f56435b0011f76963668fb5c162"
+      },
+      {
+        "name": "hlclient_windows_secure_output.lib",
+        "bytes": 165966,
+        "sha256": "8cf62bda2abf64b3b9b05f7f1a8ee6128051b62813e69513c72e7cc550aaa409"
+      },
+      {
+        "name": "hlclient_session_receipts.lib",
+        "bytes": 1133236,
+        "sha256": "013d3f2924e926fafc39a6cbd514f2a3f8f71f56435b0011f76963668fb5c162"
+      },
+      {
+        "name": "hlclient_platform_sdl_input.lib",
+        "bytes": 8828,
+        "sha256": "fa7cfe22a3c61d97a9cdf16eb23d3c7bcb7f98f785f708e54fa0e4399894c9af"
+      },
+      {
+        "name": "SDL3.lib",
+        "bytes": 289978,
+        "sha256": "349bd731e236a4d97530b964c775ba64503fd887b37b1f53b6f49555f92d9257"
+      },
+      {
+        "name": "hlclient_input_api.lib",
+        "bytes": 86090,
+        "sha256": "32d5b4d5b28c0751561671bb0ba2270261d29953a88f451e4134467689edfdfb"
+      },
+      {
+        "name": "hlclient_windows_process_orchestrator.lib",
+        "bytes": 240994,
+        "sha256": "8fe29b709d783569cd3af0fabc11b7decaaa5f9f331037a76aaf91b5cb9f36c2"
+      },
+      {
+        "name": "hlclient_windows_binary_identity.lib",
+        "bytes": 134844,
+        "sha256": "900e659f9d475df406d804cf3917c86fe0f41800ca40d8525779742baf8210ee"
+      },
+      {
+        "name": "hlclient_core.lib",
+        "bytes": 449788,
+        "sha256": "7a1c1052703bc74c4afa6a45ef7946d4d280d751fa799dd550fda084fb2bc4f0"
+      }
+    ],
+    "client_rebuilt_archive_count": 1,
+    "client_unique_archive_count": 117,
+    "frozen_B6_headers_required": true
+  },
+  "decision": {
+    "gameplay_acceptance": "pending_user_test",
+    "production_acceptance": false,
+    "performance_status": "GAIN_CONFIRMED_IN_TEST",
+    "correctness_status": "VERIFIED_STOCK_CASES_FIXED",
+    "performance_scope": "Bounded stationary real Crossfire static-world control on development Intel RaptorLake-S Mobile, not gameplay or target Windows10 GPU performance",
+    "original_identity": {
+      "bytes": 9706,
+      "sha256": "19aa513860a70d8a11446f0881fe75e75e69b50a6aa109371744259329e11cd7"
+    },
+    "full_HL_PARITY_claimed": false,
+    "windows10_runtime": "not_run_for_this_candidate"
+  },
+  "policy": {
+    "visible": [
+      "original",
+      "world_sky_non_occluding"
+    ],
+    "reserved": [
+      4,
+      5
+    ],
+    "values": {
+      "no_sky_color": 3,
+      "no_background": 2,
+      "original": 0,
+      "depth": 1,
+      "world_sky_non_occluding": 6
+    },
+    "default": "original"
+  },
+  "portable": {
+    "entrypoint": "HLClientLauncher.exe",
+    "schema": "hlclient-windows10-portable-release-v1",
+    "binary_files": [
+      {
+        "path": "hlclient.exe",
+        "bytes": 5895168,
+        "sha256": "3d6ec5e8d04e263bad400e3545889253f00214d5e44f6a2be7dab7d592ca13e4"
+      },
+      {
+        "path": "HLClientLauncher.exe",
+        "bytes": 465920,
+        "sha256": "fce964546404f31c744596af4b7be2331a9bb9296469751ea30f377b4cc8bfe4"
+      },
+      {
+        "path": "HLClientSystemDiagnostics.exe",
+        "bytes": 148992,
+        "sha256": "dac64eb2490be791dcd8e183e044977e047a2edff71782efe6d2dc3438be9659"
+      },
+      {
+        "path": "msvcp140_2.dll",
+        "bytes": 179280,
+        "sha256": "c0f516bed12b6dfd9534e34912523a754c344dcd28f867d331c9e94423c0e030"
+      },
+      {
+        "path": "msvcp140_atomic_wait.dll",
+        "bytes": 46672,
+        "sha256": "0dc54709f471e65995d16d47ea2d3d252c194c3ad66f2c0e6ee5b5082360557f"
+      },
+      {
+        "path": "msvcp140.dll",
+        "bytes": 447592,
+        "sha256": "d0252e22620cf1d82acb03e95f09b35579aa16582894eb32cfa76e832ecc4313"
+      },
+      {
+        "path": "SDL3.dll",
+        "bytes": 2285568,
+        "sha256": "ad833f09fad8d99eadfdb1a765a76f9f20872a3ab6fadbef648f09334f2fac87"
+      },
+      {
+        "path": "vcruntime140.dll",
+        "bytes": 90704,
+        "sha256": "29a6dceb65175e3abb5f2652fbdd2208fa9fdf068a248f4e7d59f565c1ea3acb"
+      }
+    ],
+    "auth": false,
+    "identity": {
+      "bytes": 4374711,
+      "sha256": "77450e1d1b41ebc339b429452b24a4b9fccfd40cc5abd069b9657ac5195fe37d"
+    },
+    "archive": "HLClientEngine-Win10.zip",
+    "Valve_resources": false,
+    "personal_settings_or_logs": false
+  },
+  "delivery": {
+    "status": "canonical_portable_artifact_verified",
+    "shared_delivery": "reported_synchronized_by_parent_not_reprobed_by_exporter",
+    "canonical_ZIP": {
+      "bytes": 4374711,
+      "sha256": "77450e1d1b41ebc339b429452b24a4b9fccfd40cc5abd069b9657ac5195fe37d"
+    },
+    "portable_BUILD_INFO": {
+      "bytes": 161563,
+      "sha256": "6a100456ebd17a54d2ddd4408c9585b8c463d9ae442be1ccb9a84dd026c93472"
+    },
+    "new_builds": 0,
+    "source_root_replaced": false,
+    "production_acceptance": false,
+    "windows10_gameplay": "pending_user_test"
+  },
+  "sanitization": {
+    "absolute_private_paths_in_summary": false,
+    "archival_recipes_preserve_historical_local_dependency_paths": true,
+    "raw_build_include_link_manifests_included": false,
+    "raw_logs_settings_auth_included": false
+  }
+}

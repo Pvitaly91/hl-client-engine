@@ -1,0 +1,196 @@
+{
+  "schema": "hlc.stock-sky.release-files.v1",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "bytes": 21,
+      "sha256": "ed52ccb3541226d583cf18fa3a3c271a8fbf1c66fbc6d0ddc761f8034f25fff9"
+    },
+    {
+      "path": "client-source/tests/sky_eligibility_regressions.hpp",
+      "bytes": 19467,
+      "sha256": "00ead8131c294816e464bf83ecc54e433009da3a5451ff6c7e1793ae00859c77"
+    },
+    {
+      "path": "client-source/tests/sky_gl_call_counts.hpp",
+      "bytes": 4665,
+      "sha256": "4d33f792fd4dbec275a4ac6f7a3e9a6ca93480244316fdf3fd4e2bc2fe2cbca3"
+    },
+    {
+      "path": "client-source/tests/sky_gpu_queries.hpp",
+      "bytes": 14794,
+      "sha256": "f52d8a7182d8907de36af05a3ea0e39ac1ac9bf2e19b8e0388438c6e10797c5a"
+    },
+    {
+      "path": "client-source/tests/sky_stock_correction_correctness.hpp",
+      "bytes": 24080,
+      "sha256": "f983bed038381df6cec863652cd94733b486607ac2babb000f8b1487e823365b"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_external_process_fixture/main.cpp",
+      "bytes": 2807,
+      "sha256": "4c8566d85846dd469c089f5c7ea451d23c589848dffacf390ae8ce9d12a49473"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/gpu_preference.hpp",
+      "bytes": 18933,
+      "sha256": "9c8da88373a30285138ca12b642cb9ccec17f16d5de9f046b22c8e427f09e21e"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/main.cpp",
+      "bytes": 120211,
+      "sha256": "cbd8fe13021caa9c1356dc2bf2924e285e1b7d9146f8612135057e2d50ed71b6"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/original_half_life.hpp",
+      "bytes": 23558,
+      "sha256": "a91b53dd943372547e97810ae5075c2d86ce3c9fdc21437d047d752bf3aeb9ce"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/smooth_scroll_check.hpp",
+      "bytes": 5490,
+      "sha256": "be7cf0b0a857f4ece26df57ceea42e2dd36da4f92f7220d2106f8aedd730c65d"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/smooth_scroll.hpp",
+      "bytes": 3080,
+      "sha256": "349919df85743c68fc463155e5377f2c40908239d20b31a67d4b445247ba1ead"
+    },
+    {
+      "path": "launcher-source/apps/hlclient_launcher/startup_journal.hpp",
+      "bytes": 21983,
+      "sha256": "3a95b3986cd4e5aa93ab09ea49626e75ffbfab50eb002ec0988fc757ae5c8311"
+    },
+    {
+      "path": "launcher-source/include/hlclient/platform/windows/executable_launch_path.hpp",
+      "bytes": 3899,
+      "sha256": "67d2847b7e42077a7e9ff9a18b04562220091458d3f9ced41f9039d0159702a7"
+    },
+    {
+      "path": "launcher-source/include/hlclient/platform/windows/external_launcher.hpp",
+      "bytes": 7100,
+      "sha256": "2b00d7f58fcf821843598e3e83d4f0d71a8f0a50ba3d93227afe6c6263c9897f"
+    },
+    {
+      "path": "launcher-source/src/platform/windows/external_launcher.cpp",
+      "bytes": 22352,
+      "sha256": "b3bca454a5fea27930b036f8d6f8a4f51a8457623a5287155f49c3150a307e57"
+    },
+    {
+      "path": "launcher-source/tests/test_launcher_gpu_path_standalone.cpp",
+      "bytes": 16533,
+      "sha256": "cd3db80e48661d0faf7cefaccd1245ac0ed941d533467008535ecff13c0f9492"
+    },
+    {
+      "path": "client-source/tests/sky_disable_diagnostic_correctness.hpp",
+      "bytes": 24893,
+      "sha256": "37b63f8214d27e605a29f16ee756fe296fa235c26030e9953d71684c4187a9f1"
+    },
+    {
+      "path": "client-source/tests/sky_crossfire_control.hpp",
+      "bytes": 22591,
+      "sha256": "670c460ed48ac71dbde777672ccb661f1af55db8d835c87e8685574a62d6a036"
+    },
+    {
+      "path": "client-source/tests/sky_candidate_fixture.cpp",
+      "bytes": 58668,
+      "sha256": "60001f12f7c9d89aca889bf66a8ed5162aac2a530ac664dcc21a6b454c62b68b"
+    },
+    {
+      "path": "client-source/tests/sky_advanced_scenes.hpp",
+      "bytes": 12039,
+      "sha256": "2167937f319c71ea7d1c6f74d1af753f386dc4b168fae31ecfa982522d89735f"
+    },
+    {
+      "path": "CHECKPOINT.json",
+      "bytes": 35484,
+      "sha256": "dc00bc0b9f236253b8101c1ed3fb4123765e6112c2af714bee71d0aaed3b5987"
+    },
+    {
+      "path": "HLClientEngine-Win10.zip",
+      "bytes": 4374711,
+      "sha256": "77450e1d1b41ebc339b429452b24a4b9fccfd40cc5abd069b9657ac5195fe37d"
+    },
+    {
+      "path": "README_UK.txt",
+      "bytes": 3380,
+      "sha256": "fa005fe65bbc6df848c0ceab6e0a365cecc43ac2b0a78f2275f51799b8b90d30"
+    },
+    {
+      "path": "client-source/background_sky_policy.hpp",
+      "bytes": 2290,
+      "sha256": "c9eff9dc30c61fb7ab82f4e39b0c44a0e4af879b7b152c7dea2bf1e5d926f04d"
+    },
+    {
+      "path": "client-source/main.cpp",
+      "bytes": 601806,
+      "sha256": "a3c05d028a33155e2f57160cd641d7c2a696efa50444d2b74961bcaa8a98a466"
+    },
+    {
+      "path": "client-source/sky_candidate_api.hpp",
+      "bytes": 5919,
+      "sha256": "7701ce55f228bb4ab268731ff7396422560dc942c5842f6c836d71faf6903c4b"
+    },
+    {
+      "path": "client-source/sky_depth_guard.hpp",
+      "bytes": 3480,
+      "sha256": "c89921e33af17bba58d2a62e299e118bc3fc68b7c044f4d5912e324505f1b714"
+    },
+    {
+      "path": "recipes/build-client-archival.ps1",
+      "bytes": 26802,
+      "sha256": "09721eca8d662af69e333b9442191703336736979da2c692644cbd8478317704"
+    },
+    {
+      "path": "client-source/sky_diagnostic_entry.cpp",
+      "bytes": 250,
+      "sha256": "0c82482c0c51927530f898440b39ecc094df2e33bbbffc205e2351caee89de6c"
+    },
+    {
+      "path": "client-source/sky_disable_json.hpp",
+      "bytes": 3237,
+      "sha256": "90cb00ddf379578af55e6d743e9a1a8c765004303afa196ddb846a8b81b9cc2e"
+    },
+    {
+      "path": "client-source/sky_gameplay_capture.hpp",
+      "bytes": 7225,
+      "sha256": "6f7dee99e2da4dc9c362d9d2b53ff0273d1cbd3ef145b51c24d5f26d29857760"
+    },
+    {
+      "path": "client-source/sky_session_stats.hpp",
+      "bytes": 8788,
+      "sha256": "e2abf4bfc4c378454c0c39351b6c5f1c4312484885256d4b2e8434594f774628"
+    },
+    {
+      "path": "client-source/sky_stock_case_capture.hpp",
+      "bytes": 6604,
+      "sha256": "6a42652c14f804746d96bd4a3d4bec20a28477da5037f6a05791858310151c9b"
+    },
+    {
+      "path": "client-source/src/renderer/opengl/opengl_entity_renderer.cpp",
+      "bytes": 62965,
+      "sha256": "a78c66ae53104c8acc6502608039557bb3ab2e0556c689e9f124aaf65cef77d9"
+    },
+    {
+      "path": "client-source/src/renderer/opengl/opengl_renderer.cpp",
+      "bytes": 283613,
+      "sha256": "9a8b6df05b2176267f8fe9830456a33cebde073ac88f9d15834bbdabed18e410"
+    },
+    {
+      "path": "client-source/src/renderer/opengl/opengl_scene_target.hpp",
+      "bytes": 15768,
+      "sha256": "de22ec4855b422696594ca83e8b2e8e51c2762cfc695386f9778f42047f28d7a"
+    },
+    {
+      "path": "client-source/sky_diagnostic_json.hpp",
+      "bytes": 6610,
+      "sha256": "ee2de7aef40daa8f17b2b69eefe9a589b2e3a0890461618fef957c28b3b79a28"
+    },
+    {
+      "path": "recipes/build-launcher-archival.ps1",
+      "bytes": 20457,
+      "sha256": "b3a396f3519bf3450681118d4897c0f22d19ff42df3319003e404bc1de9ee4d3"
+    }
+  ],
+  "inventory_note": "FILES.json and SHA256SUMS excluded to avoid self-reference; SHA256SUMS covers FILES.json too."
+}
